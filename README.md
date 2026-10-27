@@ -33,7 +33,7 @@ Media dir (bind-mount, read-only) ──> ingestion; cache dir (clips/thumbs) �
 
 ```sh
 cp .env.example .env            # set MEDIA_DIR (read-only) and MEILI_MASTER_KEY
-docker compose up -d --build    # app on :8080 + meilisearch
+docker compose up -d              # pulls app image and starts app + meilisearch
 ```
 
 Open `http://localhost:8080`, go to **Admin → Library folders**, pick the folders to index
