@@ -196,7 +196,8 @@ func (s *Store) UpsertMedia(path, container string, size int64, mtime int64, tit
 		return 0, false, err
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
-		return res.LastInsertId(), true, nil
+		id, _ := res.LastInsertId()
+		return id, true, nil
 	}
 	// No rows changed: fetch existing id.
 	row := s.db.QueryRow(`SELECT id FROM media_files WHERE path=?`, path)
@@ -372,6 +373,25 @@ func (s *Store) CueCount(mediaFileID int64) (int64, error) {
 	return n, err
 }
 
+// CleanSubtitles removes tracks, cues and chunks for a media file in one transaction.
+func (s *Store) CleanSubtitles(mediaFileID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM cues WHERE media_file_id=?`, mediaFileID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM chunks WHERE media_file_id=?`, mediaFileID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM subtitle_tracks WHERE media_file_id=?`, mediaFileID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // CuesInRange returns cues with idx between start and end inclusive, plus one
 // neighbouring cue on each side for display context.
 func (s *Store) CuesInRange(mediaFileID int64, startIdx, endIdx int) (span, before, after []Cue, err error) {
@@ -476,12 +496,18 @@ type ChunkWithMedia struct {
 	Episode     int
 	DurationSec float64
 	FilePath    string
+	StartSec    float64
+	EndSec      float64
 }
+
+const chunkJoinCols = `c.id, c.media_file_id, c.start_cue_idx, c.end_cue_idx, c.text, c.indexed_at,
+	COALESCE(m.title,''), COALESCE(m.show_title,''), m.year, m.season, m.episode, m.duration_sec, m.path,
+	COALESCE((SELECT MIN(start_sec) FROM cues q WHERE q.media_file_id=c.media_file_id AND q.idx BETWEEN c.start_cue_idx AND c.end_cue_idx),0),
+	COALESCE((SELECT MAX(end_sec) FROM cues q WHERE q.media_file_id=c.media_file_id AND q.idx BETWEEN c.start_cue_idx AND c.end_cue_idx),0)`
 
 // PendingIndexChunks returns chunks not yet indexed, optionally scoped to one media file.
 func (s *Store) PendingIndexChunks(mediaFileID int64, limit int) ([]ChunkWithMedia, error) {
-	q := `SELECT c.id, c.media_file_id, c.start_cue_idx, c.end_cue_idx, c.text, c.indexed_at,
-		COALESCE(m.title,''), COALESCE(m.show_title,''), m.year, m.season, m.episode, m.duration_sec, m.path
+	q := `SELECT ` + chunkJoinCols + `
 		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
 		WHERE c.indexed_at = 0`
 	args := []any{}
@@ -525,6 +551,12 @@ func (s *Store) MarkChunksIndexed(ids []int64, at int64) error {
 
 func (s *Store) ClearChunkIndexFlags(mediaFileID int64) error {
 	_, err := s.db.Exec(`UPDATE chunks SET indexed_at=0 WHERE media_file_id=?`, mediaFileID)
+	return err
+}
+
+// EnsureAllChunksStale clears indexed_at on every chunk (used by full reindex).
+func (s *Store) EnsureAllChunksStale() error {
+	_, err := s.db.Exec(`UPDATE chunks SET indexed_at=0`)
 	return err
 }
 
@@ -852,13 +884,13 @@ func (s *Store) OldestCacheEntries(kinds ...string) ([]CacheEntry, error) {
 
 // GetChunkByKey resolves a chunk identity "mediaId:startIdx-endIdx".
 func (s *Store) GetChunkByKey(mediaID int64, startIdx, endIdx int) (*ChunkWithMedia, error) {
-	row := s.db.QueryRow(`SELECT c.id, c.media_file_id, c.start_cue_idx, c.end_cue_idx, c.text, c.indexed_at,
-		COALESCE(m.title,''), COALESCE(m.show_title,''), m.year, m.season, m.episode, m.duration_sec, m.path
+	row := s.db.QueryRow(`SELECT `+chunkJoinCols+`
 		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
 		WHERE c.media_file_id=? AND c.start_cue_idx=? AND c.end_cue_idx=?`, mediaID, startIdx, endIdx)
 	var c ChunkWithMedia
 	err := row.Scan(&c.ID, &c.MediaFileID, &c.StartCueIdx, &c.EndCueIdx, &c.Text, &c.IndexedAt,
-		&c.MediaTitle, &c.ShowTitle, &c.Year, &c.Season, &c.Episode, &c.DurationSec, &c.FilePath)
+		&c.MediaTitle, &c.ShowTitle, &c.Year, &c.Season, &c.Episode, &c.DurationSec, &c.FilePath,
+		&c.StartSec, &c.EndSec)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
