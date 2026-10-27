@@ -4,108 +4,28 @@ services:
   app:
     image: ghcr.io/ss44/quipster:latest
     pull_policy: always
-    # MEDIA_DIR must be a path the Docker daemon can read (kernel mounts or
-    # sshfs remounted with allow_other); create_host_path is disabled so the
-    # daemon never creates host directories.
-    ports: ["${APP_PORT:-8080}:8080"]
+    ports:
+      - "8080:8080"
     environment:
       MEILI_URL: http://meilisearch:7700
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}
       MEDIA_DIR: /media
       DATA_DIR: /data
       CACHE_DIR: /cache
-      LIBRARY_PATHS: ${LIBRARY_PATHS:-}
-      SUBTITLE_WORKERS: "4"
-      INDEX_WORKERS: "1"
-      CLIP_WORKERS: "2"
-      API_TOKEN: ${API_TOKEN:-}
-      CLIP_PAD_MS: "250"
-      MAX_CLIP_SEC: "120"
-      CACHE_MAX_GB: "10"
-      SCAN_INTERVAL: ${SCAN_INTERVAL:-}
     volumes:
       - type: bind
-        source: ${MEDIA_DIR:?set MEDIA_DIR in .env to your media library}
+        source: ${MEDIA_DIR:?set MEDIA_DIR in .env}
         target: /media
         read_only: true
         bind:
           create_host_path: false
-      - app-data:/data
-      - app-cache:/cache
-    depends_on:
-      meilisearch:
-        condition: service_healthy
-    restart: unless-stopped
-
-  worker:
-    profiles: ["workers"]
-    image: ghcr.io/ss44/quipster:latest
-    pull_policy: always
-    environment:
-      ROLE: worker
-      MEILI_URL: http://meilisearch:7700
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
-      MEDIA_DIR: /media
-      DATA_DIR: /data
-      CACHE_DIR: /cache
-      LIBRARY_PATHS: ${LIBRARY_PATHS:-}
-      SUBTITLE_WORKERS: "4"
-      INDEX_WORKERS: "1"
-      CLIP_WORKERS: "2"
-    volumes:
       - type: bind
-        source: ${MEDIA_DIR:?set MEDIA_DIR in .env to your media library}
-        target: /media
-        read_only: true
+        source: ${CACHE_DIR:?set CACHE_DIR in .env}
+        target: /cache
         bind:
           create_host_path: false
       - app-data:/data
-      - app-cache:/cache
-    depends_on:
-      meilisearch:
-        condition: service_healthy
-    deploy:
-      replicas: 1
-    restart: unless-stopped
-
-  meilisearch:
-    image: getmeili/meilisearch:v1.11
-    environment:
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
-      MEILI_NO_ANALYTICS: "true"
-      MEILI_HTTP_PAYLOAD_SIZE_LIMIT: 200MB
-    volumes:
-      - meili-data:/meili_data
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7700/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped
-
-  # GPU variant: docker compose --profile gpu up app-gpu
-  app-gpu:
-    profiles: ["gpu"]
-    image: ghcr.io/ss44/quipster:latest
-    pull_policy: always
-    ports: ["8080:8080"]
-    environment:
-      MEILI_URL: http://meilisearch:7700
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
-      MEDIA_DIR: /media
-      DATA_DIR: /data
-      CACHE_DIR: /cache
-      SUBTITLE_WORKERS: "4"
-      CLIP_WORKERS: "2"
-    volumes:
-      - type: bind
-        source: ${MEDIA_DIR:?set MEDIA_DIR in .env to your media library}
-        target: /media
-        read_only: true
-        bind:
-          create_host_path: false
-      - app-data:/data
-      - app-cache:/cache
+    devices:
       - /dev/dri:/dev/dri
     group_add:
       - render
@@ -115,7 +35,20 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  meilisearch:
+    image: getmeili/meilisearch:v1.11
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}
+      MEILI_NO_ANALYTICS: "true"
+    volumes:
+      - meili-data:/meili_data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7700/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
   app-data: {}
-  app-cache: {}
   meili-data: {}
