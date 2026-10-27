@@ -197,7 +197,7 @@ func (d Deps) handleChunk(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	mediaID, startIdx, endIdx, ok := parseChunkID(id)
 	if !ok {
-		writeErr(w, http.StatusBadRequest, "chunk id must be mediaId:startIdx-endIdx")
+		writeErr(w, http.StatusBadRequest, "chunk id must be mediaId_startCueIdx-endCueIdx")
 		return
 	}
 	ch, err := d.St.GetChunkByKey(mediaID, startIdx, endIdx)
@@ -229,7 +229,7 @@ func (d Deps) handleChunk(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseChunkID(id string) (int64, int, int, bool) {
-	parts := strings.SplitN(id, ":", 2)
+	parts := strings.SplitN(id, "_", 2)
 	if len(parts) != 2 {
 		return 0, 0, 0, false
 	}

@@ -52,7 +52,8 @@ type LineDoc struct {
 }
 
 func DocID(mediaID int64, startIdx, endIdx int) string {
-	return fmt.Sprintf("%d:%d-%d", mediaID, startIdx, endIdx)
+	// Meili doc ids allow alnum, "-", "_": use "_{mediaId}-{start}-{end}".
+	return fmt.Sprintf("%d_%d-%d", mediaID, startIdx, endIdx)
 }
 
 // EnsureSettings idempotently creates the index and applies MVP settings.

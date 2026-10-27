@@ -144,25 +144,25 @@ func (s *Store) Recover() error {
 func nowMillis() int64 { return time.Now().UnixMilli() }
 
 type MediaFile struct {
-	ID          int64
-	Path        string
-	Container   string
-	SizeBytes   int64
-	DurationSec float64
-	Width       int
-	Height      int
-	VideoCodec  string
-	AudioCodec  string
-	Title       string
-	Year        int
-	ShowTitle   string
-	Season      int
-	Episode     int
-	Mtime       int64
-	Status      string
-	Error       string
-	AddedAt     int64
-	StartTime   float64
+	ID          int64   `json:"id"`
+	Path        string  `json:"path"`
+	Container   string  `json:"container"`
+	SizeBytes   int64   `json:"sizeBytes"`
+	DurationSec float64 `json:"durationSec"`
+	Width       int     `json:"width"`
+	Height      int     `json:"height"`
+	VideoCodec  string  `json:"videoCodec"`
+	AudioCodec  string  `json:"audioCodec"`
+	Title       string  `json:"title"`
+	Year        int     `json:"year"`
+	ShowTitle   string  `json:"showTitle"`
+	Season      int     `json:"season"`
+	Episode     int     `json:"episode"`
+	Mtime       int64   `json:"mtime"`
+	Status      string  `json:"status"`
+	Error       string  `json:"error"`
+	AddedAt     int64   `json:"addedAt"`
+	StartTime   float64 `json:"startTime"`
 }
 
 const mediaCols = `id, path, container, size_bytes, duration_sec, width, height, video_codec, audio_codec,
@@ -237,8 +237,8 @@ func (s *Store) SetMediaStatus(id int64, status, errMsg string) error {
 }
 
 type MediaListPage struct {
-	Items []MediaFile
-	Total int64
+	Items []MediaFile `json:"items"`
+	Total int64       `json:"total"`
 }
 
 func (s *Store) ListMedia(limit, offset int, q string) (*MediaListPage, error) {
@@ -300,12 +300,12 @@ func (s *Store) DeleteMissing(root string, keep map[string]bool) ([]int64, error
 }
 
 type SubtitleTrack struct {
-	ID            int64
-	MediaFileID   int64
-	Source        string // sidecar | embedded
-	Lang          string
-	StreamIndex   int
-	ExtractedPath string
+	ID            int64  `json:"id"`
+	MediaFileID   int64  `json:"mediaFileId"`
+	Source        string `json:"source"` // sidecar | embedded
+	Lang          string `json:"lang"`
+	StreamIndex   int    `json:"streamIndex"`
+	ExtractedPath string `json:"extractedPath"`
 }
 
 func (s *Store) ReplaceTrack(mediaFileID int64, t *SubtitleTrack) (int64, error) {
@@ -338,14 +338,14 @@ func (s *Store) TracksForMedia(mediaFileID int64) ([]SubtitleTrack, error) {
 }
 
 type Cue struct {
-	ID          int64
-	MediaFileID int64
-	TrackID     int64
-	Idx         int
-	StartSec    float64
-	EndSec      float64
-	Text        string
-	ChunkID     int64
+	ID          int64   `json:"id"`
+	MediaFileID int64   `json:"mediaFileId"`
+	TrackID     int64   `json:"trackId"`
+	Idx         int     `json:"idx"`
+	StartSec    float64 `json:"startSec"`
+	EndSec      float64 `json:"endSec"`
+	Text        string  `json:"text"`
+	ChunkID     int64   `json:"chunkId"`
 }
 
 // ReplaceCues swaps the cue set for a media file within one transaction.
@@ -434,12 +434,12 @@ func (s *Store) cueAtIdx(mediaFileID int64, idx int) ([]Cue, error) {
 }
 
 type Chunk struct {
-	ID          int64
-	MediaFileID int64
-	StartCueIdx int
-	EndCueIdx   int
-	Text        string
-	IndexedAt   int64
+	ID          int64 `json:"id"`
+	MediaFileID int64 `json:"mediaFileId"`
+	StartCueIdx int   `json:"startCueIdx"`
+	EndCueIdx   int   `json:"endCueIdx"`
+	Text        string `json:"text"`
+	IndexedAt   int64  `json:"indexedAt"`
 }
 
 // ReplaceChunks swaps chunks for a media file and relinks cues by index range.
@@ -489,15 +489,15 @@ func (s *Store) ChunksForMedia(mediaFileID int64) ([]Chunk, error) {
 
 type ChunkWithMedia struct {
 	Chunk
-	MediaTitle  string
-	ShowTitle   string
-	Year        int
-	Season      int
-	Episode     int
-	DurationSec float64
-	FilePath    string
-	StartSec    float64
-	EndSec      float64
+	MediaTitle  string  `json:"mediaTitle"`
+	ShowTitle   string  `json:"showTitle"`
+	Year        int     `json:"year"`
+	Season      int     `json:"season"`
+	Episode     int     `json:"episode"`
+	DurationSec float64 `json:"durationSec"`
+	FilePath    string  `json:"filePath"`
+	StartSec    float64 `json:"startSec"`
+	EndSec      float64 `json:"endSec"`
 }
 
 const chunkJoinCols = `c.id, c.media_file_id, c.start_cue_idx, c.end_cue_idx, c.text, c.indexed_at,
@@ -581,18 +581,18 @@ func (s *Store) MediaIDsNeedingIndex(limit int) ([]int64, error) {
 }
 
 type Job struct {
-	ID         int64
-	Type       string
-	Payload    string
-	Status     string
-	Priority   int
-	Attempts   int
-	WorkerID   string
-	Error      string
-	Progress   float64
-	CreatedAt  int64
-	StartedAt  int64
-	FinishedAt int64
+	ID         int64   `json:"id"`
+	Type       string  `json:"type"`
+	Payload    string  `json:"payload"`
+	Status     string  `json:"status"`
+	Priority   int     `json:"priority"`
+	Attempts   int     `json:"attempts"`
+	WorkerID   string  `json:"workerId"`
+	Error      string  `json:"error"`
+	Progress   float64 `json:"progress"`
+	CreatedAt  int64   `json:"createdAt"`
+	StartedAt  int64   `json:"startedAt"`
+	FinishedAt int64   `json:"finishedAt"`
 }
 
 func (s *Store) EnqueueJob(jobType, payload string, priority int) (int64, error) {
@@ -709,13 +709,13 @@ func (s *Store) ListJobs(limit int) ([]Job, error) {
 }
 
 type Scan struct {
-	ID         int64
-	RootPath   string
-	Status     string
-	FilesSeen  int64
-	FilesDone  int64
-	StartedAt  int64
-	FinishedAt int64
+	ID         int64  `json:"id"`
+	RootPath   string `json:"rootPath"`
+	Status     string `json:"status"`
+	FilesSeen  int64  `json:"filesSeen"`
+	FilesDone  int64  `json:"filesDone"`
+	StartedAt  int64  `json:"startedAt"`
+	FinishedAt int64  `json:"finishedAt"`
 }
 
 func (s *Store) StartScan(root string) (int64, error) {

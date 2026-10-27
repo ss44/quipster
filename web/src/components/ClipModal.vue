@@ -8,11 +8,11 @@
     <v-card v-if="detail" :loading="detailLoading">
       <v-toolbar color="surface" flat>
         <v-toolbar-title class="text-subtitle-1">
-          {{ detail.media.Title || detail.media.ShowTitle }}
-          <span v-if="detail.media.ShowTitle && detail.media.Season" class="text-medium-emphasis">
-            S{{ pad(detail.media.Season) }}E{{ pad(detail.media.Episode) }}
+          {{ detail.media.title || detail.media.showTitle }}
+          <span v-if="detail.media.showTitle && detail.media.season" class="text-medium-emphasis">
+            S{{ pad(detail.media.season) }}E{{ pad(detail.media.episode) }}
           </span>
-          <span v-if="detail.media.Year" class="text-medium-emphasis"> ({{ detail.media.Year }})</span>
+          <span v-if="detail.media.year" class="text-medium-emphasis"> ({{ detail.media.year }})</span>
         </v-toolbar-title>
         <v-spacer />
         <v-btn icon="mdi-close" variant="text" @click="open = false" />

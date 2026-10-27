@@ -51,7 +51,7 @@ export interface Suggestion {
 }
 
 export interface ChunkDetail {
-  chunk: { id: number; media_file_id: number; start_cue_idx: number; end_cue_idx: number; text: string }
+  chunk: { id: number; mediaFileId: number; startCueIdx: number; endCueIdx: number; text: string }
   media: MediaFile
   cues: CueDTO[]
   contextBefore: CueDTO[]
@@ -59,22 +59,21 @@ export interface ChunkDetail {
 }
 
 export interface MediaFile {
-  ID: number
-  Path: string
-  Container: string
-  SizeBytes: number
-  DurationSec: number
-  Width: number
-  Height: number
-  VideoCodec: string
-  AudioCodec: string
-  Title: string
-  Year: number
-  ShowTitle: string
-  Season: number
-  Episode: number
-  Status: string
-  Error: string
+  id: number
+  path: string
+  container: string
+  durationSec: number
+  width: number
+  height: number
+  videoCodec: string
+  audioCodec: string
+  title: string
+  year: number
+  showTitle: string
+  season: number
+  episode: number
+  status: string
+  error: string
 }
 
 export interface Job {

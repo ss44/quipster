@@ -247,7 +247,7 @@ func (s *Service) Suggest(q string, limit int) ([]Suggestion, error) {
 }
 
 func parseDocID(id string) (mediaID int64, startIdx, endIdx int, ok bool) {
-	parts := strings.SplitN(id, ":", 2)
+	parts := strings.SplitN(id, "_", 2)
 	if len(parts) != 2 {
 		return 0, 0, 0, false
 	}
