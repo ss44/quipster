@@ -243,6 +243,7 @@ func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64
 	if s.HWAvailable() {
 		args := []string{"-v", "error", "-y", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
 			"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur),
+			"-map", "0:v:0", "-map", "0:a:0?", "-dn", "-sn",
 			"-vf", "scale_vaapi=w=960:h=-2:format=nv12", "-c:v", "h264_vaapi", "-qp", "32",
 			"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out}
 		if err := runFFmpeg(ctx, args); err == nil {
@@ -252,7 +253,8 @@ func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64
 		os.Remove(out)
 	}
 	args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
-		"-t", fmt.Sprintf("%.3f", dur), "-vf", "scale=960:-2",
+		"-t", fmt.Sprintf("%.3f", dur),
+		"-map", "0:v:0", "-map", "0:a:0?", "-dn", "-sn", "-vf", "scale=960:-2",
 		"-c:v", "libx264", "-preset", "ultrafast", "-crf", "32", "-tune", "zerolatency",
 		"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out}
 	if err := runFFmpeg(ctx, args); err != nil {
@@ -267,6 +269,7 @@ func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float6
 	if s.HWAvailable() {
 		args := []string{"-v", "error", "-y", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
 			"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur),
+			"-map", "0:v:0", "-map", "0:a:0?", "-dn", "-sn",
 			"-vf", "scale_vaapi=w=1280:h=720:format=nv12", "-c:v", "h264_vaapi", "-b:v", "2M",
 			"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out}
 		if err := runFFmpeg(ctx, args); err == nil {
@@ -277,7 +280,8 @@ func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float6
 		}
 	}
 	args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
-		"-t", fmt.Sprintf("%.3f", dur), "-vf", "scale=1280:-2",
+		"-t", fmt.Sprintf("%.3f", dur),
+		"-map", "0:v:0", "-map", "0:a:0?", "-dn", "-sn", "-vf", "scale=1280:-2",
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
 		"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out}
 	if err := runFFmpeg(ctx, args); err != nil {
