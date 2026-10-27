@@ -11,14 +11,14 @@ import (
 
 // Snapshot is the admin progress payload streamed over SSE each tick.
 type Snapshot struct {
-	Scan        *store.Scan     `json:"scan"`
-	Queue       *store.JobStats `json:"queue"`
+	Scan        *store.Scan      `json:"scan"`
+	Queue       *store.JobStats  `json:"queue"`
 	MediaCounts map[string]int64 `json:"mediaCounts"`
 	Lines       *store.LineStats `json:"lines"`
-	CacheBytes  int64           `json:"cacheBytes"`
-	Recent      []store.Job     `json:"recentJobs"`
-	Running     []store.Job     `json:"runningJobs"`
-	MeiliUp     bool            `json:"meiliUp"`
+	CacheBytes  int64            `json:"cacheBytes"`
+	Recent      []store.Job      `json:"recentJobs"`
+	Running     []store.Job      `json:"runningJobs"`
+	MeiliUp     bool             `json:"meiliUp"`
 }
 
 type Collector struct {
