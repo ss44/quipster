@@ -3,6 +3,9 @@ name: quipster
 services:
   app:
     build: .
+    # MEDIA_DIR must be a path the Docker daemon can read (kernel mounts or
+    # sshfs remounted with allow_other); create_host_path is disabled so the
+    # daemon never creates host directories.
     ports: ["${APP_PORT:-8080}:8080"]
     environment:
       MEILI_URL: http://meilisearch:7700
@@ -20,7 +23,12 @@ services:
       CACHE_MAX_GB: "10"
       SCAN_INTERVAL: ${SCAN_INTERVAL:-}
     volumes:
-      - ${MEDIA_DIR:?set MEDIA_DIR in .env}:/media:ro
+      - type: bind
+        source: ${MEDIA_DIR:?set MEDIA_DIR in .env to your media library}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
       - app-data:/data
       - app-cache:/cache
     depends_on:
@@ -43,7 +51,12 @@ services:
       INDEX_WORKERS: "1"
       CLIP_WORKERS: "2"
     volumes:
-      - ${MEDIA_DIR}:/media:ro
+      - type: bind
+        source: ${MEDIA_DIR:?set MEDIA_DIR in .env to your media library}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
       - app-data:/data
       - app-cache:/cache
     depends_on:
@@ -82,7 +95,12 @@ services:
       SUBTITLE_WORKERS: "4"
       CLIP_WORKERS: "2"
     volumes:
-      - ${MEDIA_DIR}:/media:ro
+      - type: bind
+        source: ${MEDIA_DIR:?set MEDIA_DIR in .env to your media library}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
       - app-data:/data
       - app-cache:/cache
       - /dev/dri:/dev/dri

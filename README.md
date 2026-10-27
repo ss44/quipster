@@ -108,6 +108,31 @@ before `go build` after frontend changes.
 - The Meili index is derived state — `POST /api/admin/reindex` rebuilds it from SQLite.
 - VAAPI is probed at startup; without `/dev/dri` the app uses CPU encoding automatically.
 
+## Troubleshooting
+
+**`failed to create mount source path ... mkdir /mnt/plex-library: file exists`**
+
+Docker's daemon runs as root and cannot see or enter FUSE mounts (sshfs/rclone) created by your
+user session — by default only the mounting user may access them. Docker then tries to create the
+missing bind source itself and fails. Fix the mount so root can access it, then mount the parent
+root (not a subfolder) and use the library-folders setting:
+
+```sh
+sudo sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
+fusermount -u /mnt/plex-library
+sshfs -o ro,allow_other,default_permissions bigrig:/media/plex-storage-new /mnt/plex-library
+```
+
+Persist it system-wide (requires the `allow_other` line above), e.g. in `/etc/fstab`:
+
+```
+bigrig:/media/plex-storage-new /mnt/plex-library fuse.sshfs ro,allow_other,default_permissions,IdentityFile=/home/shinda/.ssh/id_rsa,_netdev,nofail,x-systemd.automount 0 0
+```
+
+A kernel NFS mount is preferable to sshfs for throughput if the server exports it. The compose
+file uses `create_host_path: false`, so Docker will report a missing library path instead of
+silently creating host directories.
+
 ## License
 
 [MIT](LICENSE)
