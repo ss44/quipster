@@ -3,7 +3,7 @@ name: quipster
 services:
   app:
     build: .
-    ports: ["8080:8080"]
+    ports: ["${APP_PORT:-8080}:8080"]
     environment:
       MEILI_URL: http://meilisearch:7700
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}
@@ -60,7 +60,7 @@ services:
     volumes:
       - meili-data:/meili_data
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7700/health"]
       interval: 5s
       timeout: 3s
       retries: 10
