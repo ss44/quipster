@@ -20,7 +20,10 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	// WAL supports concurrent readers; writes serialize via busy_timeout and
+	// BEGIN IMMEDIATE transactions.
+	db.SetMaxOpenConns(16)
+	db.SetMaxIdleConns(16)
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, err

@@ -99,7 +99,9 @@ func (r *Runner) run(jobType string, j *store.Job) {
 		last = time.Now()
 		r.st.SetJobProgress(j.ID, p)
 	}
-	err := h(context.Background(), j, progress)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	defer cancel()
+	err := h(ctx, j, progress)
 	if err == nil {
 		if err := r.st.FinishJob(j.ID, "done", ""); err != nil {
 			log.Printf("[jobs] finish error job %d: %v", j.ID, err)

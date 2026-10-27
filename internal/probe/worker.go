@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 
 	"quipster/internal/chunks"
 	"quipster/internal/store"
@@ -18,6 +20,22 @@ import (
 type Pipeline struct {
 	St           *store.Store
 	SubsCacheDir string
+	// ExtractConns bounds parallel embedded-subtitle extractions; each one
+	// scans the entire media file, so unbounded parallelism thrashes storage.
+	ExtractConns int
+	extractSem   chan struct{}
+	once         sync.Once
+}
+
+func (p *Pipeline) sem() chan struct{} {
+	p.once.Do(func() {
+		n := p.ExtractConns
+		if n <= 0 {
+			n = 2
+		}
+		p.extractSem = make(chan struct{}, n)
+	})
+	return p.extractSem
 }
 
 // JobHandler adapts Pipeline to the job runner.
@@ -67,20 +85,39 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 			}
 		}
 		if len(cues) == 0 {
-			langs := make([]string, len(res.Subs))
+			// Choose an English TEXT subtitle stream; bitmap subs (pgs/vobsub)
+			// cannot convert to SRT and are skipped entirely.
+			pick, untaggedText := -1, -1
 			for i, s := range res.Subs {
-				langs[i] = s.Lang
+				if !IsTextSubtitle(s.Codec) {
+					continue
+				}
+				l := strings.ToLower(strings.TrimSpace(s.Lang))
+				if l == "en" || l == "eng" || strings.HasPrefix(l, "en-") {
+					pick = i
+					break
+				}
+				if l == "" && untaggedText == -1 {
+					untaggedText = i
+				}
 			}
-			if ord := subs.EnglishStream(langs); ord >= 0 {
+			if pick == -1 && untaggedText != -1 && len(res.Subs) == 1 {
+				pick = untaggedText
+			}
+			if pick >= 0 {
+				es := res.Subs[pick]
 				outPath := filepath.Join(p.SubsCacheDir, fmt.Sprintf("%d.srt", m.ID))
-				if xerr := ExtractSubtitle(m.Path, ord, outPath); xerr != nil {
+				p.sem() <- struct{}{}
+				xerr := ExtractSubtitle(ctx, m.Path, es.Ordinal, outPath)
+				<-p.sem()
+				if xerr != nil {
 					note = "embedded extraction failed: " + xerr.Error()
 				} else {
 					parsed, perr := subs.ParseFile(outPath)
 					if perr != nil {
 						note = "embedded subs unparsable: " + perr.Error()
 					} else {
-						track = store.SubtitleTrack{Source: "embedded", Lang: res.Subs[ord].Lang, StreamIndex: res.Subs[ord].Index, ExtractedPath: outPath}
+						track = store.SubtitleTrack{Source: "embedded", Lang: es.Lang, StreamIndex: es.Index, ExtractedPath: outPath}
 						cues = parsed
 					}
 				}

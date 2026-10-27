@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -127,10 +128,21 @@ func normalizeLang(l string) string {
 	return l
 }
 
-// ExtractSubtitle dumps one subtitle stream to SRT.
-func ExtractSubtitle(path string, ordinal int, outPath string) error {
-	cmd := exec.Command(FfmpegBin(), "-v", "error", "-y", "-i", path,
-		"-map", fmt.Sprintf("0:s:%d", ordinal), "-c:s", "srt", outPath)
+// textSubCodecs are subtitle codecs convertible to SRT; bitmap formats (pgs,
+// vobsub) are skipped since conversion would require a full-file read and fail.
+var textSubCodecs = map[string]bool{
+	"subrip": true, "srt": true, "mov_text": true, "ass": true, "ssa": true,
+	"webvtt": true, "text": true, "dvb_teletext": true,
+}
+
+// IsTextSubtitle reports whether the codec can be extracted to SRT.
+func IsTextSubtitle(codec string) bool { return textSubCodecs[strings.ToLower(codec)] }
+
+// ExtractSubtitle dumps one subtitle stream to SRT. Extraction requires
+// scanning the whole container, so callers should bound ctx.
+func ExtractSubtitle(ctx context.Context, path string, ordinal int, outPath string) error {
+	cmd := exec.CommandContext(ctx, FfmpegBin(), "-v", "error", "-y", "-i", path,
+		"-map", fmt.Sprintf("0:s:%d", ordinal), "-vn", "-an", "-c:s", "srt", outPath)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("extract subtitle stream %d: %w: %s", ordinal, err, strings.TrimSpace(string(b)))
 	}
