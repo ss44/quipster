@@ -23,6 +23,10 @@ Media dir (bind-mount, read-only) ──> ingestion; cache dir (clips/thumbs) �
   (`sha256(mediaId|start|end|mode|pad)`) and served with HTTP Range support.
 - **Subtitles (MVP):** sidecar `.srt`/`.vtt` (English-tagged or untagged) preferred, else the first
   English embedded text track is extracted. No English track → status `no_subs`, still findable by title.
+- **Audio:** the English-tagged audio track is selected during probe (default disposition preferred,
+  commentary/audio-description tracks avoided) and all clip modes map that exact stream, so
+  multilingual releases always yield English clips. `POST /api/admin/reprobe` re-runs selection for
+  already-processed files.
 - **Metadata (MVP):** filename/folder parsing for `Movies/` + `TV Shows/` layouts (title, year, SxxExx).
 
 ## Quickstart (Docker)
@@ -78,6 +82,7 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
 - Admin (`X-API-Token` when configured):
   - `POST /api/admin/scan[?root=subdir]`
   - `POST /api/admin/reindex` — rebuild the Meili index from SQLite
+  - `POST /api/admin/reprobe` — re-run probe/audio-subtitle selection for processed files
   - `GET /api/admin/status`, `GET /api/admin/events` (SSE, 1s tick), `GET /api/admin/jobs`
 
 ## Development

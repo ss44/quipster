@@ -178,7 +178,7 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 			dur = s.cfg.MaxClipSec
 		}
 		var err error
-		path, err = s.cutFast(ctx, m.Path, start, dur, filepath.Join(outDir, key))
+		path, err = s.cutFast(ctx, m.Path, start, dur, m.AudioStreamIndex, filepath.Join(outDir, key))
 		if err != nil {
 			return "", "", err
 		}
@@ -193,9 +193,9 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 		}
 		var err error
 		if r.Mode == "preview" {
-			path, err = s.cutPreview(ctx, m.Path, start, dur, filepath.Join(outDir, key))
+			path, err = s.cutPreview(ctx, m.Path, start, dur, m.AudioStreamIndex, filepath.Join(outDir, key))
 		} else {
-			path, err = s.cutAccurate(ctx, m.Path, start, dur, filepath.Join(outDir, key))
+			path, err = s.cutAccurate(ctx, m.Path, start, dur, m.AudioStreamIndex, filepath.Join(outDir, key))
 		}
 		if err != nil {
 			return "", "", err
@@ -213,18 +213,20 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 
 // cutFast stream-copies the clip region. Input-side seek lets ffmpeg start at
 // the keyframe at or before `start` in a single pass — no separate probe.
-func (s *Service) cutFast(ctx context.Context, src string, start, dur float64, outBase string) (string, error) {
+func (s *Service) cutFast(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
 	mp4 := outBase + ".mp4"
 	args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
-		"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0", "-map", "0:a:0?",
-		"-dn", "-sn", "-map_chapters", "-1", "-c", "copy", "-avoid_negative_ts", "make_zero",
-		"-movflags", "+faststart", mp4}
+		"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
+	args = append(args, audioMapArgs(audioOrdinal)...)
+	args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-c", "copy", "-avoid_negative_ts", "make_zero",
+		"-movflags", "+faststart", mp4)
 	if err := runFFmpeg(ctx, args); err != nil {
 		log.Printf("[clips] mp4 remux failed (%v), falling back to matroska", err)
 		mkv := outBase + ".mkv"
 		args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
-			"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0", "-map", "0:a:0?",
-			"-dn", "-sn", "-map_chapters", "-1", "-c", "copy", "-avoid_negative_ts", "make_zero", mkv}
+			"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
+		args = append(args, audioMapArgs(audioOrdinal)...)
+		args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-c", "copy", "-avoid_negative_ts", "make_zero", mkv)
 		if err2 := runFFmpeg(ctx, args); err2 != nil {
 			os.Remove(mp4)
 			return "", fmt.Errorf("fast cut failed: %v / %v", err, err2)
@@ -238,14 +240,16 @@ func (s *Service) cutFast(ctx context.Context, src string, start, dur float64, o
 
 // cutPreview transcodes a small, browser-playable clip as fast as possible;
 // preview quality is intentionally low (ultrafast x264 @ 960px).
-func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64, outBase string) (string, error) {
+func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
 	out := outBase + ".mp4"
 	if s.HWAvailable() {
 		args := []string{"-v", "error", "-y", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
-			"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur),
-			"-map", "0:v:0", "-map", "0:a:0?", "-dn", "-sn", "-map_chapters", "-1",
+			"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
+		args = append(args, audioMapArgs(audioOrdinal)...)
+		args = append(args,
+			"-dn", "-sn", "-map_chapters", "-1",
 			"-vf", "scale_vaapi=w=960:h=-2:format=nv12", "-c:v", "h264_vaapi", "-qp", "32",
-			"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out}
+			"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out)
 		if err := runFFmpeg(ctx, args); err == nil {
 			return out, nil
 		}
@@ -253,10 +257,11 @@ func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64
 		os.Remove(out)
 	}
 	args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
-		"-t", fmt.Sprintf("%.3f", dur),
-		"-map", "0:v:0", "-map", "0:a:0?", "-dn", "-sn", "-map_chapters", "-1", "-vf", "scale=960:-2",
+		"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
+	args = append(args, audioMapArgs(audioOrdinal)...)
+	args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-vf", "scale=960:-2",
 		"-c:v", "libx264", "-preset", "ultrafast", "-crf", "32", "-tune", "zerolatency",
-		"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out}
+		"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out)
 	if err := runFFmpeg(ctx, args); err != nil {
 		os.Remove(out)
 		return "", fmt.Errorf("preview cut failed: %w", err)
@@ -264,14 +269,16 @@ func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64
 	return out, nil
 }
 
-func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float64, outBase string) (string, error) {
+func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
 	out := outBase + ".mp4"
 	if s.HWAvailable() {
 		args := []string{"-v", "error", "-y", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
-			"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur),
-			"-map", "0:v:0", "-map", "0:a:0?", "-dn", "-sn", "-map_chapters", "-1",
+			"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
+		args = append(args, audioMapArgs(audioOrdinal)...)
+		args = append(args,
+			"-dn", "-sn", "-map_chapters", "-1",
 			"-vf", "scale_vaapi=w=1280:h=720:format=nv12", "-c:v", "h264_vaapi", "-b:v", "2M",
-			"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out}
+			"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out)
 		if err := runFFmpeg(ctx, args); err == nil {
 			return out, nil
 		} else {
@@ -280,15 +287,25 @@ func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float6
 		}
 	}
 	args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
-		"-t", fmt.Sprintf("%.3f", dur),
-		"-map", "0:v:0", "-map", "0:a:0?", "-dn", "-sn", "-map_chapters", "-1", "-vf", "scale=1280:-2",
+		"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
+	args = append(args, audioMapArgs(audioOrdinal)...)
+	args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-vf", "scale=1280:-2",
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-		"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out}
+		"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out)
 	if err := runFFmpeg(ctx, args); err != nil {
 		os.Remove(out)
 		return "", fmt.Errorf("accurate cut failed: %w", err)
 	}
 	return out, nil
+}
+
+// audioMapArgs maps the media's chosen English audio stream. Optional '?' keeps
+// ffmpeg from failing if a stale probe points past the track list.
+func audioMapArgs(ordinal int) []string {
+	if ordinal < 0 {
+		return nil
+	}
+	return []string{"-map", fmt.Sprintf("0:a:%d?", ordinal)}
 }
 
 func runFFmpeg(ctx context.Context, args []string) error {
@@ -379,13 +396,18 @@ func (s *Service) RunWithProgress(ctx context.Context, r Request, report func(fl
 	if s.HWAvailable() {
 		args = []string{"-progress", "pipe:1", "-nostats", "-v", "error", "-y", "-hwaccel", "vaapi",
 			"-hwaccel_output_format", "vaapi", "-ss", fmt.Sprintf("%.3f", start), "-i", m.Path,
-			"-t", fmt.Sprintf("%.3f", dur), "-vf", "scale_vaapi=w=1280:h=720:format=nv12",
-			"-c:v", "h264_vaapi", "-b:v", "2M", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", path}
+			"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
+		args = append(args, audioMapArgs(m.AudioStreamIndex)...)
+		args = append(args, "-dn", "-sn", "-map_chapters", "-1",
+			"-vf", "scale_vaapi=w=1280:h=720:format=nv12",
+			"-c:v", "h264_vaapi", "-b:v", "2M", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", path)
 	} else {
 		args = []string{"-progress", "pipe:1", "-nostats", "-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start),
-			"-i", m.Path, "-t", fmt.Sprintf("%.3f", dur), "-vf", "scale=1280:-2",
+			"-i", m.Path, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
+		args = append(args, audioMapArgs(m.AudioStreamIndex)...)
+		args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-vf", "scale=1280:-2",
 			"-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "128k",
-			"-movflags", "+faststart", path}
+			"-movflags", "+faststart", path)
 	}
 	if err := runFFmpegProgress(ctx, args, dur, report); err != nil {
 		// vaapi may fail mid-run; retry once on cpu
@@ -393,9 +415,11 @@ func (s *Service) RunWithProgress(ctx context.Context, r Request, report func(fl
 			os.Remove(path)
 			args = args[:0]
 			args = append(args, "-progress", "pipe:1", "-nostats", "-v", "error", "-y", "-ss",
-				fmt.Sprintf("%.3f", start), "-i", m.Path, "-t", fmt.Sprintf("%.3f", dur),
-				"-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-				"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", path)
+				fmt.Sprintf("%.3f", start), "-i", m.Path, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0")
+			args = append(args, audioMapArgs(m.AudioStreamIndex)...)
+			args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-vf", "scale=1280:-2",
+				"-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "128k",
+				"-movflags", "+faststart", path)
 			if err2 := runFFmpegProgress(ctx, args, dur, report); err2 != nil {
 				os.Remove(path)
 				f.err = err2

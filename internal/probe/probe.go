@@ -17,6 +17,16 @@ type SubtitleStream struct {
 	Lang    string
 }
 
+type AudioStream struct {
+	Index    int // absolute ffprobe stream index
+	Ordinal  int // index among audio streams only
+	Codec    string
+	Lang     string
+	Title    string // track title, e.g. "Commentary"
+	Default  bool
+	Channels int
+}
+
 type Result struct {
 	Duration   float64
 	Width      int
@@ -26,6 +36,7 @@ type Result struct {
 	Container  string
 	StartTime  float64
 	Subs       []SubtitleStream
+	Audio      []AudioStream
 }
 
 type ffprobeOut struct {
@@ -35,6 +46,7 @@ type ffprobeOut struct {
 		CodecType   string `json:"codec_type"`
 		Width       int    `json:"width"`
 		Height      int    `json:"height"`
+		Channels    int    `json:"channels"`
 		Duration    string `json:"duration"`
 		Disposition struct {
 			Default int `json:"default"`
@@ -94,6 +106,7 @@ func Probe(path string) (*Result, error) {
 		r.StartTime, _ = strconv.ParseFloat(o.Format.StartTime, 64)
 	}
 	ord := 0
+	audioOrd := 0
 	for _, s := range o.Streams {
 		switch s.CodecType {
 		case "video":
@@ -103,9 +116,16 @@ func Probe(path string) (*Result, error) {
 				r.Height = s.Height
 			}
 		case "audio":
-			if r.AudioCodec == "" {
-				r.AudioCodec = s.CodecName
-			}
+			r.Audio = append(r.Audio, AudioStream{
+				Index:    s.Index,
+				Ordinal:  audioOrd,
+				Codec:    s.CodecName,
+				Lang:     normalizeLang(s.Tags["language"]),
+				Title:    s.Tags["title"],
+				Default:  s.Disposition.Default == 1,
+				Channels: s.Channels,
+			})
+			audioOrd++
 		case "subtitle":
 			r.Subs = append(r.Subs, SubtitleStream{
 				Index:   s.Index,
@@ -116,7 +136,46 @@ func Probe(path string) (*Result, error) {
 			ord++
 		}
 	}
+	if chosen := PickEnglishAudio(r.Audio); chosen != nil {
+		r.AudioCodec = chosen.Codec
+	}
 	return r, nil
+}
+
+// PickEnglishAudio selects the audio track to use for clips. English-tagged
+// tracks win (default disposition preferred), commentary/audio-description
+// tracks are avoided, then the default track, then the first usable track.
+func PickEnglishAudio(tracks []AudioStream) *AudioStream {
+	if len(tracks) == 0 {
+		return nil
+	}
+	usable := func(t AudioStream) bool {
+		tl := strings.ToLower(t.Title)
+		return !strings.Contains(tl, "commentary") && !strings.Contains(tl, "description")
+	}
+	var best *AudioStream
+	for i := range tracks {
+		t := &tracks[i]
+		if usable(*t) && t.Lang == "en" {
+			if best == nil || (t.Default && !best.Default) {
+				best = t
+			}
+		}
+	}
+	if best != nil {
+		return best
+	}
+	for i := range tracks {
+		if usable(tracks[i]) && tracks[i].Default {
+			return &tracks[i]
+		}
+	}
+	for i := range tracks {
+		if usable(tracks[i]) {
+			return &tracks[i]
+		}
+	}
+	return &tracks[0]
 }
 
 func normalizeLang(l string) string {

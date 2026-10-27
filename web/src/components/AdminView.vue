@@ -97,6 +97,9 @@
               <v-btn variant="tonal" prepend-icon="mdi-database-refresh" :loading="reindexing" @click="doReindex">
                 Rebuild search index
               </v-btn>
+              <v-btn variant="tonal" prepend-icon="mdi-refresh-circle" :loading="reprobing" @click="doReprobe">
+                Re-probe files
+              </v-btn>
             </div>
 
             <template v-if="snap?.scan">
@@ -223,6 +226,7 @@ const jobs = ref<Job[]>([])
 const scanRoot = ref('')
 const scanning = ref(false)
 const reindexing = ref(false)
+const reprobing = ref(false)
 let es: EventSource | null = null
 let poller: number | null = null
 
@@ -301,6 +305,16 @@ async function doReindex() {
     await refreshJobs()
   } finally {
     reindexing.value = false
+  }
+}
+
+async function doReprobe() {
+  reprobing.value = true
+  try {
+    await api.reprobe()
+    await refreshJobs()
+  } finally {
+    reprobing.value = false
   }
 }
 

@@ -63,7 +63,10 @@ func (s *Store) migrate() error {
 			status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','indexed','no_subs','error')),
 			error TEXT NOT NULL DEFAULT '',
 			added_at INTEGER NOT NULL DEFAULT 0,
-			start_time REAL NOT NULL DEFAULT 0
+			start_time REAL NOT NULL DEFAULT 0,
+			ever_indexed INTEGER NOT NULL DEFAULT 0,
+			audio_stream_index INTEGER NOT NULL DEFAULT 0,
+			audio_lang TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE TABLE IF NOT EXISTS subtitle_tracks (
 			id INTEGER PRIMARY KEY,
@@ -132,13 +135,20 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
-	var col int64
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('media_files') WHERE name='ever_indexed'`).Scan(&col); err != nil {
-		return err
+	migrations := []struct{ name, ddl string }{
+		{"ever_indexed", "INTEGER NOT NULL DEFAULT 0"},
+		{"audio_stream_index", "INTEGER NOT NULL DEFAULT 0"},
+		{"audio_lang", "TEXT NOT NULL DEFAULT ''"},
 	}
-	if col == 0 {
-		if _, err := s.db.Exec(`ALTER TABLE media_files ADD COLUMN ever_indexed INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return fmt.Errorf("migrate ever_indexed: %w", err)
+	for _, m := range migrations {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('media_files') WHERE name=?`, m.name).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := s.db.Exec(`ALTER TABLE media_files ADD COLUMN ` + m.name + ` ` + m.ddl); err != nil {
+				return fmt.Errorf("migrate %s: %w", m.name, err)
+			}
 		}
 	}
 	return nil
@@ -172,16 +182,21 @@ type MediaFile struct {
 	Error       string  `json:"error"`
 	AddedAt     int64   `json:"addedAt"`
 	StartTime   float64 `json:"startTime"`
+
+	AudioStreamIndex int    `json:"audioStreamIndex"`
+	AudioLang        string `json:"audioLang"`
 }
 
 const mediaCols = `id, path, container, size_bytes, duration_sec, width, height, video_codec, audio_codec,
-	title, year, show_title, season, episode, mtime, status, error, added_at, start_time`
+	title, year, show_title, season, episode, mtime, status, error, added_at, start_time,
+	audio_stream_index, audio_lang`
 
 func scanMedia(row interface{ Scan(...any) error }) (*MediaFile, error) {
 	var m MediaFile
 	err := row.Scan(&m.ID, &m.Path, &m.Container, &m.SizeBytes, &m.DurationSec, &m.Width, &m.Height,
 		&m.VideoCodec, &m.AudioCodec, &m.Title, &m.Year, &m.ShowTitle, &m.Season, &m.Episode,
-		&m.Mtime, &m.Status, &m.Error, &m.AddedAt, &m.StartTime)
+		&m.Mtime, &m.Status, &m.Error, &m.AddedAt, &m.StartTime,
+		&m.AudioStreamIndex, &m.AudioLang)
 	if err != nil {
 		return nil, err
 	}
@@ -234,9 +249,9 @@ func (s *Store) GetMediaByPath(path string) (*MediaFile, error) {
 	return m, err
 }
 
-func (s *Store) UpdateMediaProbe(id int64, duration float64, width, height int, vcodec, acodec, container string, startTime float64) error {
-	_, err := s.db.Exec(`UPDATE media_files SET duration_sec=?, width=?, height=?, video_codec=?, audio_codec=?, container=?, start_time=? WHERE id=?`,
-		duration, width, height, vcodec, acodec, container, startTime, id)
+func (s *Store) UpdateMediaProbe(id int64, duration float64, width, height int, vcodec, acodec, container string, startTime float64, audioStream int, audioLang string) error {
+	_, err := s.db.Exec(`UPDATE media_files SET duration_sec=?, width=?, height=?, video_codec=?, audio_codec=?, container=?, start_time=?, audio_stream_index=?, audio_lang=? WHERE id=?`,
+		duration, width, height, vcodec, acodec, container, startTime, audioStream, audioLang, id)
 	return err
 }
 
@@ -929,6 +944,29 @@ func (s *Store) MediaStatusCounts() (map[string]int64, error) {
 			return nil, err
 		}
 		out[st] = n
+	}
+	return out, rows.Err()
+}
+
+// MediaIDsByStatus lists media ids matching any of the given statuses.
+func (s *Store) MediaIDsByStatus(statuses ...string) ([]int64, error) {
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
+	args := make([]any, 0, len(statuses))
+	for _, st := range statuses {
+		args = append(args, st)
+	}
+	rows, err := s.db.Query(`SELECT id FROM media_files WHERE status IN (`+ph+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
 	}
 	return out, rows.Err()
 }

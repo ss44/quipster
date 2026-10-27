@@ -65,7 +65,13 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 			p.St.SetMediaStatus(m.ID, "error", err.Error())
 			return nil
 		}
-		if err := p.St.UpdateMediaProbe(m.ID, res.Duration, res.Width, res.Height, res.VideoCodec, res.AudioCodec, res.Container, res.StartTime); err != nil {
+		audioOrdinal, audioLang := 0, ""
+		if chosen := PickEnglishAudio(res.Audio); chosen != nil {
+			audioOrdinal, audioLang = chosen.Ordinal, chosen.Lang
+		} else {
+			audioOrdinal = -1
+		}
+		if err := p.St.UpdateMediaProbe(m.ID, res.Duration, res.Width, res.Height, res.VideoCodec, res.AudioCodec, res.Container, res.StartTime, audioOrdinal, audioLang); err != nil {
 			return err
 		}
 		progress(0.3)

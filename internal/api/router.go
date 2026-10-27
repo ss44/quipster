@@ -71,6 +71,7 @@ func Router(d Deps) http.Handler {
 		}
 		r.Post("/api/admin/scan", d.handleScan)
 		r.Post("/api/admin/reindex", d.handleReindex)
+		r.Post("/api/admin/reprobe", d.handleReprobe)
 		r.Get("/api/admin/status", d.handleStatus)
 		r.Get("/api/admin/events", d.Events.Handler())
 		r.Get("/api/admin/jobs", d.handleJobs)
@@ -408,6 +409,24 @@ func (d Deps) handleReindex(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	writeJSON(w, map[string]any{"enqueued": n})
+}
+
+// handleReprobe re-runs probe (metadata/audio/subtitle selection) for media
+// that already finished, e.g. after a pipeline improvement.
+func (d Deps) handleReprobe(w http.ResponseWriter, r *http.Request) {
+	ids, err := d.St.MediaIDsByStatus("indexed", "no_subs", "error")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	n := 0
+	for _, id := range ids {
+		payload, _ := json.Marshal(map[string]any{"mediaId": id})
+		if _, err := d.St.EnqueueJob("probe", string(payload), 2); err == nil {
+			n++
+		}
 	}
 	writeJSON(w, map[string]any{"enqueued": n})
 }

@@ -140,6 +140,7 @@ export const api = {
   scan: (root: string) =>
     fetch(`/api/admin/scan${root ? `?root=${encodeURIComponent(root)}` : ''}`, { method: 'POST' }).then((r) => r.json()),
   reindex: () => fetch('/api/admin/reindex', { method: 'POST' }).then((r) => r.json()),
+  reprobe: () => fetch('/api/admin/reprobe', { method: 'POST' }).then((r) => r.json()),
   jobs: () => getJSON<{ jobs: Job[] }>('/api/admin/jobs?limit=100'),
 }
 
