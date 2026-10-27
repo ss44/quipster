@@ -182,10 +182,26 @@ func findYear(s string) int {
 	return y
 }
 
-func stripYear(s string) string {
+var reTrailingYear = regexp.MustCompile(`[ ._-](?:19|20)\d{2}\s*$`)
+
+// stripYear removes parenthesised years and a trailing year, but only when the
+// trailing year matches the release year — keeping "Blade Runner 2049 (2017)"
+// and "1917 (2019)" intact while cleaning "The Matrix 1999.1080p".
+func stripYear(s string, year int) string {
 	s = reParenYear.ReplaceAllString(s, " ")
-	s = reYear.ReplaceAllString(s, " ")
-	return cleanTitle(s)
+	s = cleanTitle(s)
+	if year > 0 {
+		re := regexp.MustCompile(`[ ._-]` + strconv.Itoa(year) + `\s*$`)
+		s = strings.TrimSpace(strings.TrimRight(re.ReplaceAllString(s, " "), " -–"))
+		return strings.TrimSpace(s)
+	}
+	return strings.TrimSpace(strings.TrimRight(reTrailingYear.ReplaceAllString(s, " "), " -–"))
+}
+
+// bareYearTitle recovers numeric-only titles ("1984") from a filename.
+func bareYearTitle(s string) string {
+	t := strings.TrimSpace(reParenYear.ReplaceAllString(cleanTitle(s), ""))
+	return strings.TrimSpace(strings.Trim(t, " -–"))
 }
 
 func titleCase(s string) string {
@@ -248,7 +264,7 @@ func Parse(relPath string) Parsed {
 					p.Title = cleanTitle(name[len(mm[0]):])
 				}
 				if i > 0 {
-					p.ShowTitle = stripYear(cleanTitle(folders[i-1]))
+					p.ShowTitle = stripYear(cleanTitle(folders[i-1]), findYear(folders[i-1]))
 				}
 				break
 			}
@@ -256,28 +272,31 @@ func Parse(relPath string) Parsed {
 	}
 
 	if !p.IsTV {
-		p.Title = stripYear(name)
 		p.Year = findYear(name)
 		if p.Year == 0 && len(folders) > 0 {
 			p.Year = findYear(folders[len(folders)-1])
 		}
+		p.Title = stripYear(name, p.Year)
+		if p.Title == "" {
+			p.Title = bareYearTitle(name)
+		}
 		if p.Title == "" && len(folders) > 0 {
-			p.Title = stripYear(cleanTitle(folders[len(folders)-1]))
+			p.Title = stripYear(cleanTitle(folders[len(folders)-1]), p.Year)
 		}
 	}
 
 	if p.IsTV {
 		if len(folders) > 0 {
-			cand := stripYear(cleanTitle(folders[len(folders)-1]))
+			cand := stripYear(cleanTitle(folders[len(folders)-1]), findYear(folders[len(folders)-1]))
 			if reSeasonDir.MatchString(strings.ToLower(cand)) && len(folders) > 1 {
-				cand = stripYear(cleanTitle(folders[len(folders)-2]))
+				cand = stripYear(cleanTitle(folders[len(folders)-2]), findYear(folders[len(folders)-2]))
 			}
 			if cand != "" && (p.ShowTitle == "" || inTVRoot) {
 				p.ShowTitle = cand
 			}
 		}
 		if p.ShowTitle == "" {
-			p.ShowTitle = stripYear(name)
+			p.ShowTitle = stripYear(name, p.Year)
 		}
 		if p.Title == p.ShowTitle {
 			p.Title = ""
@@ -295,7 +314,7 @@ func Parse(relPath string) Parsed {
 	p.Title = titleCase(strings.TrimSpace(p.Title))
 	p.ShowTitle = titleCase(strings.TrimSpace(p.ShowTitle))
 	if p.Title == "" && !p.IsTV {
-		p.Title = titleCase(stripYear(name))
+		p.Title = titleCase(stripYear(name, p.Year))
 	}
 	return p
 }
