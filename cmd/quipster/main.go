@@ -148,10 +148,15 @@ func main() {
 	collector := &events.Collector{St: st, MeiliUp: ix.Healthy}
 
 	runner := jobs.NewRunner(st, "worker")
+	runner.SetJobTimeout(parseDuration(envStr("JOB_TIMEOUT", "3h")))
 	if cfg.role == "all" || cfg.role == "worker" {
 		onDeleted := func(ids []int64) { ix.DeleteMedia(ids) }
 		runner.Register("scan", 1, scan.JobHandler(cfg.mediaDir, st, onDeleted))
-		pipeline := &probe.Pipeline{St: st, SubsCacheDir: filepath.Join(cfg.cacheDir, "subs")}
+		pipeline := &probe.Pipeline{
+			St:           st,
+			SubsCacheDir: filepath.Join(cfg.cacheDir, "subs"),
+			ExtractConns: envInt("EXTRACT_CONNS", 4),
+		}
 		runner.Register("probe", cfg.subWorkers, pipeline.JobHandler())
 		runner.Register("index", cfg.indexWorkers, ix.JobHandler())
 		runner.Register("clip", cfg.clipWorkers, clipSvc.JobHandler())

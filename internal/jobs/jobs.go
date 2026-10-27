@@ -17,6 +17,7 @@ type Runner struct {
 	st          *store.Store
 	workerName  string
 	maxAttempts int
+	jobTimeout  time.Duration
 
 	mu       sync.Mutex
 	handlers map[string]Handler
@@ -29,8 +30,16 @@ func NewRunner(st *store.Store, workerName string) *Runner {
 		st:          st,
 		workerName:  workerName,
 		maxAttempts: 3,
+		jobTimeout:  3 * time.Hour,
 		handlers:    map[string]Handler{},
 		quits:       map[string][]chan struct{}{},
+	}
+}
+
+// SetJobTimeout bounds each job execution (0 keeps the default 3h).
+func (r *Runner) SetJobTimeout(d time.Duration) {
+	if d > 0 {
+		r.jobTimeout = d
 	}
 }
 
@@ -99,7 +108,7 @@ func (r *Runner) run(jobType string, j *store.Job) {
 		last = time.Now()
 		r.st.SetJobProgress(j.ID, p)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), r.jobTimeout)
 	defer cancel()
 	err := h(ctx, j, progress)
 	if err == nil {

@@ -53,6 +53,8 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
 | `MEILI_MASTER_KEY` | — | Meilisearch key |
 | `SCAN_INTERVAL` | off | e.g. `12h` periodic rescan |
 | `SUBTITLE_WORKERS` | `4` | probe/extract/chunk worker pool |
+| `EXTRACT_CONNS` | `4` | parallel embedded-subtitle extractions (each scans the whole file; tune to storage throughput) |
+| `JOB_TIMEOUT` | `3h` | hard per-job timeout |
 | `INDEX_WORKERS` | `1` | Meili indexer pool |
 | `CLIP_WORKERS` | `2` | async clip render pool |
 | `CLIP_PAD_MS` | `250` | head+tail padding |
