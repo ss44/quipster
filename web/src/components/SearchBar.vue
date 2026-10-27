@@ -1,132 +1,260 @@
 <template>
   <div class="search-wrap">
-    <v-autocomplete
+    <v-menu
+      v-model="menuOpen"
+      :activator="fieldEl"
+      :close-on-content-click="false"
+      location="bottom"
+      offset="6"
+      :width="menuWidth"
+      content-class="search-menu"
+    >
+      <template #default>
+        <div class="menu-panel">
+          <button
+            v-for="(item, index) in suggestions"
+            :key="item.text"
+            type="button"
+            class="menu-item"
+            :class="{ hovered: index === active }"
+            @mousedown.prevent="choose(item.text)"
+            @mouseenter="active = index"
+          >
+            <span class="menu-text" v-html="item.textMarked || item.text" />
+          </button>
+          <p v-if="!suggestions.length" class="menu-empty">No matching lines</p>
+          <div class="menu-foot">
+            <span><kbd class="kbd">↵</kbd> search</span>
+            <span><kbd class="kbd">esc</kbd> close</span>
+          </div>
+        </div>
+      </template>
+    </v-menu>
+
+    <v-text-field
       ref="field"
-      v-model="selected"
-      v-model:search="query"
-      :items="suggestions"
-      :loading="loading"
-      :menu-props="{ maxHeight: 420 }"
-      placeholder="Search any line of dialogue…"
-      variant="solo-filled"
+      v-model="query"
+      placeholder="Search dialogue across your library…"
+      variant="solo"
       flat
-      density="comfortable"
-      rounded="xl"
+      rounded="lg"
+      density="compact"
       hide-details
       clearable
-      hide-no-data
-      no-filter
-      item-title="text"
-      return-object
       class="search-field"
-      prepend-inner-icon="mdi-magnify"
-      @keyup.enter="submit(query)"
-      @click:clear="onClear"
+      @keydown.enter.prevent="submit"
+      @keydown.down.prevent="move(1)"
+      @keydown.up.prevent="move(-1)"
+      @keydown.esc="close"
+      @update:model-value="onInput"
+      @focus="onFocus"
     >
-      <template #item="{ props, item }">
-        <v-list-item v-bind="props" :title="undefined" class="py-2">
-          <div class="text-body-2 cue-line clamp-2" v-html="item.raw.textMarked || item.raw.text" />
-        </v-list-item>
+      <template #prepend-inner>
+        <svg class="search-icon" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+          <circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.4" />
+          <path d="M10.4 10.4 L14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+        </svg>
       </template>
       <template #append-inner>
-        <span v-if="!query" class="hotkey-hint d-none d-md-inline">/</span>
+        <kbd v-if="!query" class="key-hint">/</kbd>
       </template>
-    </v-autocomplete>
+    </v-text-field>
   </div>
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
-import { useDebounceFn } from '@vueuse/core'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { api, type Suggestion } from '../api'
 
-const emit = defineEmits<{ (e: 'search', q: string): void }>()
-
 const route = useRoute()
-const field = ref<{ focus: () => void } | null>(null)
-const selected = ref<Suggestion | null>(null)
-const query = ref<string>('')
+const router = useRouter()
+const field = ref<{ $el?: HTMLElement } | null>(null)
+const fieldEl = computed(() => field.value?.$el as HTMLElement | undefined)
+const menuWidth = ref<number>()
+const query = ref('')
 const suggestions = ref<Suggestion[]>([])
-const loading = ref(false)
+const menuOpen = ref(false)
+const active = ref(0)
+let timer: number | undefined
 
 watch(
   () => route.query.q,
-  (q) => {
-    const s = typeof q === 'string' ? q : ''
-    if (s && s !== query.value) query.value = s
+  (value) => {
+    const next = typeof value === 'string' ? value : ''
+    if (next !== query.value) query.value = next
   },
-  { immediate: true }
+  { immediate: true },
 )
 
-const refresh = useDebounceFn(async () => {
-  const text = (query.value || '').trim()
+function onInput(value: string | null) {
+  query.value = value ?? ''
+  active.value = 0
+  window.clearTimeout(timer)
+  const text = query.value.trim()
   if (text.length < 2) {
     suggestions.value = []
+    menuOpen.value = false
     return
   }
-  loading.value = true
-  try {
-    const res = await api.suggest(text)
-    suggestions.value = res.suggestions ?? []
-  } catch {
-    suggestions.value = []
-  } finally {
-    loading.value = false
+  timer = window.setTimeout(async () => {
+    try {
+      const res = await api.suggest(text)
+      suggestions.value = res.suggestions ?? []
+      menuOpen.value = suggestions.value.length > 0
+    } catch {
+      suggestions.value = []
+      menuOpen.value = false
+    }
+  }, 150)
+}
+
+function onFocus() {
+  if (fieldEl.value) menuWidth.value = fieldEl.value.getBoundingClientRect().width
+  if (suggestions.value.length) menuOpen.value = true
+}
+
+function move(delta: number) {
+  if (!menuOpen.value || !suggestions.value.length) return
+  const count = suggestions.value.length
+  active.value = (active.value + delta + count) % count
+}
+
+function choose(value: string) {
+  void go(value)
+}
+
+function submit() {
+  if (menuOpen.value && suggestions.value[active.value]) {
+    void go(suggestions.value[active.value].text)
+    return
   }
-}, 180)
+  const value = query.value.trim()
+  if (value) void go(value)
+}
 
-watch(query, () => refresh())
+async function go(value: string) {
+  await router.push({ name: 'search', query: { q: value } })
+  query.value = value
+  menuOpen.value = false
+  blur()
+}
 
-watch(selected, (s) => {
-  if (s?.text) submit(s.text)
+function close() {
+  menuOpen.value = false
+  blur()
+}
+
+function blur() {
+  ;(field.value?.$el?.querySelector('input') as HTMLInputElement | undefined)?.blur()
+}
+
+function focus() {
+  ;(field.value?.$el?.querySelector('input') as HTMLInputElement | undefined)?.focus()
+}
+
+function onKey(event: KeyboardEvent) {
+  const target = event.target as HTMLElement | null
+  const typing = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+  if (event.key === '/' && !typing) {
+    event.preventDefault()
+    focus()
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('keydown', onKey)
+  window.addEventListener('quipster:focus-search', focus)
 })
 
-function submit(q: string | undefined) {
-  const text = (q || '').trim()
-  if (!text) return
-  selected.value = null
-  emit('search', text)
-}
-
-function onClear() {
-  suggestions.value = []
-}
-
-function onKey(e: KeyboardEvent) {
-  const el = e.target as HTMLElement | null
-  const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
-  if (e.key === '/' && !typing) {
-    e.preventDefault()
-    nextTick(() => field.value?.focus())
-  }
-}
-
-onMounted(() => window.addEventListener('keydown', onKey))
-onUnmounted(() => window.removeEventListener('keydown', onKey))
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKey)
+  window.removeEventListener('quipster:focus-search', focus)
+  window.clearTimeout(timer)
+})
 </script>
 
 <style scoped>
 .search-wrap {
-  max-width: 880px;
   width: 100%;
-  margin: 0 auto;
+  max-width: 620px;
 }
 .search-field :deep(.v-field) {
-  background: rgba(255, 255, 255, 0.055) !important;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  transition: border-color 150ms ease, box-shadow 150ms ease;
+  background: var(--surface-2) !important;
+  border: 1px solid var(--border);
+  border-radius: 10px !important;
+  min-height: 40px;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+.search-field :deep(.v-field:hover) {
+  border-color: var(--border-strong);
 }
 .search-field :deep(.v-field--focused) {
-  border-color: rgba(139, 92, 246, 0.6);
-  box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.12);
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px rgba(255, 209, 102, 0.08);
+  background: var(--surface-3) !important;
 }
-.hotkey-hint {
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 6px;
-  padding: 0 6px;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.5);
-  line-height: 20px;
+.search-field :deep(input) {
+  font-size: 13.5px;
+  letter-spacing: 0.005em;
+  color: var(--text);
+}
+.search-field :deep(input::placeholder) {
+  color: var(--faint);
+  opacity: 1;
+}
+.search-icon {
+  color: var(--faint);
+  margin-right: 2px;
+}
+.key-hint {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--faint);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 1px 5px;
+  line-height: 16px;
+}
+.menu-panel {
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  padding: 4px;
+}
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.menu-item.hovered {
+  background: rgba(255, 255, 255, 0.06);
+}
+.menu-text {
+  font-size: 13px;
+  line-height: 1.45;
+  color: #d9dce1;
+}
+.menu-empty {
+  margin: 0;
+  padding: 12px 10px;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+.menu-foot {
+  display: flex;
+  gap: 14px;
+  padding: 7px 10px 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--faint);
 }
 </style>

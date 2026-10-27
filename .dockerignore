@@ -1,0 +1,10 @@
+web/node_modules
+web/dist
+.git
+data
+cache
+*.db
+*.db-wal
+*.db-shm
+.env
+.kilo

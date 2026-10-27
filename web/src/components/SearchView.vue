@@ -1,152 +1,142 @@
 <template>
-  <v-container fluid class="pa-4 pa-md-6" max-width="1600">
-    <v-alert v-if="error" type="error" variant="tonal" class="mb-4" density="compact">
-      {{ error }}
-    </v-alert>
-
-    <!-- Hero / empty state -->
-    <div v-if="!query && !loading" class="hero fade-in">
-      <div class="hero-icon">
-        <v-icon icon="mdi-movie-search-outline" size="34" />
-      </div>
-      <h1 class="hero-title">Find the exact line. Clip it. Share it.</h1>
-      <p class="hero-sub">
-        Search your library by subtitle dialogue, trim the moment, and download or share the clip.
+  <div class="page">
+    <!-- Landing -->
+    <section v-if="!query" class="landing">
+      <p class="eyebrow">Subtitle search</p>
+      <h1 class="landing-title">Find any line you remember.</h1>
+      <p class="landing-sub">
+        Search your film and TV library by what was said. Open the moment, trim it by subtitle line,
+        and download or share the clip.
       </p>
-      <div class="example-row">
-        <span class="text-caption text-medium-emphasis mr-2">Try:</span>
-        <v-chip
-          v-for="q in examples"
-          :key="q"
-          size="small"
-          variant="tonal"
-          class="example-chip"
-          @click="runExample(q)"
+
+      <div class="examples">
+        <button
+          v-for="example in examples"
+          :key="example"
+          type="button"
+          class="example-row"
+          @click="runQuery(example)"
         >
-          {{ q }}
-        </v-chip>
+          <svg viewBox="0 0 16 16" class="example-icon" aria-hidden="true">
+            <path d="M6.2 3.2H3.2v4.6h3V6.2h.9v4.4H4.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+            <path d="M12.8 3.2h-3v4.6h3V6.2h.9v4.4h-3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+          </svg>
+          <span class="example-text">{{ example }}</span>
+          <span class="example-go">Search ↵</span>
+        </button>
       </div>
-      <div class="hint-row">
-        <v-icon icon="mdi-lightbulb-on-outline" size="15" class="mr-1" />
-        All words must match. Wrap a phrase in “quotes” for an exact match.
-      </div>
-    </div>
 
-    <!-- Loading -->
-    <v-row v-if="loading">
-      <v-col v-for="n in 8" :key="n" cols="12" sm="6" md="4" lg="3">
-        <v-skeleton-loader type="image, article" class="rounded-xl" />
-      </v-col>
-    </v-row>
+      <p class="landing-hint">
+        Press <kbd class="kbd">/</kbd> to focus search. Wrap words in “quotes” for an exact phrase.
+      </p>
+    </section>
 
-    <template v-if="results && !loading">
-      <div class="result-head">
-        <div class="d-flex align-center flex-wrap gap-2">
-          <v-icon icon="mdi-format-quote-close" size="18" class="text-primary" />
-          <span class="text-body-2">
-            <strong>{{ results.totalHits }}</strong>
-            dialogue {{ results.totalHits === 1 ? 'match' : 'matches' }}
-            <span class="text-medium-emphasis">for</span>
-            <span class="mono">“{{ results.query }}”</span>
-          </span>
-          <v-chip v-if="uniqueMedia" size="x-small" variant="tonal">
-            {{ uniqueMedia }} {{ uniqueMedia === 1 ? 'title' : 'titles' }}
-          </v-chip>
+    <p v-if="error" class="error-banner">{{ error }}</p>
+
+    <!-- Results -->
+    <template v-else>
+      <header class="results-head">
+        <div class="results-summary">
+          <span class="results-count">{{ results?.totalHits ?? 0 }}</span>
+          <span class="results-label">{{ (results?.totalHits ?? 0) === 1 ? 'match' : 'matches' }} for</span>
+          <span class="results-query">“{{ query }}”</span>
+          <span v-if="heroCount" class="results-heroes">in {{ heroCount }} {{ heroCount === 1 ? 'title' : 'titles' }}</span>
         </div>
-        <div class="text-caption text-medium-emphasis d-none d-md-block">
-          All words must match · “quotes” for exact phrases
+        <div class="results-hint">
+          <span>All words must match</span>
+          <span class="dot">·</span>
+          <span>“quoted” for exact phrase</span>
+        </div>
+      </header>
+
+      <div v-if="loading" class="grid">
+        <div v-for="i in 6" :key="i" class="scene-card skeleton">
+          <div class="skeleton-thumb"></div>
+          <div class="skeleton-line w-70"></div>
+          <div class="skeleton-line w-95"></div>
+          <div class="skeleton-line w-45"></div>
         </div>
       </div>
 
-      <v-row v-if="results.hits.length">
-        <v-col v-for="hit in results.hits" :key="hit.chunkId" cols="12" sm="6" md="4" lg="3" xl="2">
-          <v-card class="result-card fill-height d-flex flex-column fade-in" elevation="0" @click="openClip(hit)">
-            <div class="thumb-wrap">
-              <v-img :src="hit.thumbUrl" aspect-ratio="16/9" cover class="bg-grey-darken-4">
-                <template #placeholder>
-                  <div class="d-flex align-center justify-center fill-height">
-                    <v-progress-circular indeterminate size="22" />
-                  </div>
-                </template>
-              </v-img>
-              <span class="thumb-badge">{{ fmt(hit.startSec) }} – {{ fmt(hit.endSec) }}</span>
-              <div class="thumb-play">
-                <v-icon icon="mdi-play-circle" size="46" class="text-white" />
-              </div>
+      <template v-else-if="results">
+        <div v-if="results.hits.length" class="grid">
+          <article
+            v-for="hit in results.hits"
+            :key="hit.chunkId"
+            class="scene-card"
+            tabindex="0"
+            role="button"
+            :aria-label="`Open clip: ${hit.mediaTitle}, ${timecode(hit.startSec)}`"
+            @click="openClip(hit)"
+            @keydown.enter.prevent="openClip(hit)"
+          >
+            <div class="thumb">
+              <img :src="hit.thumbUrl" :alt="''" loading="lazy" />
+              <span class="duration">{{ durationLabel(hit.startSec, hit.endSec) }}</span>
+              <span class="play">
+                <svg viewBox="0 0 32 32" width="34" height="34" aria-hidden="true">
+                  <circle cx="16" cy="16" r="15" fill="rgba(10,11,13,.72)" stroke="rgba(255,255,255,.55)" />
+                  <path d="M13 10.6v10.8L22 16z" fill="#fff" />
+                </svg>
+              </span>
             </div>
 
-            <v-card-item class="pb-1">
-              <v-card-title class="text-subtitle-2 font-weight-bold clamp-1">
-                {{ hit.mediaTitle }}
-              </v-card-title>
-              <v-card-subtitle class="d-flex align-center gap-2">
-                <span v-if="hit.year">{{ hit.year }}</span>
-                <span v-if="hit.showTitle && hit.season" class="text-caption">
-                  S{{ pad(hit.season) }}E{{ pad(hit.episode) }}
-                </span>
-              </v-card-subtitle>
-            </v-card-item>
-
-            <v-card-text class="py-1 flex-grow-1">
-              <div v-if="hit.contextBefore?.length" class="context">
-                <div v-for="c in hit.contextBefore" :key="'b' + c.idx" class="text-caption clamp-1">{{ c.text }}</div>
+            <div class="scene-body">
+              <div class="meta-row">
+                <span class="show">{{ hit.showTitle || hit.mediaTitle }}</span>
+                <span v-if="hit.season && hit.episode" class="episode">S{{ pad(hit.season) }}E{{ pad(hit.episode) }}</span>
+                <span v-else-if="hit.year" class="episode">{{ hit.year }}</span>
               </div>
-              <div class="dialogue cue-line my-1" v-html="hit.textMarked || hit.text" />
-              <div v-if="hit.contextAfter?.length" class="context">
-                <div v-for="c in hit.contextAfter" :key="'a' + c.idx" class="text-caption clamp-1">{{ c.text }}</div>
+
+              <p class="quote" v-html="hit.textMarked"></p>
+
+              <ul class="context" v-if="contextPreview(hit).length">
+                <li v-for="line in contextPreview(hit)" :key="line.key">{{ line.text }}</li>
+              </ul>
+
+              <div class="foot">
+                <span class="time">{{ timecode(hit.startSec) }} <span class="sep">–</span> {{ timecode(hit.endSec) }}</span>
+                <div class="actions">
+                  <button type="button" class="btn-text" @click.stop="openClip(hit)">Clip</button>
+                  <a class="icon-btn" :href="clipUrl(hit, true)" title="Download this clip" @click.stop>
+                    <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M8 2.5v7m0 0 2.7-2.7M8 9.5 5.3 6.8M3 13h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </a>
+                </div>
               </div>
-            </v-card-text>
-
-            <v-card-actions class="hover-actions">
-              <v-btn size="small" color="primary" variant="flat" prepend-icon="mdi-content-cut" @click.stop="openClip(hit)">
-                Clip
-              </v-btn>
-              <v-spacer />
-              <v-btn
-                size="small"
-                icon="mdi-download"
-                variant="text"
-                :href="clipStreamURL(hit, hit.startSec, hit.endSec, 'fast', true)"
-                aria-label="Download chunk as-is"
-                @click.stop
-              />
-            </v-card-actions>
-          </v-card>
-        </v-col>
-      </v-row>
-
-      <v-row v-if="results.titleMatches.length">
-        <v-col cols="12">
-          <div class="text-subtitle-2 text-medium-emphasis mb-2 mt-2">
-            Title matches <span class="text-caption">(no subtitle dialogue to clip)</span>
-          </div>
-          <v-chip
-            v-for="m in results.titleMatches"
-            :key="m.mediaId"
-            class="ma-1"
-            prepend-icon="mdi-movie-open-outline"
-            variant="tonal"
-          >
-            {{ m.title }}
-            <span v-if="m.year" class="ml-1 text-caption">({{ m.year }})</span>
-            <span v-if="m.noSubtitle" class="ml-1 text-caption text-disabled">no subs</span>
-          </v-chip>
-        </v-col>
-      </v-row>
-
-      <div v-if="!results.hits.length && !results.titleMatches.length" class="empty">
-        <v-icon icon="mdi-text-search" size="42" class="mb-3 text-medium-emphasis" />
-        <div class="text-body-1">No dialogue matched “{{ results.query }}”.</div>
-        <div class="text-body-2 text-medium-emphasis mt-1">
-          Try fewer words, check spelling, or scan more of your library from Admin.
+            </div>
+          </article>
         </div>
-      </div>
 
-      <v-row v-if="results.totalPages > 1" justify="center" class="mt-4">
-        <v-pagination v-model="page" :length="Math.min(results.totalPages, 50)" :total-visible="7" rounded />
-      </v-row>
+        <div v-else class="empty">
+          <p class="empty-title">No dialogue matched.</p>
+          <p class="empty-copy">Try fewer words, a different phrasing, or make sure the title has been scanned.</p>
+        </div>
+
+        <section v-if="matches.length" class="matches">
+          <h2 class="section-title">Matches by title</h2>
+          <ul class="match-list">
+            <li v-for="m in matches" :key="m.mediaId" class="match-row">
+              <span class="match-title">{{ m.label }}</span>
+              <span class="match-count">{{ m.count }} {{ m.count === 1 ? 'line' : 'lines' }}</span>
+            </li>
+          </ul>
+        </section>
+
+        <div v-if="results.totalPages > 1" class="pager">
+          <v-pagination
+            v-model="page"
+            :length="Math.min(results.totalPages, 50)"
+            :total-visible="7"
+            density="compact"
+            active-color="primary"
+            variant="text"
+          />
+        </div>
+      </template>
     </template>
-  </v-container>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -157,45 +147,58 @@ import { api, clipStreamURL, type Hit, type SearchResponse } from '../api'
 const route = useRoute()
 const router = useRouter()
 
-const examples = ['show me the money', 'you talking to me', 'may the force be with you', 'here\'s looking at you kid']
+const examples = [
+  'show me the money',
+  'the city never sleeps',
+  'i could have been a contender',
+  'run, you fools',
+]
 
 const results = ref<SearchResponse | null>(null)
 const loading = ref(false)
 const error = ref('')
 const page = ref(1)
-const query = computed(() => String(route.query.q || ''))
+const query = computed(() => (typeof route.query.q === 'string' ? route.query.q : ''))
 
-const uniqueMedia = computed(() => {
-  if (!results.value) return 0
-  return new Set(results.value.hits.map((h) => h.mediaId)).size
+const matches = computed(() => {
+  const map = new Map<number, { mediaId: number; label: string; count: number }>()
+  for (const hit of results.value?.hits ?? []) {
+    const entry = map.get(hit.mediaId)
+    if (entry) entry.count++
+    else map.set(hit.mediaId, { mediaId: hit.mediaId, label: hit.showTitle || hit.mediaTitle, count: 1 })
+  }
+  return [...map.values()].sort((a, b) => b.count - a.count).slice(0, 12)
 })
 
-watch(
-  [query, page],
-  async ([q, p]) => {
-    if (!q) {
-      results.value = null
-      return
-    }
-    loading.value = true
-    error.value = ''
-    try {
-      results.value = await api.search(q, String(route.query.show || ''), Number(p))
-    } catch (e) {
-      error.value = (e as Error).message || 'search failed'
-      results.value = null
-    } finally {
-      loading.value = false
-    }
-  },
-  { immediate: true }
-)
+const heroCount = computed(() => new Set((results.value?.hits ?? []).map((h) => h.mediaId)).size)
 
-watch(query, () => {
-  page.value = 1
-})
+function contextPreview(hit: Hit): { key: string; text: string }[] {
+  const out: { key: string; text: string }[] = []
+  for (const c of hit.contextBefore ?? []) out.push({ key: `b${c.idx}`, text: c.text })
+  for (const c of hit.contextAfter ?? []) out.push({ key: `a${c.idx}`, text: c.text })
+  return out.slice(0, 2)
+}
 
-function runExample(q: string) {
+async function load() {
+  if (!query.value) {
+    results.value = null
+    return
+  }
+  loading.value = true
+  error.value = ''
+  try {
+    results.value = await api.search(query.value, '', page.value)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    loading.value = false
+  }
+}
+
+watch([query, page], load, { immediate: true })
+watch(query, () => (page.value = 1))
+
+function runQuery(q: string) {
   router.push({ name: 'search', query: { q } })
 }
 
@@ -203,13 +206,22 @@ function openClip(hit: Hit) {
   window.dispatchEvent(new CustomEvent('open-clip', { detail: hit }))
 }
 
-function fmt(s: number): string {
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = Math.floor(s % 60)
+function clipUrl(hit: Hit, download: boolean): string {
+  return clipStreamURL(hit, hit.startSec, hit.endSec, 'fast', download)
+}
+
+function timecode(seconds: number): string {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
   return h > 0
-    ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-    : `${m}:${String(sec).padStart(2, '0')}`
+    ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+    : `${m}:${String(s).padStart(2, '0')}`
+}
+
+function durationLabel(start: number, end: number): string {
+  const secs = Math.max(0, end - start)
+  return secs >= 60 ? timecode(secs) : `${secs.toFixed(1).replace(/\.0$/, '')}s`
 }
 
 function pad(n: number): string {
@@ -218,71 +230,375 @@ function pad(n: number): string {
 </script>
 
 <style scoped>
-.hero {
-  max-width: 720px;
-  margin: 8vh auto 0;
-  text-align: center;
+.page {
+  max-width: 1520px;
+  margin: 0 auto;
+  padding: 28px 24px 64px;
 }
-.hero-icon {
+
+/* landing */
+.landing {
+  max-width: 660px;
+  margin: 9vh auto 0;
+}
+.landing-title {
+  font-size: clamp(26px, 3vw, 36px);
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  margin: 10px 0 10px;
+}
+.landing-sub {
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 54ch;
+}
+.examples {
+  display: grid;
+  gap: 8px;
+  margin-top: 28px;
+  max-width: 560px;
+}
+.example-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 13.5px;
+  text-align: left;
+  transition: border-color 130ms ease, background 130ms ease;
+}
+.example-row:hover {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+.example-icon {
+  color: var(--faint);
+  flex: none;
+}
+.example-text {
+  flex: 1;
+}
+.example-go {
+  font-size: 11.5px;
+  color: var(--faint);
+  font-family: var(--font-mono);
+}
+.landing-hint {
+  margin-top: 22px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+/* results head */
+.results-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+.results-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13.5px;
+}
+.results-count {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+}
+.results-label,
+.results-heroes {
+  color: var(--muted);
+}
+.results-query {
+  color: var(--text);
+  font-weight: 500;
+}
+.results-hint {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--faint);
+}
+.results-hint .dot {
+  opacity: 0.6;
+}
+
+/* grid + cards */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+.scene-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: pointer;
+  transition:border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+  outline: none;
+}
+.scene-card:hover,
+.scene-card:focus-visible {
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-2);
+}
+.scene-card:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-line);
+}
+.thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #050608;
+  overflow: hidden;
+}
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.thumb::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 40%;
+  background: linear-gradient(to top, rgba(6, 7, 9, 0.62), transparent);
+  pointer-events: none;
+}
+.duration {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 1;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(6, 7, 9, 0.78);
+  color: #e9eaed;
+}
+.play {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transition: opacity 140ms ease;
+  z-index: 2;
+}
+.scene-card:hover .play,
+.scene-card:focus-visible .play {
+  opacity: 1;
+}
+
+.scene-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 13px 14px 12px;
+}
+.meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.show {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.episode {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--faint);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
+  line-height: 17px;
+}
+.episode-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.quote {
+  margin: 2px 0 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #e6e8eb;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.context {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.context li {
+  font-size: 12px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+.time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+.time .sep {
+  opacity: 0.5;
+  padding: 0 2px;
+}
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.btn-text {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  padding: 6px 8px;
+  border-radius: 7px;
+}
+.btn-text:hover {
+  background: var(--accent-soft);
+}
+.icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 64px;
-  height: 64px;
-  border-radius: 18px;
-  background: rgba(139, 92, 246, 0.12);
-  border: 1px solid rgba(139, 92, 246, 0.3);
-  color: #a78bfa;
-  margin-bottom: 18px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--muted);
 }
-.hero-title {
-  font-size: clamp(22px, 3.2vw, 32px);
-  font-weight: 700;
-  letter-spacing: -0.01em;
+.icon-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
 }
-.hero-sub {
-  color: rgba(255, 255, 255, 0.6);
-  margin-top: 8px;
+
+/* skeleton */
+.skeleton {
+  pointer-events: none;
 }
-.example-row {
-  margin-top: 26px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
-  align-items: center;
+.skeleton-thumb {
+  aspect-ratio: 16/9;
+  background: var(--surface-2);
 }
-.example-chip {
-  cursor: pointer;
+.skeleton-line {
+  height: 10px;
+  margin: 14px 16px 0;
+  border-radius: 4px;
+  background: var(--surface-2);
 }
-.example-chip:hover {
-  background: rgba(139, 92, 246, 0.22);
+.skeleton-card .skeleton-line:last-child {
+  margin-bottom: 16px;
 }
-.hint-row {
-  margin-top: 18px;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.42);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.result-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 2px 4px 14px;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.dialogue {
-  font-size: 13.5px;
-  line-height: 1.45;
-}
-.context {
-  color: rgba(255, 255, 255, 0.42);
-}
+.w-45 { width: 45%; }
+.w-70 { width: 70%; }
+.w-95 { width: 95%; }
+
+/* empty + matches */
 .empty {
+  padding: 56px 0;
   text-align: center;
-  padding: 60px 16px;
+}
+.empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+.empty-copy {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0;
+}
+.matches {
+  margin-top: 28px;
+}
+.section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 10px;
+}
+.match-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+.match-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.match-title {
+  color: var(--text);
+}
+.match-count {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.pager {
+  display: flex;
+  justify-content: center;
+  margin-top: 26px;
+}
+.error-banner {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.08);
+  border-radius: 8px;
+  font-size: 13px;
+  color: #fca5a5;
 }
 </style>

@@ -232,11 +232,13 @@ func (ix *Indexer) JobHandler() func(ctx context.Context, j *store.Job, progress
 
 // ReindexAll clears index flags and enqueues index jobs for every media with chunks.
 func (ix *Indexer) ReindexAll() (int, error) {
-	ids, err := ix.st.MediaIDsNeedingIndex(1000000)
-	if err != nil {
+	// Mark every chunk stale first: the id list is derived from that flag, so
+	// listing before clearing would skip already-indexed media.
+	if err := ix.st.EnsureAllChunksStale(); err != nil {
 		return 0, err
 	}
-	if err := ix.st.EnsureAllChunksStale(); err != nil {
+	ids, err := ix.st.MediaIDsNeedingIndex(1000000)
+	if err != nil {
 		return 0, err
 	}
 	n := 0

@@ -1,31 +1,28 @@
 <template>
   <v-app>
-    <v-app-bar class="glass app-bar" elevation="0" height="68">
-      <v-container class="d-flex align-center gap-4 py-0" fluid>
+    <header class="app-header">
+      <div class="header-inner">
         <RouterLink to="/" class="text-decoration-none d-flex align-center">
-          <span class="brand-icon">
-            <v-icon icon="mdi-filmstrip-box-multiple" size="20" />
-          </span>
-          <span class="brand text-h6 ml-2 d-none d-sm-inline">Quipster</span>
+          <span class="wordmark">Quipster</span>
         </RouterLink>
 
-        <SearchBar class="flex-grow-1 mx-2" @search="onSearch" />
+        <div class="search-slot">
+          <SearchBar @search="onSearch" />
+        </div>
 
-        <v-tooltip text="Admin & indexing" location="bottom">
-          <template #activator="{ props }">
-            <v-btn
-              v-bind="props"
-              icon="mdi-tune-variant"
-              variant="text"
-              to="/admin"
-              aria-label="Admin"
-            />
-          </template>
-        </v-tooltip>
-      </v-container>
-    </v-app-bar>
+        <nav class="d-flex align-center" style="gap: 4px">
+          <RouterLink to="/admin" class="nav-link d-none d-sm-inline-flex align-center">
+            <v-icon icon="mdi-tune-variant" size="15" class="mr-1" />
+            Library
+          </RouterLink>
+          <RouterLink to="/admin" class="nav-link d-inline-flex d-sm-none" aria-label="Library">
+            <v-icon icon="mdi-tune-variant" size="18" />
+          </RouterLink>
+        </nav>
+      </div>
+    </header>
 
-    <v-main class="bg-transparent">
+    <v-main>
       <RouterView />
     </v-main>
 
@@ -60,3 +57,32 @@ function onToast(e: Event) {
 onMounted(() => window.addEventListener('app-toast', onToast as EventListener))
 onUnmounted(() => window.removeEventListener('app-toast', onToast as EventListener))
 </script>
+
+<style scoped>
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+.header-inner {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  max-width: 1520px;
+  margin: 0 auto;
+  padding: 0 24px;
+  height: 58px;
+}
+.search-slot {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+}
+@media (max-width: 640px) {
+  .header-inner {
+    gap: 12px;
+    padding: 0 14px;
+  }
+}
+</style>
