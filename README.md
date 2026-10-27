@@ -36,8 +36,9 @@ cp .env.example .env            # set MEDIA_DIR (read-only) and MEILI_MASTER_KEY
 docker compose up -d --build    # app on :8080 + meilisearch
 ```
 
-Open `http://localhost:8080`, go to **Admin → Scan library** (optionally limit to a subfolder such
-as `movies`), wait for indexing, then search dialogue.
+Open `http://localhost:8080`, go to **Admin → Library folders**, pick the folders to index
+(e.g. `movies` and `tv`; empty means the whole media root). Save, then **Scan library**. Files
+outside the selected folders are pruned on scan. Wait for indexing, then search dialogue.
 
 Scale-out workers and Intel/AMD iGPU (VAAPI) passthrough:
 
@@ -52,7 +53,8 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
 |---|---|---|
 | `ADDR` | `:8080` | HTTP listen address |
 | `ROLE` | `all` | `api`, `worker`, or `all` (single binary does both) |
-| `MEDIA_DIR` | `./media` | Library root, scanned read-only |
+| `MEDIA_DIR` | `./media` | Library root (read-only bind mount) |
+| `LIBRARY_PATHS` | — | Comma-separated folders under `MEDIA_DIR` to index (e.g. `movies,tv`). Seeds the persisted setting on first run |
 | `DATA_DIR` | `./data` | SQLite database location |
 | `CACHE_DIR` | `./cache` | Clips, thumbnails, extracted subtitles |
 | `MEILI_URL` | `http://localhost:7700` | Meilisearch endpoint |
@@ -80,7 +82,8 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
 - `GET /api/clips/stream?mediaId=&start=&end=&padMs=&mode=fast|preview|accurate[&download=1]`
   - Range-capable; long accurate cuts return `202 {jobId}` and progress via SSE/admin jobs
 - Admin (`X-API-Token` when configured):
-  - `POST /api/admin/scan[?root=subdir]`
+  - `GET/PUT /api/admin/config` — read/update the persisted library folders (`{"folders":["movies","tv"]}`)
+  - `POST /api/admin/scan[?root=subdir]` — scans the configured folders, or one ad-hoc folder
   - `POST /api/admin/reindex` — rebuild the Meili index from SQLite
   - `POST /api/admin/reprobe` — re-run probe/audio-subtitle selection for processed files
   - `GET /api/admin/status`, `GET /api/admin/events` (SSE, 1s tick), `GET /api/admin/jobs`

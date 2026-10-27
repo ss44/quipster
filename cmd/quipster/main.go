@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -128,6 +129,19 @@ func main() {
 	if err := st.Recover(); err != nil {
 		log.Printf("recover jobs: %v", err)
 	}
+	if _, ok, _ := st.GetSetting(store.SettingLibraryPaths); !ok {
+		if v := strings.TrimSpace(os.Getenv("LIBRARY_PATHS")); v != "" {
+			if roots, err := scan.CleanRoots(strings.Split(v, ",")); err == nil {
+				if err := st.SetLibraryPaths(roots); err != nil {
+					log.Printf("seed library paths: %v", err)
+				} else {
+					log.Printf("library folders from LIBRARY_PATHS: %v", roots)
+				}
+			} else {
+				log.Printf("invalid LIBRARY_PATHS: %v", err)
+			}
+		}
+	}
 
 	ix := indexer.New(st, cfg.meiliURL, cfg.meiliKey)
 	go ensureSettingsLoop(ix)
@@ -229,10 +243,12 @@ func scanTicker(ctx context.Context, st *store.Store, interval time.Duration) {
 			return
 		case <-t.C:
 			if active, err := st.HasActiveScanJob(); err == nil && !active {
-				if _, err := st.EnqueueJob("scan", "{}", 3); err != nil {
+				roots, _ := st.GetLibraryPaths()
+				payload, _ := json.Marshal(map[string]any{"roots": roots, "prune": true})
+				if _, err := st.EnqueueJob("scan", string(payload), 3); err != nil {
 					log.Printf("scan ticker enqueue: %v", err)
 				} else {
-					log.Printf("scan ticker: scan enqueued")
+					log.Printf("scan ticker: scan enqueued (folders=%v)", roots)
 				}
 			}
 		}

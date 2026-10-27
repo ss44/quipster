@@ -79,17 +79,41 @@
     <v-row>
       <v-col cols="12" lg="5">
         <v-card class="stat-card h-100">
-          <v-card-title class="text-subtitle-1">Scan library</v-card-title>
+          <v-card-title class="text-subtitle-1">Library folders</v-card-title>
           <v-card-text>
-            <v-text-field
-              v-model="scanRoot"
-              label="Subfolder to scan (optional, e.g. movies)"
+            <div class="text-caption text-medium-emphasis mb-2">
+              Root: <span class="mono">{{ config?.mediaDir || '—' }}</span> (read-only mount)
+            </div>
+            <v-combobox
+              v-model="folders"
+              :items="config?.available || []"
+              label="Folders to index (leave empty for the whole root)"
+              multiple
+              chips
+              closable-chips
+              clearable
               density="compact"
               hide-details
-              clearable
-              prepend-inner-icon="mdi-folder-outline"
+              variant="outlined"
+              prepend-inner-icon="mdi-folder-multiple-outline"
+              hint="Paths are relative to the root, e.g. movies or tv-anime. Files outside these folders are pruned on the next scan."
+              persistent-hint
               class="mb-3"
             />
+            <div class="d-flex gap-2 flex-wrap">
+              <v-btn variant="tonal" prepend-icon="mdi-content-save" :disabled="!dirty" :loading="savingConfig" @click="saveFolders">
+                Save folders
+              </v-btn>
+            </div>
+            <v-alert v-if="configError" type="error" density="compact" variant="tonal" class="mt-2">
+              {{ configError }}
+            </v-alert>
+          </v-card-text>
+        </v-card>
+
+        <v-card class="stat-card h-100 mt-3">
+          <v-card-title class="text-subtitle-1">Index controls</v-card-title>
+          <v-card-text>
             <div class="d-flex gap-2 flex-wrap">
               <v-btn color="primary" prepend-icon="mdi-folder-search" :loading="scanning" @click="doScan">
                 Scan library
@@ -219,14 +243,17 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api, type AdminSnapshot, type Job } from '../api'
+import { api, type AdminConfig, type AdminSnapshot, type Job } from '../api'
 
 const snap = ref<AdminSnapshot | null>(null)
 const jobs = ref<Job[]>([])
-const scanRoot = ref('')
 const scanning = ref(false)
 const reindexing = ref(false)
 const reprobing = ref(false)
+const config = ref<AdminConfig | null>(null)
+const folders = ref<string[]>([])
+const savingConfig = ref(false)
+const configError = ref('')
 let es: EventSource | null = null
 let poller: number | null = null
 
@@ -240,6 +267,12 @@ const headers = [
   { title: 'Created', key: 'createdAt', width: 170 },
   { title: 'Error', key: 'error', sortable: false },
 ]
+
+const dirty = computed(() => {
+  const saved = config.value?.folders ?? []
+  const cur = folders.value ?? []
+  return saved.length !== cur.length || saved.some((f) => !cur.includes(f))
+})
 
 const counts = computed(() => snap.value?.mediaCounts ?? {})
 const total = computed(() => Object.values(counts.value).reduce((a, b) => a + b, 0))
@@ -268,6 +301,7 @@ onMounted(() => {
   es.onerror = () => {
     if (!poller) poller = window.setInterval(refreshJobs, 5000)
   }
+  loadConfig()
   refreshJobs()
 })
 
@@ -288,10 +322,32 @@ async function refreshJobs() {
   }
 }
 
+async function loadConfig() {
+  try {
+    config.value = await api.config()
+    folders.value = config.value.folders ?? []
+  } catch (e) {
+    configError.value = (e as Error).message
+  }
+}
+
+async function saveFolders() {
+  savingConfig.value = true
+  configError.value = ''
+  try {
+    const res = await api.saveConfig((folders.value ?? []).map((f) => String(f).trim()).filter(Boolean))
+    if (config.value) config.value.folders = res.folders
+  } catch (e) {
+    configError.value = (e as Error).message
+  } finally {
+    savingConfig.value = false
+  }
+}
+
 async function doScan() {
   scanning.value = true
   try {
-    await api.scan(scanRoot.value.trim())
+    await api.scan('')
     await refreshJobs()
   } finally {
     scanning.value = false

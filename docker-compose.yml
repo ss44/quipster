@@ -10,6 +10,7 @@ services:
       MEDIA_DIR: /media
       DATA_DIR: /data
       CACHE_DIR: /cache
+      LIBRARY_PATHS: ${LIBRARY_PATHS:-}
       SUBTITLE_WORKERS: "4"
       INDEX_WORKERS: "1"
       CLIP_WORKERS: "2"
@@ -37,6 +38,7 @@ services:
       MEDIA_DIR: /media
       DATA_DIR: /data
       CACHE_DIR: /cache
+      LIBRARY_PATHS: ${LIBRARY_PATHS:-}
       SUBTITLE_WORKERS: "4"
       INDEX_WORKERS: "1"
       CLIP_WORKERS: "2"

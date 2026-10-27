@@ -18,6 +18,7 @@ import (
 	"quipster/internal/clips"
 	"quipster/internal/events"
 	"quipster/internal/indexer"
+	"quipster/internal/scan"
 	"quipster/internal/search"
 	"quipster/internal/store"
 	"quipster/internal/thumbs"
@@ -70,6 +71,8 @@ func Router(d Deps) http.Handler {
 			r.Use(d.tokenAuth)
 		}
 		r.Post("/api/admin/scan", d.handleScan)
+		r.Get("/api/admin/config", d.handleConfigGet)
+		r.Put("/api/admin/config", d.handleConfigPut)
 		r.Post("/api/admin/reindex", d.handleReindex)
 		r.Post("/api/admin/reprobe", d.handleReprobe)
 		r.Get("/api/admin/status", d.handleStatus)
@@ -387,6 +390,8 @@ func clipName(m *store.MediaFile, req clips.Request) string {
 	return fmt.Sprintf("%s [%d-%d]", name, int(req.Start*1000), int(req.End*1000))
 }
 
+// handleScan enqueues a scan of the configured library folders. An explicit
+// ?root=subfolder scans just that folder without pruning outside it.
 func (d Deps) handleScan(w http.ResponseWriter, r *http.Request) {
 	if active, err := d.St.HasActiveScanJob(); err == nil && active {
 		writeJSON(w, map[string]any{"status": "already-running"})
@@ -394,7 +399,21 @@ func (d Deps) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := map[string]any{}
 	if root := strings.TrimSpace(r.URL.Query().Get("root")); root != "" {
-		payload["root"] = root
+		roots, err := scan.CleanRoots([]string{root})
+		if err != nil || len(roots) == 0 {
+			writeErr(w, http.StatusBadRequest, "invalid scan root")
+			return
+		}
+		payload["roots"] = roots
+		payload["prune"] = false
+	} else {
+		roots, err := d.St.GetLibraryPaths()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		payload["roots"] = roots
+		payload["prune"] = true
 	}
 	pb, _ := json.Marshal(payload)
 	if _, err := d.St.EnqueueJob("scan", string(pb), 3); err != nil {
@@ -402,6 +421,60 @@ func (d Deps) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"status": "started"})
+}
+
+// handleConfigGet returns the media root, configured folders and the top-level
+// folders available to choose from.
+func (d Deps) handleConfigGet(w http.ResponseWriter, r *http.Request) {
+	folders, err := d.St.GetLibraryPaths()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if folders == nil {
+		folders = []string{}
+	}
+	available := []string{}
+	if entries, err := os.ReadDir(d.MediaDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+				available = append(available, e.Name())
+			}
+		}
+	}
+	writeJSON(w, map[string]any{
+		"mediaDir":  d.MediaDir,
+		"folders":   folders,
+		"available": available,
+	})
+}
+
+// handleConfigPut validates and persists the library folders to scan.
+func (d Deps) handleConfigPut(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Folders []string `json:"folders"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	folders, err := scan.CleanRoots(body.Folders)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	for _, rel := range folders {
+		full := filepath.Join(d.MediaDir, filepath.FromSlash(rel))
+		if info, err := os.Stat(full); err != nil || !info.IsDir() {
+			writeErr(w, http.StatusBadRequest, "folder not found: "+rel)
+			return
+		}
+	}
+	if err := d.St.SetLibraryPaths(folders); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"folders": folders})
 }
 
 func (d Deps) handleReindex(w http.ResponseWriter, r *http.Request) {

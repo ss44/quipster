@@ -121,6 +121,10 @@ func (s *Store) migrate() error {
 			started_at INTEGER NOT NULL DEFAULT 0,
 			finished_at INTEGER NOT NULL DEFAULT 0
 		)`,
+		`CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL DEFAULT ''
+		)`,
 		`CREATE TABLE IF NOT EXISTS cache_entries (
 			cache_key TEXT PRIMARY KEY,
 			path TEXT NOT NULL,
@@ -152,6 +156,49 @@ func (s *Store) migrate() error {
 		}
 	}
 	return nil
+}
+
+const SettingLibraryPaths = "library_paths"
+
+func (s *Store) GetSetting(key string) (string, bool, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return v, true, nil
+}
+
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	return err
+}
+
+// GetLibraryPaths returns configured scan folders (relative to MEDIA_DIR).
+func (s *Store) GetLibraryPaths() ([]string, error) {
+	v, ok, err := s.GetSetting(SettingLibraryPaths)
+	if err != nil || !ok || strings.TrimSpace(v) == "" {
+		return nil, err
+	}
+	var paths []string
+	if err := json.Unmarshal([]byte(v), &paths); err != nil {
+		return nil, err
+	}
+	return paths, nil
+}
+
+func (s *Store) SetLibraryPaths(paths []string) error {
+	if paths == nil {
+		paths = []string{}
+	}
+	b, err := json.Marshal(paths)
+	if err != nil {
+		return err
+	}
+	return s.SetSetting(SettingLibraryPaths, string(b))
 }
 
 // Recover resets jobs that were mid-flight when the process died so they can be retried.
@@ -306,9 +353,10 @@ func (s *Store) ListMedia(limit, offset int, q string) (*MediaListPage, error) {
 	return page, rows.Err()
 }
 
-// DeleteMissing removes media rows whose paths are not in keep; returns the removed ids.
-func (s *Store) DeleteMissing(root string, keep map[string]bool) ([]int64, error) {
-	rows, err := s.db.Query(`SELECT id, path FROM media_files WHERE path LIKE ?`, root+"/%")
+// DeleteMissingUnder removes media rows under base whose paths are not in keep.
+func (s *Store) DeleteMissingUnder(base string, keep map[string]bool) ([]int64, error) {
+	base = strings.TrimSuffix(base, "/")
+	rows, err := s.db.Query(`SELECT id, path FROM media_files WHERE path LIKE ?`, base+"/%")
 	if err != nil {
 		return nil, err
 	}

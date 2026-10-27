@@ -34,12 +34,46 @@ type ScanResult struct {
 	Removed int
 }
 
-// Run walks the media root, upserts media rows and enqueues probe jobs for
-// new or changed files. Missing files are deleted (with Meili cleanup via
-// onDeleted, if provided).
-func Run(ctx context.Context, root string, st *store.Store, onDeleted func(ids []int64)) (*ScanResult, error) {
+// CleanRoots normalises library folder paths relative to the media root:
+// trims separators, rejects absolute/escaping paths, and de-duplicates.
+func CleanRoots(roots []string) ([]string, error) {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(roots))
+	for _, raw := range roots {
+		r := strings.TrimSpace(raw)
+		if r == "" {
+			continue
+		}
+		if filepath.IsAbs(r) || strings.HasPrefix(r, "/") {
+			return nil, fmt.Errorf("library folder %q must be relative to the media root", raw)
+		}
+		r = strings.Trim(r, "/")
+		clean := filepath.ToSlash(filepath.Clean(r))
+		if clean == "." || clean == "" {
+			continue
+		}
+		if clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+			return nil, fmt.Errorf("library folder %q escapes the media root", raw)
+		}
+		if seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		out = append(out, clean)
+	}
+	return out, nil
+}
+
+// Run walks the media root (or only the configured roots), upserts media rows
+// and enqueues probe jobs for new or changed files. With prune=true, media rows
+// outside the configured folders are removed (Meili cleanup via onDeleted).
+func Run(ctx context.Context, mediaRoot string, roots []string, prune bool, st *store.Store, onDeleted func(ids []int64)) (*ScanResult, error) {
 	res := &ScanResult{}
-	scanID, err := st.StartScan(root)
+	scanLabel := mediaRoot
+	if len(roots) > 0 {
+		scanLabel = mediaRoot + " [" + strings.Join(roots, ", ") + "]"
+	}
+	scanID, err := st.StartScan(scanLabel)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +82,55 @@ func Run(ctx context.Context, root string, st *store.Store, onDeleted func(ids [
 	var removedIDs []int64
 	lastFlush := time.Now()
 
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	walkRoots := roots
+	if len(walkRoots) == 0 {
+		walkRoots = []string{""}
+	}
+	for _, relRoot := range walkRoots {
+		root := mediaRoot
+		if relRoot != "" {
+			root = filepath.Join(mediaRoot, filepath.FromSlash(relRoot))
+		}
+		err = walkRoot(ctx, mediaRoot, root, st, res, keep, scanID, &lastFlush)
+		if err != nil {
+			st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "error")
+			return res, err
+		}
+	}
+
+	if prune {
+		ids, err := st.DeleteMissingUnder(mediaRoot, keep)
+		if err != nil {
+			log.Printf("[scan] delete missing: %v", err)
+		}
+		removedIDs = ids
+	} else {
+		for _, relRoot := range walkRoots {
+			base := mediaRoot
+			if relRoot != "" {
+				base = filepath.Join(mediaRoot, filepath.FromSlash(relRoot))
+			}
+			ids, err := st.DeleteMissingUnder(base, keep)
+			if err != nil {
+				log.Printf("[scan] delete missing under %s: %v", base, err)
+				continue
+			}
+			removedIDs = append(removedIDs, ids...)
+		}
+	}
+	res.Removed = len(removedIDs)
+
+	st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "done")
+	if onDeleted != nil && len(removedIDs) > 0 {
+		onDeleted(removedIDs)
+	}
+	return res, nil
+}
+
+// walkRoot walks one library folder; library-relative paths are always
+// computed from mediaRoot so parsing context stays consistent.
+func walkRoot(ctx context.Context, mediaRoot, root string, st *store.Store, res *ScanResult, keep map[string]bool, scanID int64, lastFlush *time.Time) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			log.Printf("[scan] walk %s: %v", path, err)
 			return nil
@@ -74,7 +156,7 @@ func Run(ctx context.Context, root string, st *store.Store, onDeleted func(ids [
 		if err != nil {
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
+		rel, err := filepath.Rel(mediaRoot, path)
 		if err != nil {
 			return nil
 		}
@@ -96,68 +178,46 @@ func Run(ctx context.Context, root string, st *store.Store, onDeleted func(ids [
 			}
 			res.Changed++
 		}
-		if time.Since(lastFlush) > 400*time.Millisecond {
-			lastFlush = time.Now()
+		if time.Since(*lastFlush) > 400*time.Millisecond {
+			*lastFlush = time.Now()
 			st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "")
 		}
 		return nil
 	})
-	if err != nil {
-		st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "error")
-		return res, err
-	}
-
-	ids, err := st.DeleteMissing(root, keep)
-	if err != nil {
-		log.Printf("[scan] delete missing: %v", err)
-	}
-	res.Removed = len(ids)
-	removedIDs = ids
-
-	st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "done")
-	if onDeleted != nil && len(removedIDs) > 0 {
-		onDeleted(removedIDs)
-	}
-	return res, nil
 }
 
 func (r *ScanResult) Done() int { return r.Seen }
 
-// JobHandler adapts Run to the job runner. Payload may contain {"root": "movies"}
-// to scan a subdirectory of the media root (validated to stay inside it).
+// JobHandler adapts Run to the job runner. Payload carries {"roots": ["movies","tv"],
+// "prune": true}; roots are validated relative to the media root.
 func JobHandler(baseRoot string, st *store.Store, onDeleted func(ids []int64)) func(context.Context, *store.Job, func(float64)) error {
 	return func(ctx context.Context, j *store.Job, progress func(float64)) error {
-		root := baseRoot
 		var payload struct {
-			Root string `json:"root"`
+			Roots []string `json:"roots"`
+			Prune bool     `json:"prune"`
 		}
-		if json.Unmarshal([]byte(j.Payload), &payload) == nil && payload.Root != "" {
-			rel := filepath.ToSlash(strings.Trim(filepath.Clean(payload.Root), "/"))
-			if strings.Contains(rel, "..") || strings.HasPrefix(rel, "/") {
-				return fmt.Errorf("invalid scan root %q", payload.Root)
+		if b := strings.TrimSpace(j.Payload); b != "" && b != "{}" {
+			if err := json.Unmarshal([]byte(b), &payload); err != nil {
+				return fmt.Errorf("bad scan payload: %w", err)
 			}
-			root = filepath.Join(baseRoot, filepath.FromSlash(rel))
 		}
-		info, err := os.Stat(root)
-		if err != nil || !info.IsDir() {
-			return fmt.Errorf("scan root %s unavailable", root)
-		}
-		res, err := Run(ctx, root, st, onDeleted)
+		roots, err := CleanRoots(payload.Roots)
 		if err != nil {
 			return err
 		}
-		log.Printf("[scan] #%d: root=%s seen=%d changed=%d removed=%d", res.ScanID, root, res.Seen, res.Changed, res.Removed)
+		for _, rel := range roots {
+			full := filepath.Join(baseRoot, filepath.FromSlash(rel))
+			if info, err := os.Stat(full); err != nil || !info.IsDir() {
+				return fmt.Errorf("library folder %s unavailable", full)
+			}
+		}
+		res, err := Run(ctx, baseRoot, roots, payload.Prune, st, onDeleted)
+		if err != nil {
+			return err
+		}
+		log.Printf("[scan] #%d: roots=%v prune=%v seen=%d changed=%d removed=%d", res.ScanID, roots, payload.Prune, res.Seen, res.Changed, res.Removed)
 		return nil
 	}
-}
-
-// ParsePayload extracts {"scanId":n} style payloads.
-func ParsePayload(j *store.Job) map[string]any {
-	var m map[string]any
-	if err := json.Unmarshal([]byte(j.Payload), &m); err != nil {
-		return map[string]any{}
-	}
-	return m
 }
 
 // EnsureDirs creates the data/cache layout used across the app.

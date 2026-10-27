@@ -114,6 +114,12 @@ export interface AdminSnapshot {
   meiliUp: boolean
 }
 
+export interface AdminConfig {
+  mediaDir: string
+  folders: string[]
+  available: string[]
+}
+
 async function getJSON<T>(url: string): Promise<T> {
   const res = await fetch(url)
   if (!res.ok) {
@@ -139,6 +145,19 @@ export const api = {
   chunk: (id: string) => getJSON<ChunkDetail>(`/api/chunks/${encodeURIComponent(id)}`),
   scan: (root: string) =>
     fetch(`/api/admin/scan${root ? `?root=${encodeURIComponent(root)}` : ''}`, { method: 'POST' }).then((r) => r.json()),
+  config: () => getJSON<AdminConfig>('/api/admin/config'),
+  saveConfig: (folders: string[]) =>
+    fetch('/api/admin/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folders }),
+    }).then(async (r) => {
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}))
+        throw new Error(body.error || 'failed to save library folders')
+      }
+      return r.json() as Promise<{ folders: string[] }>
+    }),
   reindex: () => fetch('/api/admin/reindex', { method: 'POST' }).then((r) => r.json()),
   reprobe: () => fetch('/api/admin/reprobe', { method: 'POST' }).then((r) => r.json()),
   jobs: () => getJSON<{ jobs: Job[] }>('/api/admin/jobs?limit=100'),
