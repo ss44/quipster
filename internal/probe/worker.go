@@ -113,9 +113,20 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 			if pick >= 0 {
 				es := res.Subs[pick]
 				outPath := filepath.Join(p.SubsCacheDir, fmt.Sprintf("%d.srt", m.ID))
-				p.sem() <- struct{}{}
-				xerr := ExtractSubtitle(ctx, m.Path, es.Ordinal, outPath)
-				<-p.sem()
+				var xerr error
+				reused := false
+				// Re-probe of an already-processed, unchanged file: reuse the
+				// cached extraction instead of paying another full-file read.
+				if m.Status != "pending" {
+					if st, serr := os.Stat(outPath); serr == nil && st.Size() > 0 {
+						reused = true
+					}
+				}
+				if !reused {
+					p.sem() <- struct{}{}
+					xerr = ExtractSubtitle(ctx, m.Path, es.Ordinal, outPath)
+					<-p.sem()
+				}
 				if xerr != nil {
 					note = "embedded extraction failed: " + xerr.Error()
 				} else {
