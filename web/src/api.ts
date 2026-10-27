@@ -105,7 +105,7 @@ export interface LineStats {
 
 export interface AdminSnapshot {
   scan: { id: number; rootPath: string; status: string; filesSeen: number; filesDone: number } | null
-  queue: { queued: number; running: number; done: number; error: number } | null
+  queue: { queued: number; running: number; done: number; error: number; paused: boolean } | null
   mediaCounts: Record<string, number>
   lines: LineStats | null
   cacheBytes: number
@@ -161,6 +161,14 @@ export const api = {
   reindex: () => fetch('/api/admin/reindex', { method: 'POST' }).then((r) => r.json()),
   reprobe: () => fetch('/api/admin/reprobe', { method: 'POST' }).then((r) => r.json()),
   jobs: () => getJSON<{ jobs: Job[] }>('/api/admin/jobs?limit=100'),
+  pauseQueue: () => fetch('/api/admin/queue/pause', { method: 'POST' }).then((r) => r.json()),
+  resumeQueue: () => fetch('/api/admin/queue/resume', { method: 'POST' }).then((r) => r.json()),
+  stopQueue: () =>
+    fetch('/api/admin/queue/stop', { method: 'POST' }).then((r) => r.json()) as Promise<{
+      paused: boolean
+      cancelled: number
+      cleared: number
+    }>,
 }
 
 export function clipStreamURL(hit: Hit, start: number, end: number, mode: string, download: boolean): string {

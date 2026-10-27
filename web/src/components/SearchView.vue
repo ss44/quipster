@@ -17,7 +17,7 @@
           class="example-row"
           @click="runQuery(example)"
         >
-          <svg viewBox="0 0 16 16" class="example-icon" aria-hidden="true">
+          <svg viewBox="0 0 16 16" width="16" height="16" class="example-icon" aria-hidden="true">
             <path d="M6.2 3.2H3.2v4.6h3V6.2h.9v4.4H4.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
             <path d="M12.8 3.2h-3v4.6h3V6.2h.9v4.4h-3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
           </svg>
@@ -31,10 +31,10 @@
       </p>
     </section>
 
-    <p v-if="error" class="error-banner">{{ error }}</p>
-
     <!-- Results -->
     <template v-else>
+      <p v-if="error" class="error-banner">{{ error }}</p>
+
       <header class="results-head">
         <div class="results-summary">
           <span class="results-count">{{ results?.totalHits ?? 0 }}</span>
@@ -279,8 +279,11 @@ function pad(n: number): string {
   border-color: var(--border-strong);
 }
 .example-icon {
+  width: 16px;
+  height: 16px;
   color: var(--faint);
   flex: none;
+  display: block;
 }
 .example-text {
   flex: 1;

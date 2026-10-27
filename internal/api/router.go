@@ -18,6 +18,7 @@ import (
 	"quipster/internal/clips"
 	"quipster/internal/events"
 	"quipster/internal/indexer"
+	"quipster/internal/jobs"
 	"quipster/internal/scan"
 	"quipster/internal/search"
 	"quipster/internal/store"
@@ -31,6 +32,7 @@ type Deps struct {
 	Clips      *clips.Service
 	Thumbs     *thumbs.Service
 	Events     *events.Collector
+	Runner     *jobs.Runner
 	MediaDir   string
 	SubsDir    string
 	WebFS      fs.FS
@@ -75,6 +77,10 @@ func Router(d Deps) http.Handler {
 		r.Put("/api/admin/config", d.handleConfigPut)
 		r.Post("/api/admin/reindex", d.handleReindex)
 		r.Post("/api/admin/reprobe", d.handleReprobe)
+		r.Post("/api/admin/queue/pause", d.handleQueuePause)
+		r.Post("/api/admin/queue/resume", d.handleQueueResume)
+		r.Post("/api/admin/queue/clear", d.handleQueueClear)
+		r.Post("/api/admin/queue/stop", d.handleQueueStop)
 		r.Get("/api/admin/status", d.handleStatus)
 		r.Get("/api/admin/events", d.Events.Handler())
 		r.Get("/api/admin/jobs", d.handleJobs)
@@ -486,6 +492,32 @@ func (d Deps) handleReindex(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"enqueued": n})
 }
 
+func (d Deps) handleQueuePause(w http.ResponseWriter, r *http.Request) {
+	if err := d.St.SetQueuePaused(true); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"paused": true})
+}
+
+func (d Deps) handleQueueResume(w http.ResponseWriter, r *http.Request) {
+	if err := d.St.SetQueuePaused(false); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"paused": false})
+}
+
+// handleQueueClear drops queued jobs; running jobs keep running unless paused.
+func (d Deps) handleQueueClear(w http.ResponseWriter, r *http.Request) {
+	n, err := d.St.ClearQueuedJobs()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"cleared": n})
+}
+
 // handleReprobe re-runs probe (metadata/audio/subtitle selection) for media
 // that already finished, e.g. after a pipeline improvement.
 func (d Deps) handleReprobe(w http.ResponseWriter, r *http.Request) {
@@ -502,6 +534,32 @@ func (d Deps) handleReprobe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{"enqueued": n})
+}
+
+// handleQueueStop pauses the queue, aborts in-flight jobs and clears queued work.
+func (d Deps) handleQueueStop(w http.ResponseWriter, r *http.Request) {
+	if err := d.St.SetQueuePaused(true); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	cancelled := 0
+	if d.Runner != nil {
+		cancelled = d.Runner.CancelActive()
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		stats, err := d.St.JobStats()
+		if err != nil || stats.Running == 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cleared, err := d.St.ClearQueuedJobs()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"paused": true, "cancelled": cancelled, "cleared": cleared})
 }
 
 func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {

@@ -23,17 +23,26 @@ type Runner struct {
 	handlers map[string]Handler
 	quits    map[string][]chan struct{}
 	wg       sync.WaitGroup
+
+	activeMu sync.Mutex
+	active   map[int64]context.CancelFunc
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 func NewRunner(st *store.Store, workerName string) *Runner {
-	return &Runner{
+	r := &Runner{
 		st:          st,
 		workerName:  workerName,
 		maxAttempts: 3,
 		jobTimeout:  3 * time.Hour,
 		handlers:    map[string]Handler{},
 		quits:       map[string][]chan struct{}{},
+		active:      map[int64]context.CancelFunc{},
+		stop:        make(chan struct{}),
 	}
+	go r.pauseWatcher()
+	return r
 }
 
 // SetJobTimeout bounds each job execution (0 keeps the default 3h).
@@ -72,6 +81,14 @@ func (r *Runner) loop(jobType, workerID string, quit chan struct{}) {
 			case <-ctx.Done():
 			}
 		}()
+		if paused, err := r.st.GetQueuePaused(); err == nil && paused {
+			select {
+			case <-quit:
+				return
+			case <-time.After(400 * time.Millisecond):
+			}
+			continue
+		}
 		j, err := r.st.ClaimJob(ctx, workerID, []string{jobType})
 		cancel()
 		if err != nil {
@@ -110,11 +127,25 @@ func (r *Runner) run(jobType string, j *store.Job) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.jobTimeout)
 	defer cancel()
+	r.activeMu.Lock()
+	r.active[j.ID] = cancel
+	r.activeMu.Unlock()
+	defer func() {
+		r.activeMu.Lock()
+		delete(r.active, j.ID)
+		r.activeMu.Unlock()
+	}()
+
 	err := h(ctx, j, progress)
 	if err == nil {
 		if err := r.st.FinishJob(j.ID, "done", ""); err != nil {
 			log.Printf("[jobs] finish error job %d: %v", j.ID, err)
 		}
+		return
+	}
+	if paused, perr := r.st.GetQueuePaused(); perr == nil && paused {
+		log.Printf("[jobs] job %d (%s) interrupted by queue pause, requeueing", j.ID, j.Type)
+		r.st.RequeueJobSoft(j.ID, "paused")
 		return
 	}
 	if j.Attempts < r.maxAttempts {
@@ -134,8 +165,36 @@ func (r *Runner) Stop() {
 		quits = append(quits, qs...)
 	}
 	r.mu.Unlock()
+	r.stopOnce.Do(func() { close(r.stop) })
 	for _, q := range quits {
 		close(q)
 	}
 	r.wg.Wait()
+}
+
+// CancelActive interrupts all in-flight jobs (used by queue pause/stop).
+func (r *Runner) CancelActive() int {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
+	for _, cancel := range r.active {
+		cancel()
+	}
+	return len(r.active)
+}
+
+// pauseWatcher reacts to the persisted pause flag: workers in any role stop
+// their in-flight jobs within a second of a pause request.
+func (r *Runner) pauseWatcher() {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-r.stop:
+			return
+		case <-t.C:
+			if paused, err := r.st.GetQueuePaused(); err == nil && paused {
+				r.CancelActive()
+			}
+		}
+	}
 }

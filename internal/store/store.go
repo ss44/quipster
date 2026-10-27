@@ -158,7 +158,10 @@ func (s *Store) migrate() error {
 	return nil
 }
 
-const SettingLibraryPaths = "library_paths"
+const (
+	SettingLibraryPaths = "library_paths"
+	SettingQueuePaused  = "queue_paused"
+)
 
 func (s *Store) GetSetting(key string) (string, bool, error) {
 	var v string
@@ -188,6 +191,23 @@ func (s *Store) GetLibraryPaths() ([]string, error) {
 		return nil, err
 	}
 	return paths, nil
+}
+
+// GetQueuePaused reports whether workers should stop claiming jobs.
+func (s *Store) GetQueuePaused() (bool, error) {
+	v, ok, err := s.GetSetting(SettingQueuePaused)
+	if err != nil || !ok {
+		return false, err
+	}
+	return v == "1" || v == "true", nil
+}
+
+func (s *Store) SetQueuePaused(paused bool) error {
+	value := "0"
+	if paused {
+		value = "1"
+	}
+	return s.SetSetting(SettingQueuePaused, value)
 }
 
 func (s *Store) SetLibraryPaths(paths []string) error {
@@ -748,15 +768,36 @@ func (s *Store) RequeueJob(id int64, errMsg string) error {
 	return err
 }
 
+// RequeueJobSoft returns a paused/cancelled job to the queue without counting
+// the interrupted attempt against its retry budget.
+func (s *Store) RequeueJobSoft(id int64, note string) error {
+	_, err := s.db.Exec(`UPDATE jobs SET status='queued', worker_id='', error=?,
+		attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END WHERE id=? AND status='running'`, note, id)
+	return err
+}
+
+// ClearQueuedJobs removes all queued jobs and returns how many were removed.
+func (s *Store) ClearQueuedJobs() (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM jobs WHERE status='queued'`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 type JobStats struct {
 	Queued  int64 `json:"queued"`
 	Running int64 `json:"running"`
 	Done    int64 `json:"done"`
 	Error   int64 `json:"error"`
+	Paused  bool  `json:"paused"`
 }
 
 func (s *Store) JobStats() (*JobStats, error) {
 	st := &JobStats{}
+	if paused, err := s.GetQueuePaused(); err == nil {
+		st.Paused = paused
+	}
 	rows, err := s.db.Query(`SELECT status, COUNT(*) FROM jobs GROUP BY status`)
 	if err != nil {
 		return nil, err

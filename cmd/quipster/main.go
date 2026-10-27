@@ -187,6 +187,7 @@ func main() {
 		Clips:    clipSvc,
 		Thumbs:   thumbSvc,
 		Events:   collector,
+		Runner:   runner,
 		MediaDir: cfg.mediaDir,
 		WebFS:    web.Dist,
 		APIToken: cfg.apiToken,

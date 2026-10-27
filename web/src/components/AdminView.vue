@@ -38,8 +38,11 @@
         <p class="stat-label">Queue</p>
         <p class="stat-value">{{ (snap?.queue?.queued ?? 0).toLocaleString() }}<span class="stat-unit">waiting</span></p>
         <p class="stat-sub">
-          {{ snap?.queue?.running ?? 0 }} running · {{ snap?.queue?.done ?? 0 }} done
-          <span v-if="snap?.queue?.error" class="stat-error">· {{ snap.queue.error }} failed</span>
+          <span v-if="paused" class="paused-tag">Paused</span>
+          <template v-else>
+            {{ snap?.queue?.running ?? 0 }} running · {{ snap?.queue?.done ?? 0 }} done
+            <span v-if="snap?.queue?.error" class="stat-error">· {{ snap.queue.error }} failed</span>
+          </template>
         </p>
       </div>
       <div class="stat">
@@ -116,6 +119,21 @@
             </button>
           </div>
 
+          <div class="op-row queue-row">
+            <div class="op-copy">
+              <span class="op-title">Queue control</span>
+              <span class="op-sub">
+                {{ paused ? 'Workers are paused — nothing new is claimed.' : 'Pause workers or stop and clear everything queued.' }}
+              </span>
+            </div>
+            <div class="queue-actions">
+              <button type="button" class="btn-secondary" @click="togglePause">
+                {{ paused ? 'Resume' : 'Pause' }}
+              </button>
+              <button type="button" class="btn-danger" @click="confirmOpen = true">Stop &amp; clear</button>
+            </div>
+          </div>
+
           <div v-if="snap?.scan" class="scan-progress">
             <div class="scan-labels">
               <span class="mono truncate">{{ snap.scan.rootPath }}</span>
@@ -186,6 +204,22 @@
         <p v-if="!jobs.length" class="idle">No jobs yet — run a scan to populate the queue.</p>
       </div>
     </section>
+
+    <v-dialog v-model="confirmOpen" max-width="420">
+      <div class="confirm-panel">
+        <h2 class="confirm-title">Stop and clear the queue?</h2>
+        <p class="confirm-copy">
+          Workers pause immediately, in-flight jobs are aborted, and every queued job is deleted.
+          The library stops processing until you resume.
+        </p>
+        <div class="confirm-actions">
+          <button type="button" class="btn-secondary" @click="confirmOpen = false">Cancel</button>
+          <button type="button" class="btn-danger" :disabled="stopping" @click="stopAndClear">
+            {{ stopping ? 'Stopping…' : 'Stop & clear' }}
+          </button>
+        </div>
+      </div>
+    </v-dialog>
   </div>
 </template>
 
@@ -202,12 +236,15 @@ const configError = ref('')
 const scanning = ref(false)
 const reindexing = ref(false)
 const reprobing = ref(false)
+const confirmOpen = ref(false)
+const stopping = ref(false)
 let stream: EventSource | null = null
 let poller: number | null = null
 
 const counts = computed(() => snap.value?.mediaCounts ?? {})
 const total = computed(() => Object.values(counts.value).reduce((sum, n) => sum + n, 0))
 const running = computed(() => snap.value?.runningJobs ?? [])
+const paused = computed(() => snap.value?.queue?.paused ?? false)
 const dirty = computed(() => {
   const saved = config.value?.folders ?? []
   const current = folders.value ?? []
@@ -296,6 +333,23 @@ async function doReindex() {
     await refreshJobs()
   } finally {
     reindexing.value = false
+  }
+}
+
+async function togglePause() {
+  if (paused.value) await api.resumeQueue()
+  else await api.pauseQueue()
+  await refreshJobs()
+}
+
+async function stopAndClear() {
+  stopping.value = true
+  try {
+    await api.stopQueue()
+    confirmOpen.value = false
+    await refreshJobs()
+  } finally {
+    stopping.value = false
   }
 }
 
@@ -665,6 +719,57 @@ function fmtBytes(bytes: number): string {
 }
 .link-btn:hover {
   color: var(--text);
+}
+.queue-actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+.btn-danger {
+  padding: 8px 13px;
+  border-radius: 8px;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  background: transparent;
+  color: #fca5a5;
+  font-size: 12.5px;
+}
+.btn-danger:hover {
+  background: rgba(248, 113, 113, 0.1);
+}
+.btn-danger:disabled {
+  opacity: 0.6;
+}
+.paused-tag {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--accent);
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+}
+.confirm-panel {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+}
+.confirm-title {
+  margin: 0 0 8px;
+  font-size: 17px;
+  font-weight: 650;
+}
+.confirm-copy {
+  margin: 0 0 18px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .error-msg {
   margin: 10px 0 0;
