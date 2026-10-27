@@ -526,7 +526,8 @@ func (s *Store) PendingIndexChunks(mediaFileID int64, limit int) ([]ChunkWithMed
 	for rows.Next() {
 		var c ChunkWithMedia
 		if err := rows.Scan(&c.ID, &c.MediaFileID, &c.StartCueIdx, &c.EndCueIdx, &c.Text, &c.IndexedAt,
-			&c.MediaTitle, &c.ShowTitle, &c.Year, &c.Season, &c.Episode, &c.DurationSec, &c.FilePath); err != nil {
+			&c.MediaTitle, &c.ShowTitle, &c.Year, &c.Season, &c.Episode, &c.DurationSec, &c.FilePath,
+			&c.StartSec, &c.EndSec); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -866,7 +867,7 @@ func (s *Store) OldestCacheEntries(kinds ...string) ([]CacheEntry, error) {
 	for _, k := range kinds {
 		args = append(args, k)
 	}
-	rows, err := s.db.Query(`SELECT cache_key, path, kind, bytes, last_access, hits FROM cache_entries WHERE kind IN (`+ph+`) ORDER BY last_access ASC`, args...)
+	rows, err := s.db.Query(`SELECT cache_key, path, kind, bytes, last_access, hits FROM cache_entries WHERE kind IN (`+ph+`) ORDER BY last_access ASC, rowid ASC`, args...)
 	if err != nil {
 		return nil, err
 	}

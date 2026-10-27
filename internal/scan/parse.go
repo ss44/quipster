@@ -26,28 +26,57 @@ var (
 	reYearOnly   = regexp.MustCompile(`^(19|20)\d{2}$`)
 )
 
-var releaseTags = map[string]bool{
-	"1080p": true, "720p": true, "2160p": true, "480p": true, "360p": true, "4k": true, "uhd": true,
-	"hdr": true, "hdr10": true, "dv": true, "webrip": true, "webdl": true, "web": true, "hdtv": true,
-	"bluray": true, "blu": true, "ray": true, "bdrip": true, "bd25": true, "bd50": true, "dvdrip": true,
-	"dvdscr": true, "dvd": true, "hdrip": true, "remux": true, "repack": true, "proper": true,
-	"extended": true, "uncut": true, "unrated": true, "remastered": true, "multi": true, "dual": true,
-	"dubbed": true, "subbed": true, "subs": true, "x264": true, "x265": true, "h264": true, "h265": true,
-	"hevc": true, "avc": true, "xvid": true, "divx": true, "aac": true, "ac3": true, "eac3": true,
-	"ddp": true, "dd": true, "dts": true, "dtshd": true, "truehd": true, "atmos": true, "amzn": true,
-	"nf": true, "netflix": true, "dsnp": true, "hmax": true, "hulu": true, "max": true, "bbc": true,
-	"itv": true, "rarbg": true, "ettv": true, "yts": true, "yify": true, "psa": true, "tgx": true,
-	"10bit": true, "8bit": true, "hddvd": true, "ipt": true,
+// tagList holds release tags in canonical form; separators inside each tag
+// may be any of . _ - or space in the filename (e.g. "H.264", "WEB-DL", "DDP5.1").
+var tagList = []string{
+	"1080p", "720p", "2160p", "480p", "360p", "4k", "uhd", "hdr", "hdr10", "webrip", "webdl", "web-dl",
+	"hdtv", "bluray", "blu-ray", "bdrip", "bd25", "bd50", "dvdrip", "dvdscr", "dvd", "hdrip",
+	"remux", "repack", "proper", "extended", "uncut", "unrated", "remastered", "multi", "dual",
+	"dubbed", "subbed", "subs", "x264", "x265", "h264", "h.264", "h265", "h.265", "hevc", "avc",
+	"xvid", "divx", "aac", "ac3", "eac3", "ddp", "ddp5.1", "ddp7.1", "dd5.1", "dd7.1", "dts",
+	"dtshd", "dts-hd", "truehd", "atmos", "amzn", "nf", "netflix", "dsnp", "hmax", "hulu", "bbc",
+	"itv", "rarbg", "ettv", "yts", "yify", "psa", "tgx", "10bit", "8bit", "hddvd", "dolby",
+	"digital", "2.0", "5.1", "7.1",
 }
 
-var reBitrateTag = regexp.MustCompile(`^(ddp?|dd\+)?[57][\.,]?[17]$`)
+var tagRe = buildTagRe()
 
-func isReleaseTag(tok string) bool {
-	t := strings.ToLower(strings.Trim(tok, ".,-_"))
-	if t == "" {
-		return false
+func buildTagRe() *regexp.Regexp {
+	parts := make([]string, len(tagList))
+	for i, tag := range tagList {
+		var b strings.Builder
+		for _, r := range tag {
+			if r == '.' || r == '-' {
+				b.WriteString(`[._\-\s]?`)
+			} else {
+				b.WriteString(regexp.QuoteMeta(string(r)))
+			}
+		}
+		parts[i] = b.String()
 	}
-	return releaseTags[t] || reBitrateTag.MatchString(t)
+	return regexp.MustCompile(`(?i)(^|[^a-z0-9])(?:` + strings.Join(parts, "|") + `)([^a-z0-9]|$)`)
+}
+
+// stripTags removes release tags while preserving the separator characters on
+// both sides so consecutive tags still match on the next pass.
+func stripTags(s string) string {
+	for n := 0; n < 10; n++ {
+		locs := tagRe.FindAllStringSubmatchIndex(s, -1)
+		if len(locs) == 0 {
+			return s
+		}
+		var b strings.Builder
+		last := 0
+		for _, loc := range locs {
+			b.WriteString(s[last:loc[0]])
+			b.WriteString(s[loc[2]:loc[3]]) // left boundary
+			b.WriteString(s[loc[4]:loc[5]]) // right boundary
+			last = loc[1]
+		}
+		b.WriteString(s[last:])
+		s = b.String()
+	}
+	return s
 }
 
 func dotsToSpaces(s string) string {
@@ -59,19 +88,11 @@ func dotsToSpaces(s string) string {
 	}, s)
 }
 
-var stopwords = map[string]bool{"the": true, "a": true, "an": true, "of": true, "and": true, "part": true, "movie": true, "film": true, "edit": true, "cut": true, "version": true}
+var stopwords = map[string]bool{"the": true, "a": true, "an": true, "of": true, "and": true, "part": true, "movie": true, "film": true, "edit": true, "cut": true, "version": true, "one": true, "two": true, "three": true}
 
-// stripTrailingGroup removes a release-group suffix like "... -iVy" when the
-// token is short and case-mixed. Words like "-Man" or "- The Movie" survive.
-func stripTrailingGroup(s string) string {
-	idx := strings.LastIndex(s, "-")
-	if idx <= 0 || idx == len(s)-1 {
-		return s
-	}
-	tail := strings.TrimSpace(s[idx+1:])
-	head := s[:idx]
-	if tail == "" || strings.ContainsAny(tail, " ") || len(tail) > 10 || stopwords[strings.ToLower(tail)] {
-		return s
+func looksLikeGroupToken(tail string) bool {
+	if tail == "" || strings.Contains(tail, " ") || len(tail) > 10 || stopwords[strings.ToLower(tail)] {
+		return false
 	}
 	hasUpper, hasLower, hasDigit := false, false, false
 	for _, r := range tail {
@@ -84,11 +105,35 @@ func stripTrailingGroup(s string) string {
 			hasDigit = true
 		}
 	}
-	if (hasUpper && hasLower) || (hasDigit && (hasUpper || hasLower)) {
-		return strings.TrimSpace(head)
+	if hasDigit && !hasUpper && !hasLower {
+		return false // plain numbers are often real titles/years
+	}
+	return (hasUpper && hasLower) || (hasUpper && !hasLower)
+}
+
+// stripTrailingGroup removes a release-group suffix like "... -iVy" or
+// "...-GRP" while protecting "Spider-Man" and "- The Movie".
+func stripTrailingGroup(s string) string {
+	if idx := strings.Index(s, " -"); idx >= 0 {
+		tail := strings.TrimSpace(s[idx+2:])
+		if looksLikeGroupToken(tail) {
+			return strings.TrimSpace(s[:idx])
+		}
+		return s
+	}
+	if m := reAttachedGroup.FindStringSubmatch(s); m != nil {
+		prefix := s[:len(s)-len(m[0])]
+		if prefix != "" {
+			last := prefix[len(prefix)-1]
+			if last == '.' || last == '_' || last == '-' || (last >= '0' && last <= '9') {
+				return strings.TrimSuffix(prefix, ".")
+			}
+		}
 	}
 	return s
 }
+
+var reAttachedGroup = regexp.MustCompile(`[-._][A-Za-z0-9]{1,15}$`)
 
 // cleanTitle removes bracketed release groups and quality tags. Parenthesised
 // groups containing a year are preserved (year extraction happens elsewhere).
@@ -115,14 +160,9 @@ func cleanTitle(s string) string {
 		b.WriteByte(r)
 		i++
 	}
-	s = dotsToSpaces(b.String())
-	var keep []string
-	for _, f := range strings.Fields(s) {
-		if !isReleaseTag(f) {
-			keep = append(keep, f)
-		}
-	}
-	out := strings.Join(keep, " ")
+	s = stripTags(b.String())
+	s = dotsToSpaces(s)
+	out := strings.Join(strings.Fields(s), " ")
 	out = strings.TrimSpace(strings.Trim(out, " -–"))
 	return stripTrailingGroup(out)
 }
@@ -239,6 +279,14 @@ func Parse(relPath string) Parsed {
 		}
 		if p.Title == p.ShowTitle {
 			p.Title = ""
+		}
+		if p.Year == 0 {
+			for i := len(folders) - 1; i >= 0; i-- {
+				if y := findYear(folders[i]); y != 0 {
+					p.Year = y
+					break
+				}
+			}
 		}
 	}
 

@@ -56,11 +56,14 @@ func PickSidecar(videoPath string) string {
 		score := -1
 		switch {
 		case tokens["en"] || tokens["eng"] || tokens["english"]:
-			score = 2
+			score = 100
 		case len(tokens) == 0:
-			score = 1
+			score = 50
+		case tokens["forced"] || tokens["sdh"] || tokens["cc"] || tokens["default"]:
+			// forced/SDH-only tracks rank last: they may lack dialogue
+			score = 25
 		default:
-			continue // non-English tagged (forced/sdh/etc. also excluded)
+			continue // other language tags
 		}
 		if ext == ".srt" {
 			score++ // prefer srt on ties
@@ -71,7 +74,7 @@ func PickSidecar(videoPath string) string {
 			best = &b
 		}
 	}
-	if best == nil || best.score < 1 {
+	if best == nil {
 		return ""
 	}
 	return best.path
