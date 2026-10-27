@@ -107,3 +107,14 @@ before `go build` after frontend changes.
 - mp4 stream-copy falls back to Matroska output when codecs are not mp4-compatible.
 - The Meili index is derived state — `POST /api/admin/reindex` rebuilds it from SQLite.
 - VAAPI is probed at startup; without `/dev/dri` the app uses CPU encoding automatically.
+
+## License
+
+[MIT](LICENSE)
+
+## AI disclosure
+
+This project was created with AI assistance. The code, tests, documentation, and design were
+generated and iterated on with **Kilo Code** (an AI coding agent) under human direction and
+review. AI-generated output has not been independently audited; review the code before relying
+on it in production or exposing it to untrusted networks.
