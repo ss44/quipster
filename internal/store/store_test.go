@@ -120,29 +120,6 @@ func TestClaimJobExclusive(t *testing.T) {
 	}
 }
 
-func TestSnapKeyframe(t *testing.T) {
-	s := openTest(t)
-	id, _, _ := s.UpsertMedia("/media/c.mkv", "mkv", 1, 1, "C", 0, 0, 0, "")
-	if err := s.SetKeyframes(id, []float64{0, 2.0, 4.5, 10.1}); err != nil {
-		t.Fatal(err)
-	}
-	cases := map[float64]float64{
-		0.5:  0,
-		1.99: 0,
-		2.0:  2.0,
-		3.0:  2.0,
-		4.6:  4.5,
-		9.9:  4.5,
-		100:  10.1,
-	}
-	for in, want := range cases {
-		got, err := s.SnapKeyframe(id, in)
-		if err != nil || got != want {
-			t.Errorf("SnapKeyframe(%v) = %v err=%v, want %v", in, got, err, want)
-		}
-	}
-}
-
 func TestCacheEntriesLRU(t *testing.T) {
 	s := openTest(t)
 	s.UpsertCacheEntry("k1", "/c/1.mp4", "clip", 100)

@@ -25,12 +25,20 @@
                 v-if="previewURL"
                 :key="previewURL"
                 :src="previewURL"
+                :poster="posterURL"
                 controls
                 autoplay
+                preload="auto"
                 class="preview"
+                @loadeddata="previewLoading = false"
+                @error="onPreviewError"
               />
               <div v-else class="preview preview-empty">
                 <v-progress-circular indeterminate />
+              </div>
+              <div v-if="previewLoading" class="preview-overlay">
+                <v-progress-circular indeterminate color="primary" size="38" />
+                <div class="text-caption mt-2">Preparing preview…</div>
               </div>
             </div>
 
@@ -88,8 +96,8 @@
               </v-btn>
             </div>
             <div class="text-caption text-medium-emphasis mt-1">
-              Fast cuts start at the previous keyframe (may include a few extra seconds of lead-in).
-              Accurate re-encodes to 720p for frame-exact trimming.
+              Download uses a fast lossless cut (starts at the previous keyframe) or an accurate
+              720p re-encode. Preview is always a quick low-bitrate transcode.
             </div>
 
             <v-alert v-if="clipError" type="error" variant="tonal" density="compact" class="mt-3">
@@ -169,6 +177,8 @@ const clipError = ref('')
 const jobProgress = ref<number | null>(null)
 const jobLabel = ref('')
 const previewURL = ref('')
+const previewLoading = ref(false)
+const posterURL = ref('')
 
 const cues = computed(() => detail.value?.cues ?? [])
 const selStart = computed(() => cues.value[Math.min(sel.value[0], cues.value.length - 1)]?.start ?? 0)
@@ -212,7 +222,14 @@ async function openWith(h: Hit) {
 
 function updatePreview() {
   if (!hit.value) return
-  previewURL.value = clipStreamURL(hit.value, selStart.value, selEnd.value, 'fast', false)
+  previewLoading.value = true
+  posterURL.value = `/api/thumb/${hit.value.mediaId}?t=${selStart.value}&w=640`
+  previewURL.value = clipStreamURL(hit.value, selStart.value, selEnd.value, 'preview', false)
+}
+
+function onPreviewError() {
+  previewLoading.value = false
+  clipError.value = 'Preview could not be played in this browser. Try downloading instead.'
 }
 
 function selectAll() {
@@ -349,6 +366,21 @@ function pad(n: number): string {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.preview-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+.preview-shell {
+  position: relative;
 }
 .trim-block {
   margin-top: 14px;

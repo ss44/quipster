@@ -75,8 +75,10 @@ type Request struct {
 
 // Validate checks clip parameters against SQLite and caps.
 func (s *Service) Validate(r Request) (*store.MediaFile, float64, error) {
-	if r.Mode != "fast" && r.Mode != "accurate" {
-		return nil, 0, fmt.Errorf("mode must be fast or accurate")
+	switch r.Mode {
+	case "fast", "accurate", "preview":
+	default:
+		return nil, 0, fmt.Errorf("mode must be fast, preview or accurate")
 	}
 	if r.End <= r.Start {
 		return nil, 0, fmt.Errorf("start must be before end")
@@ -167,12 +169,16 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 
 	var path string
 	if r.Mode == "fast" {
-		kf, err := s.snapKeyframe(ctx, m, r.Start-pad)
-		if err != nil {
-			return "", "", err
+		start := r.Start - pad
+		if start < 0 {
+			start = 0
 		}
-		dur := (r.End + pad) - kf
-		path, err = s.cutFast(ctx, m.Path, kf, dur, filepath.Join(outDir, key))
+		dur := (r.End + pad) - start
+		if dur > s.cfg.MaxClipSec {
+			dur = s.cfg.MaxClipSec
+		}
+		var err error
+		path, err = s.cutFast(ctx, m.Path, start, dur, filepath.Join(outDir, key))
 		if err != nil {
 			return "", "", err
 		}
@@ -185,7 +191,12 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 		if dur > s.cfg.MaxClipSec {
 			dur = s.cfg.MaxClipSec
 		}
-		path, err = s.cutAccurate(ctx, m.Path, start, dur, filepath.Join(outDir, key))
+		var err error
+		if r.Mode == "preview" {
+			path, err = s.cutPreview(ctx, m.Path, start, dur, filepath.Join(outDir, key))
+		} else {
+			path, err = s.cutAccurate(ctx, m.Path, start, dur, filepath.Join(outDir, key))
+		}
 		if err != nil {
 			return "", "", err
 		}
@@ -200,57 +211,20 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 	return path, strings.TrimPrefix(filepath.Ext(path), "."), nil
 }
 
-// keyframeWindowSec bounds how far a stored keyframe may sit from the target
-// before we probe a fresh window (stored lists can be partial).
-const keyframeWindowSec = 90.0
-
-func (s *Service) snapKeyframe(ctx context.Context, m *store.MediaFile, target float64) (float64, error) {
-	if target < 0 {
-		target = 0
-	}
-	var known float64
-	has, err := s.st.HasKeyframes(m.ID)
-	if err != nil {
-		return 0, err
-	}
-	if has {
-		known, err = s.st.SnapKeyframe(m.ID, target)
-		if err != nil {
-			return 0, err
-		}
-		if known >= target-keyframeWindowSec {
-			return known, nil
-		}
-	}
-	// Probe a window around the target; on slow storage this reads a few MB
-	// instead of scanning the whole file.
-	pts, perr := probe.KeyframesNear(ctx, m.Path, target-60, 70)
-	if perr == nil && len(pts) > 0 {
-		if err := s.st.AddKeyframes(m.ID, pts); err != nil {
-			return 0, err
-		}
-		kf, err := s.st.SnapKeyframe(m.ID, target)
-		if err != nil {
-			return 0, err
-		}
-		return kf, nil
-	}
-	if perr != nil {
-		log.Printf("[clips] keyframe window probe failed (%v), using known keyframe", perr)
-	}
-	return known, nil
-}
-
-func (s *Service) cutFast(ctx context.Context, src string, kf, dur float64, outBase string) (string, error) {
+// cutFast stream-copies the clip region. Input-side seek lets ffmpeg start at
+// the keyframe at or before `start` in a single pass — no separate probe.
+func (s *Service) cutFast(ctx context.Context, src string, start, dur float64, outBase string) (string, error) {
 	mp4 := outBase + ".mp4"
-	args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", kf), "-i", src,
-		"-t", fmt.Sprintf("%.3f", dur), "-c", "copy", "-avoid_negative_ts", "make_zero",
+	args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
+		"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0", "-map", "0:a:0?",
+		"-dn", "-sn", "-c", "copy", "-avoid_negative_ts", "make_zero",
 		"-movflags", "+faststart", mp4}
 	if err := runFFmpeg(ctx, args); err != nil {
 		log.Printf("[clips] mp4 remux failed (%v), falling back to matroska", err)
 		mkv := outBase + ".mkv"
-		args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", kf), "-i", src,
-			"-t", fmt.Sprintf("%.3f", dur), "-c", "copy", "-avoid_negative_ts", "make_zero", mkv}
+		args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
+			"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0", "-map", "0:a:0?",
+			"-dn", "-sn", "-c", "copy", "-avoid_negative_ts", "make_zero", mkv}
 		if err2 := runFFmpeg(ctx, args); err2 != nil {
 			os.Remove(mp4)
 			return "", fmt.Errorf("fast cut failed: %v / %v", err, err2)
@@ -260,6 +234,32 @@ func (s *Service) cutFast(ctx context.Context, src string, kf, dur float64, outB
 	}
 	os.Remove(outBase + ".mkv")
 	return mp4, nil
+}
+
+// cutPreview transcodes a small, browser-playable clip as fast as possible;
+// preview quality is intentionally low (ultrafast x264 @ 960px).
+func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64, outBase string) (string, error) {
+	out := outBase + ".mp4"
+	if s.HWAvailable() {
+		args := []string{"-v", "error", "-y", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
+			"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur),
+			"-vf", "scale_vaapi=w=960:h=-2:format=nv12", "-c:v", "h264_vaapi", "-qp", "32",
+			"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out}
+		if err := runFFmpeg(ctx, args); err == nil {
+			return out, nil
+		}
+		log.Printf("[clips] vaapi preview failed, falling back to cpu ultrafast")
+		os.Remove(out)
+	}
+	args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
+		"-t", fmt.Sprintf("%.3f", dur), "-vf", "scale=960:-2",
+		"-c:v", "libx264", "-preset", "ultrafast", "-crf", "32", "-tune", "zerolatency",
+		"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out}
+	if err := runFFmpeg(ctx, args); err != nil {
+		os.Remove(out)
+		return "", fmt.Errorf("preview cut failed: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float64, outBase string) (string, error) {

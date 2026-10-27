@@ -118,11 +118,6 @@ func (s *Store) migrate() error {
 			started_at INTEGER NOT NULL DEFAULT 0,
 			finished_at INTEGER NOT NULL DEFAULT 0
 		)`,
-		`CREATE TABLE IF NOT EXISTS keyframes (
-			media_file_id INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
-			pts REAL NOT NULL,
-			PRIMARY KEY(media_file_id, pts)
-		)`,
 		`CREATE TABLE IF NOT EXISTS cache_entries (
 			cache_key TEXT PRIMARY KEY,
 			path TEXT NOT NULL,
@@ -461,10 +456,10 @@ func (s *Store) cueAtIdx(mediaFileID int64, idx int) ([]Cue, error) {
 }
 
 type Chunk struct {
-	ID          int64 `json:"id"`
-	MediaFileID int64 `json:"mediaFileId"`
-	StartCueIdx int   `json:"startCueIdx"`
-	EndCueIdx   int   `json:"endCueIdx"`
+	ID          int64  `json:"id"`
+	MediaFileID int64  `json:"mediaFileId"`
+	StartCueIdx int    `json:"startCueIdx"`
+	EndCueIdx   int    `json:"endCueIdx"`
 	Text        string `json:"text"`
 	IndexedAt   int64  `json:"indexedAt"`
 }
@@ -936,53 +931,6 @@ func (s *Store) MediaStatusCounts() (map[string]int64, error) {
 		out[st] = n
 	}
 	return out, rows.Err()
-}
-
-func (s *Store) SetKeyframes(mediaFileID int64, pts []float64) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM keyframes WHERE media_file_id=?`, mediaFileID); err != nil {
-		return err
-	}
-	for _, p := range pts {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO keyframes (media_file_id, pts) VALUES (?,?)`, mediaFileID, p); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-// AddKeyframes merges keyframe points without clearing existing rows (used by
-// windowed probes that cover different regions of the same file).
-func (s *Store) AddKeyframes(mediaFileID int64, pts []float64) error {
-	for _, p := range pts {
-		if _, err := s.db.Exec(`INSERT OR IGNORE INTO keyframes (media_file_id, pts) VALUES (?,?)`, mediaFileID, p); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Store) HasKeyframes(mediaFileID int64) (bool, error) {
-	var n int64
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM keyframes WHERE media_file_id=?`, mediaFileID).Scan(&n)
-	return n > 0, err
-}
-
-// SnapKeyframe returns the largest keyframe at or before t (0 if none).
-func (s *Store) SnapKeyframe(mediaFileID int64, t float64) (float64, error) {
-	var kf sql.NullFloat64
-	err := s.db.QueryRow(`SELECT MAX(pts) FROM keyframes WHERE media_file_id=? AND pts <= ?`, mediaFileID, t).Scan(&kf)
-	if err != nil {
-		return 0, err
-	}
-	if !kf.Valid {
-		return 0, nil
-	}
-	return kf.Float64, nil
 }
 
 type CacheEntry struct {

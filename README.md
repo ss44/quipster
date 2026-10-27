@@ -16,9 +16,11 @@ Media dir (bind-mount, read-only) ──> ingestion; cache dir (clips/thumbs) �
 
 - **Search unit:** cues are merged into non-overlapping chunks (≤ ~280 chars, ≤ 3 cues) indexed in
   Meilisearch (`lines` index). Hits are joined back to SQLite for exact cue timestamps.
-- **Clips:** fast mode stream-copies between keyframes (`-c copy`, millisecond cuts, no re-encode);
-  accurate mode re-encodes with VAAPI/QuickSync when available and falls back to CPU `libx264`.
-  Output is cached (`sha256(mediaId|start|end|mode|pad)`) and served with HTTP Range support.
+- **Clips:** `fast` mode stream-copies from the previous keyframe via a single input-seek pass
+  (`-c copy`, no keyframe pre-scan); `preview` mode transcodes a low-bitrate 960px H.264 clip
+  (ultrafast/VAAPI) so it always plays in the browser; `accurate` mode re-encodes 720p from the
+  exact timestamp with VAAPI/QuickSync and CPU `libx264` fallback. Outputs are cached
+  (`sha256(mediaId|start|end|mode|pad)`) and served with HTTP Range support.
 - **Subtitles (MVP):** sidecar `.srt`/`.vtt` (English-tagged or untagged) preferred, else the first
   English embedded text track is extracted. No English track → status `no_subs`, still findable by title.
 - **Metadata (MVP):** filename/folder parsing for `Movies/` + `TV Shows/` layouts (title, year, SxxExx).
@@ -71,7 +73,7 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
 - `GET /api/media`, `GET /api/media/{id}`
 - `GET /api/thumb/{mediaId}?t=&w=` — JPEG, 5s-bucketed cache
 - `GET /api/chunks/{mediaId}:{startCueIdx}-{endCueIdx}` — chunk + cues for the clip modal
-- `GET /api/clips/stream?mediaId=&start=&end=&padMs=&mode=fast|accurate[&download=1]`
+- `GET /api/clips/stream?mediaId=&start=&end=&padMs=&mode=fast|preview|accurate[&download=1]`
   - Range-capable; long accurate cuts return `202 {jobId}` and progress via SSE/admin jobs
 - Admin (`X-API-Token` when configured):
   - `POST /api/admin/scan[?root=subdir]`
