@@ -167,7 +167,7 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 
 	var path string
 	if r.Mode == "fast" {
-		kf, err := s.snapKeyframe(m, r.Start-pad)
+		kf, err := s.snapKeyframe(ctx, m, r.Start-pad)
 		if err != nil {
 			return "", "", err
 		}
@@ -200,24 +200,45 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 	return path, strings.TrimPrefix(filepath.Ext(path), "."), nil
 }
 
-func (s *Service) snapKeyframe(m *store.MediaFile, target float64) (float64, error) {
+// keyframeWindowSec bounds how far a stored keyframe may sit from the target
+// before we probe a fresh window (stored lists can be partial).
+const keyframeWindowSec = 90.0
+
+func (s *Service) snapKeyframe(ctx context.Context, m *store.MediaFile, target float64) (float64, error) {
+	if target < 0 {
+		target = 0
+	}
+	var known float64
 	has, err := s.st.HasKeyframes(m.ID)
 	if err != nil {
 		return 0, err
 	}
-	if !has {
-		pts, err := probe.Keyframes(m.Path)
+	if has {
+		known, err = s.st.SnapKeyframe(m.ID, target)
 		if err != nil {
 			return 0, err
 		}
-		if len(pts) == 0 {
-			return 0, nil
-		}
-		if err := s.st.SetKeyframes(m.ID, pts); err != nil {
-			return 0, err
+		if known >= target-keyframeWindowSec {
+			return known, nil
 		}
 	}
-	return s.st.SnapKeyframe(m.ID, target)
+	// Probe a window around the target; on slow storage this reads a few MB
+	// instead of scanning the whole file.
+	pts, perr := probe.KeyframesNear(ctx, m.Path, target-60, 70)
+	if perr == nil && len(pts) > 0 {
+		if err := s.st.AddKeyframes(m.ID, pts); err != nil {
+			return 0, err
+		}
+		kf, err := s.st.SnapKeyframe(m.ID, target)
+		if err != nil {
+			return 0, err
+		}
+		return kf, nil
+	}
+	if perr != nil {
+		log.Printf("[clips] keyframe window probe failed (%v), using known keyframe", perr)
+	}
+	return known, nil
 }
 
 func (s *Service) cutFast(ctx context.Context, src string, kf, dur float64, outBase string) (string, error) {

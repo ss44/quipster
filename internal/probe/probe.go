@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type SubtitleStream struct {
@@ -158,11 +159,35 @@ func Keyframes(path string) ([]float64, error) {
 	if err != nil {
 		return nil, fmt.Errorf("keyframes %s: %w", path, err)
 	}
+	return parseKeyframeOutput(out), nil
+}
+
+// KeyframesNear lists keyframes within [from, from+dur] only. On slow storage
+// a full keyframe scan reads the entire file; seeking a small interval around
+// the cut point reads a few MB instead.
+func KeyframesNear(ctx context.Context, path string, from, dur float64) ([]float64, error) {
+	if from < 0 {
+		from = 0
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	interval := fmt.Sprintf("%.3f%%+%.3f", from, dur)
+	out, err := exec.CommandContext(ctx, FfprobeBin(), "-v", "error", "-skip_frame", "nokey",
+		"-select_streams", "v:0", "-show_entries", "frame=pts_time",
+		"-read_intervals", interval,
+		"-of", "default=noprint_wrappers=1:nokey=1", "--", path).Output()
+	if err != nil {
+		return nil, fmt.Errorf("keyframes near %.1fs %s: %w", from, path, err)
+	}
+	return parseKeyframeOutput(out), nil
+}
+
+func parseKeyframeOutput(out []byte) []float64 {
 	var pts []float64
 	for _, line := range strings.Fields(string(out)) {
 		if v, err := strconv.ParseFloat(line, 64); err == nil {
 			pts = append(pts, v)
 		}
 	}
-	return pts, nil
+	return pts
 }

@@ -815,6 +815,17 @@ func (s *Store) SetKeyframes(mediaFileID int64, pts []float64) error {
 	return tx.Commit()
 }
 
+// AddKeyframes merges keyframe points without clearing existing rows (used by
+// windowed probes that cover different regions of the same file).
+func (s *Store) AddKeyframes(mediaFileID int64, pts []float64) error {
+	for _, p := range pts {
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO keyframes (media_file_id, pts) VALUES (?,?)`, mediaFileID, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) HasKeyframes(mediaFileID int64) (bool, error) {
 	var n int64
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM keyframes WHERE media_file_id=?`, mediaFileID).Scan(&n)
