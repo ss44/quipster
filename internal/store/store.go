@@ -135,6 +135,15 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	var col int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('media_files') WHERE name='ever_indexed'`).Scan(&col); err != nil {
+		return err
+	}
+	if col == 0 {
+		if _, err := s.db.Exec(`ALTER TABLE media_files ADD COLUMN ever_indexed INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("migrate ever_indexed: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -237,6 +246,19 @@ func (s *Store) UpdateMediaProbe(id int64, duration float64, width, height int, 
 func (s *Store) SetMediaStatus(id int64, status, errMsg string) error {
 	_, err := s.db.Exec(`UPDATE media_files SET status=?, error=? WHERE id=?`, status, errMsg, id)
 	return err
+}
+
+// MarkIndexed sets status=indexed and latches ever_indexed (used to skip
+// pointless delete round-trips on first-time indexing).
+func (s *Store) MarkIndexed(id int64) error {
+	_, err := s.db.Exec(`UPDATE media_files SET status='indexed', error='', ever_indexed=1 WHERE id=?`, id)
+	return err
+}
+
+func (s *Store) EverIndexed(id int64) (bool, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT ever_indexed FROM media_files WHERE id=?`, id).Scan(&n)
+	return n > 0, err
 }
 
 type MediaListPage struct {

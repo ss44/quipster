@@ -91,13 +91,18 @@ func (ix *Indexer) IndexMedia(mediaID int64) error {
 	if err != nil {
 		return err
 	}
-	filter := fmt.Sprintf(`mediaId = %d`, mediaID)
-	task, err := ix.client.Index(IndexName).DeleteDocumentsByFilter(filter, nil)
-	if err != nil {
-		return fmt.Errorf("delete docs %d: %w", mediaID, err)
-	}
-	if _, err := ix.client.WaitForTask(task.TaskUID, 200*time.Millisecond); err != nil {
-		return fmt.Errorf("delete wait %d: %w", mediaID, err)
+	// Docs for a never-indexed media cannot exist; skip the delete round-trip.
+	if ever, err := ix.st.EverIndexed(mediaID); err == nil && ever {
+		filter := fmt.Sprintf(`mediaId = %d`, mediaID)
+		task, err := ix.client.Index(IndexName).DeleteDocumentsByFilter(filter, nil)
+		if err != nil {
+			return fmt.Errorf("delete docs %d: %w", mediaID, err)
+		}
+		if _, err := ix.client.WaitForTask(task.TaskUID, 200*time.Millisecond); err != nil {
+			return fmt.Errorf("delete wait %d: %w", mediaID, err)
+		}
+	} else if err != nil {
+		return err
 	}
 	if len(chunkList) == 0 {
 		return nil
@@ -186,14 +191,7 @@ func (ix *Indexer) JobHandler() func(ctx context.Context, j *store.Job, progress
 		if err := ix.IndexMedia(payload.MediaID); err != nil {
 			return err
 		}
-		m, err := ix.st.GetMedia(payload.MediaID)
-		if err != nil {
-			return err
-		}
-		if m != nil && m.Status == "pending" {
-			return ix.st.SetMediaStatus(payload.MediaID, "indexed", "")
-		}
-		return nil
+		return ix.st.MarkIndexed(payload.MediaID)
 	}
 }
 

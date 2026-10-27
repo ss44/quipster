@@ -81,7 +81,7 @@ func loadConfig() config {
 		meiliKey:     envStr("MEILI_MASTER_KEY", ""),
 		scanIntvl:    parseDuration(envStr("SCAN_INTERVAL", "")),
 		subWorkers:   envInt("SUBTITLE_WORKERS", 4),
-		indexWorkers: envInt("INDEX_WORKERS", 1),
+		indexWorkers: envInt("INDEX_WORKERS", 4),
 		clipWorkers:  envInt("CLIP_WORKERS", 2),
 		apiToken:     os.Getenv("API_TOKEN"),
 		padMs:        envInt("CLIP_PAD_MS", 250),
