@@ -108,7 +108,7 @@ func TestCleanTitleTags(t *testing.T) {
 	if got := cleanTitle("Movie [rarbg] Name (2010)"); got != "Movie Name (2010)" {
 		t.Errorf("cleanTitle = %q", got)
 	}
-	if got := cleanTitle("Link Click (2021) - Pinnacle of Light [WEBRip-1080p][EAC3 2.0][x265]-iVy"); got != "Link Click (2021) Pinnacle of Light" {
+	if got := cleanTitle("Link Click (2021) - Pinnacle of Light [WEBRip-1080p][EAC3 2.0][x265]-iVy"); got != "Link Click (2021) - Pinnacle of Light" {
 		t.Errorf("cleanTitle = %q", got)
 	}
 }

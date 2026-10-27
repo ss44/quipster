@@ -114,7 +114,7 @@ func looksLikeGroupToken(tail string) bool {
 // stripTrailingGroup removes a release-group suffix like "... -iVy" or
 // "...-GRP" while protecting "Spider-Man" and "- The Movie".
 func stripTrailingGroup(s string) string {
-	if idx := strings.Index(s, " -"); idx >= 0 {
+	if idx := strings.LastIndex(s, " -"); idx >= 0 {
 		tail := strings.TrimSpace(s[idx+2:])
 		if looksLikeGroupToken(tail) {
 			return strings.TrimSpace(s[:idx])
