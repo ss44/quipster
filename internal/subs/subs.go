@@ -42,7 +42,7 @@ func PickSidecar(videoPath string) string {
 		if !sidecarExtsContain(ext) {
 			continue
 		}
-		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base+".") ) && !strings.EqualFold(name, base+ext) {
+		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base+".")) && !strings.EqualFold(name, base+ext) {
 			continue
 		}
 		mid := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.ToLower(name), strings.ToLower(base)), ext))

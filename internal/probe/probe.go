@@ -29,13 +29,13 @@ type Result struct {
 
 type ffprobeOut struct {
 	Streams []struct {
-		Index         int    `json:"index"`
-		CodecName     string `json:"codec_name"`
-		CodecType     string `json:"codec_type"`
-		Width         int    `json:"width"`
-		Height        int    `json:"height"`
-		Duration      string `json:"duration"`
-		Disposition   struct {
+		Index       int    `json:"index"`
+		CodecName   string `json:"codec_name"`
+		CodecType   string `json:"codec_type"`
+		Width       int    `json:"width"`
+		Height      int    `json:"height"`
+		Duration    string `json:"duration"`
+		Disposition struct {
 			Default int `json:"default"`
 		} `json:"disposition"`
 		Tags map[string]string `json:"tags"`

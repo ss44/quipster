@@ -59,6 +59,37 @@ func dotsToSpaces(s string) string {
 	}, s)
 }
 
+var stopwords = map[string]bool{"the": true, "a": true, "an": true, "of": true, "and": true, "part": true, "movie": true, "film": true, "edit": true, "cut": true, "version": true}
+
+// stripTrailingGroup removes a release-group suffix like "... -iVy" when the
+// token is short and case-mixed. Words like "-Man" or "- The Movie" survive.
+func stripTrailingGroup(s string) string {
+	idx := strings.LastIndex(s, "-")
+	if idx <= 0 || idx == len(s)-1 {
+		return s
+	}
+	tail := strings.TrimSpace(s[idx+1:])
+	head := s[:idx]
+	if tail == "" || strings.ContainsAny(tail, " ") || len(tail) > 10 || stopwords[strings.ToLower(tail)] {
+		return s
+	}
+	hasUpper, hasLower, hasDigit := false, false, false
+	for _, r := range tail {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= 'a' && r <= 'z':
+			hasLower = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		}
+	}
+	if (hasUpper && hasLower) || (hasDigit && (hasUpper || hasLower)) {
+		return strings.TrimSpace(head)
+	}
+	return s
+}
+
 // cleanTitle removes bracketed release groups and quality tags. Parenthesised
 // groups containing a year are preserved (year extraction happens elsewhere).
 func cleanTitle(s string) string {
@@ -92,7 +123,8 @@ func cleanTitle(s string) string {
 		}
 	}
 	out := strings.Join(keep, " ")
-	return strings.TrimSpace(strings.Trim(out, " -–"))
+	out = strings.TrimSpace(strings.Trim(out, " -–"))
+	return stripTrailingGroup(out)
 }
 
 func findYear(s string) int {
@@ -150,6 +182,7 @@ func Parse(relPath string) Parsed {
 		idx := strings.Index(strings.ToLower(name), strings.ToLower(m[0]))
 		p.ShowTitle = cleanTitle(name[:idx])
 		p.Title = strings.TrimLeft(cleanTitle(name[idx+len(m[0]):]), " -–_")
+		p.Year = findYear(name)
 	} else if m := reSeasonEp2.FindStringSubmatch(name); m != nil {
 		p.IsTV = true
 		p.Season, _ = strconv.Atoi(m[1])
@@ -157,6 +190,7 @@ func Parse(relPath string) Parsed {
 		idx := strings.Index(name, m[0])
 		p.ShowTitle = cleanTitle(name[:idx])
 		p.Title = strings.TrimLeft(cleanTitle(name[idx+len(m[0]):]), " -–_")
+		p.Year = findYear(name)
 	} else {
 		// Season folder + leading episode number, e.g. "Season 01/03 - Pilot.mkv".
 		for i := len(folders) - 1; i >= 0; i-- {

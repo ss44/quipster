@@ -19,7 +19,7 @@ const bucketSec = 5.0
 type Service struct {
 	St       *store.Store
 	CacheDir string
-	Hw       interface{ hwAvailable() bool } // optional vaapi provider
+	Hw       interface{ HWAvailable() bool } // optional vaapi provider
 }
 
 var widths = []int{320, 640}
@@ -103,7 +103,7 @@ func (s *Service) render(ctx context.Context, src string, t float64, width int, 
 		return append(args, "-ss", fmt.Sprintf("%.3f", t), "-i", src, "-frames:v", "1",
 			"-vf", fmt.Sprintf("scale=%d:-2", width), "-q:v", "5", "-f", "image2", out)
 	}
-	hw := s.Hw != nil && s.Hw.hwAvailable()
+	hw := s.Hw != nil && s.Hw.HWAvailable()
 	cmd := exec.CommandContext(ctx, probe.FfmpegBin(), build(hw)...)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		if !hw {

@@ -123,14 +123,30 @@ func Run(ctx context.Context, root string, st *store.Store, onDeleted func(ids [
 
 func (r *ScanResult) Done() int { return r.Seen }
 
-// JobHandler adapts Run to the job runner.
-func JobHandler(root string, st *store.Store, onDeleted func(ids []int64)) func(context.Context, *store.Job, func(float64)) error {
+// JobHandler adapts Run to the job runner. Payload may contain {"root": "movies"}
+// to scan a subdirectory of the media root (validated to stay inside it).
+func JobHandler(baseRoot string, st *store.Store, onDeleted func(ids []int64)) func(context.Context, *store.Job, func(float64)) error {
 	return func(ctx context.Context, j *store.Job, progress func(float64)) error {
+		root := baseRoot
+		var payload struct {
+			Root string `json:"root"`
+		}
+		if json.Unmarshal([]byte(j.Payload), &payload) == nil && payload.Root != "" {
+			rel := filepath.ToSlash(strings.Trim(filepath.Clean(payload.Root), "/"))
+			if strings.Contains(rel, "..") || strings.HasPrefix(rel, "/") {
+				return fmt.Errorf("invalid scan root %q", payload.Root)
+			}
+			root = filepath.Join(baseRoot, filepath.FromSlash(rel))
+		}
+		info, err := os.Stat(root)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("scan root %s unavailable", root)
+		}
 		res, err := Run(ctx, root, st, onDeleted)
 		if err != nil {
 			return err
 		}
-		log.Printf("[scan] #%d: seen=%d changed=%d removed=%d", res.ScanID, res.Seen, res.Changed, res.Removed)
+		log.Printf("[scan] #%d: root=%s seen=%d changed=%d removed=%d", res.ScanID, root, res.Seen, res.Changed, res.Removed)
 		return nil
 	}
 }

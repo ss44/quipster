@@ -243,7 +243,7 @@ func (s *Service) cutFast(ctx context.Context, src string, kf, dur float64, outB
 
 func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float64, outBase string) (string, error) {
 	out := outBase + ".mp4"
-	if s.hwAvailable() {
+	if s.HWAvailable() {
 		args := []string{"-v", "error", "-y", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
 			"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur),
 			"-vf", "scale_vaapi=w=1280:h=720:format=nv12", "-c:v", "h264_vaapi", "-b:v", "2M",
@@ -274,7 +274,7 @@ func runFFmpeg(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (s *Service) hwAvailable() bool {
+func (s *Service) HWAvailable() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.hwprobed {
@@ -351,7 +351,7 @@ func (s *Service) RunWithProgress(ctx context.Context, r Request, report func(fl
 	path := outBase + ".mp4"
 
 	var args []string
-	if s.hwAvailable() {
+	if s.HWAvailable() {
 		args = []string{"-progress", "pipe:1", "-nostats", "-v", "error", "-y", "-hwaccel", "vaapi",
 			"-hwaccel_output_format", "vaapi", "-ss", fmt.Sprintf("%.3f", start), "-i", m.Path,
 			"-t", fmt.Sprintf("%.3f", dur), "-vf", "scale_vaapi=w=1280:h=720:format=nv12",
@@ -364,7 +364,7 @@ func (s *Service) RunWithProgress(ctx context.Context, r Request, report func(fl
 	}
 	if err := runFFmpegProgress(ctx, args, dur, report); err != nil {
 		// vaapi may fail mid-run; retry once on cpu
-		if s.hwAvailable() {
+		if s.HWAvailable() {
 			os.Remove(path)
 			args = args[:0]
 			args = append(args, "-progress", "pipe:1", "-nostats", "-v", "error", "-y", "-ss",

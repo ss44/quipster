@@ -708,12 +708,12 @@ func (s *Store) ListJobs(limit int) ([]Job, error) {
 }
 
 type Scan struct {
-	ID        int64
-	RootPath  string
-	Status    string
-	FilesSeen int64
-	FilesDone int64
-	StartedAt int64
+	ID         int64
+	RootPath   string
+	Status     string
+	FilesSeen  int64
+	FilesDone  int64
+	StartedAt  int64
 	FinishedAt int64
 }
 
