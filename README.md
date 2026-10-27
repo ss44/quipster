@@ -86,6 +86,10 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
   - `POST /api/admin/scan[?root=subdir]` — scans the configured folders, or one ad-hoc folder
   - `POST /api/admin/reindex` — rebuild the Meili index from SQLite
   - `POST /api/admin/reprobe` — re-run probe/audio-subtitle selection for processed files
+  - Queue control: `POST /api/admin/queue/pause`, `POST /api/admin/queue/resume`,
+    `POST /api/admin/queue/clear` (drop queued jobs), `POST /api/admin/queue/stop`
+    (pause + abort in-flight jobs + clear queued). Pause state is persisted and workers in any
+    process stop claiming/cancel within a second.
   - `GET /api/admin/status`, `GET /api/admin/events` (SSE, 1s tick), `GET /api/admin/jobs`
 
 ## Development
