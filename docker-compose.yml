@@ -2,7 +2,8 @@ name: quipster
 
 services:
   app:
-    build: .
+    image: ghcr.io/ss44/quipster:latest
+    pull_policy: always
     # MEDIA_DIR must be a path the Docker daemon can read (kernel mounts or
     # sshfs remounted with allow_other); create_host_path is disabled so the
     # daemon never creates host directories.
@@ -38,7 +39,8 @@ services:
 
   worker:
     profiles: ["workers"]
-    build: .
+    image: ghcr.io/ss44/quipster:latest
+    pull_policy: always
     environment:
       ROLE: worker
       MEILI_URL: http://meilisearch:7700
@@ -84,7 +86,8 @@ services:
   # GPU variant: docker compose --profile gpu up app-gpu
   app-gpu:
     profiles: ["gpu"]
-    build: .
+    image: ghcr.io/ss44/quipster:latest
+    pull_policy: always
     ports: ["8080:8080"]
     environment:
       MEILI_URL: http://meilisearch:7700
