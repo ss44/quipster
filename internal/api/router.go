@@ -214,7 +214,7 @@ func (d Deps) handleChunk(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "media not found")
 		return
 	}
-	span, before, after, err := d.St.CuesInRange(mediaID, startIdx, endIdx)
+span, before, after, err := d.St.CuesInRange(mediaID, startIdx, endIdx)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -222,9 +222,9 @@ func (d Deps) handleChunk(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"chunk":         ch,
 		"media":         m,
-		"cues":          span,
-		"contextBefore": before,
-		"contextAfter":  after,
+		"cues":          search.CueDTOs(span),
+		"contextBefore": search.CueDTOs(before),
+		"contextAfter":  search.CueDTOs(after),
 	})
 }
 

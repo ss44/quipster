@@ -74,7 +74,8 @@ func New(st *store.Store, ix *indexer.Indexer) *Service {
 	return &Service{st: st, ix: ix}
 }
 
-func cueDTOs(cues []store.Cue) []CueDTO {
+// CueDTOs converts stored cues for API responses (also used by the chunks endpoint).
+func CueDTOs(cues []store.Cue) []CueDTO {
 	out := make([]CueDTO, 0, len(cues))
 	for _, c := range cues {
 		out = append(out, CueDTO{Idx: c.Idx, Start: c.StartSec, End: c.EndSec, Text: c.Text})
@@ -170,9 +171,9 @@ func (s *Service) Search(q, show string, page, perPage int) (*Response, error) {
 			Year:         m.Year,
 			StartSec:     ch.StartSec,
 			EndSec:       ch.EndSec,
-			Cues:         cueDTOs(span),
-			Before:       cueDTOs(before),
-			After:        cueDTOs(after),
+			Cues:         CueDTOs(span),
+			Before:       CueDTOs(before),
+			After:        CueDTOs(after),
 			ThumbURL:     fmt.Sprintf("/api/thumb/%d?t=%.1f&w=320", mediaID, ch.StartSec),
 			ContainerExt: containerExt(m.Container),
 			FilePath:     m.Path,
