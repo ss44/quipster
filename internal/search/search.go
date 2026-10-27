@@ -111,6 +111,7 @@ func (s *Service) Search(q, show string, page, perPage int) (*Response, error) {
 		HighlightPostTag:      "</mark>",
 		HitsPerPage:           i64(perPage),
 		Page:                  int64(page),
+		MatchingStrategy:      meili.All,
 	}
 	if strings.TrimSpace(show) != "" {
 		req.Filter = fmt.Sprintf(`showTitle = "%s"`, escape(show))

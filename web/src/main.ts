@@ -5,6 +5,7 @@ import router from './router'
 import vuetify from './plugins/vuetify'
 import 'vuetify/styles'
 import '@mdi/font/css/materialdesignicons.css'
+import './styles.css'
 
 const app = createApp(App)
 app.use(createPinia())

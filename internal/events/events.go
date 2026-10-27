@@ -11,12 +11,14 @@ import (
 
 // Snapshot is the admin progress payload streamed over SSE each tick.
 type Snapshot struct {
-	Scan        *store.Scan      `json:"scan"`
-	Queue       *store.JobStats  `json:"queue"`
+	Scan        *store.Scan     `json:"scan"`
+	Queue       *store.JobStats `json:"queue"`
 	MediaCounts map[string]int64 `json:"mediaCounts"`
-	CacheBytes  int64            `json:"cacheBytes"`
-	Recent      []store.Job      `json:"recentJobs"`
-	MeiliUp     bool             `json:"meiliUp"`
+	Lines       *store.LineStats `json:"lines"`
+	CacheBytes  int64           `json:"cacheBytes"`
+	Recent      []store.Job     `json:"recentJobs"`
+	Running     []store.Job     `json:"runningJobs"`
+	MeiliUp     bool            `json:"meiliUp"`
 }
 
 type Collector struct {
@@ -38,8 +40,14 @@ func (c *Collector) Collect() *Snapshot {
 	if cb, err := c.St.CacheBytes("clip", "thumb", "sub"); err == nil {
 		snap.CacheBytes = cb
 	}
+	if ls, err := c.St.LineStats(); err == nil {
+		snap.Lines = ls
+	}
 	if jobs, err := c.St.ListJobs(8); err == nil {
 		snap.Recent = jobs
+	}
+	if running, err := c.St.RunningJobs(12); err == nil {
+		snap.Running = running
 	}
 	if c.MeiliUp != nil {
 		snap.MeiliUp = c.MeiliUp()

@@ -1,0 +1,198 @@
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(124, 77, 255, 0.14), transparent 60%),
+    radial-gradient(1000px 500px at 90% 0%, rgba(34, 211, 238, 0.08), transparent 55%),
+    #0d0d12;
+  background-attachment: fixed;
+  font-family: Inter, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.24);
+  background-clip: padding-box;
+}
+
+.glass {
+  background: rgba(22, 22, 29, 0.72) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.app-bar {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  background: linear-gradient(120deg, #a78bfa 10%, #22d3ee 90%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.brand-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.9), rgba(34, 211, 238, 0.8));
+  color: #0b0b10 !important;
+  box-shadow: 0 6px 18px rgba(124, 77, 255, 0.35);
+}
+
+.result-card {
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  overflow: hidden;
+}
+.result-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  border-color: rgba(139, 92, 246, 0.35) !important;
+}
+
+.thumb-wrap {
+  position: relative;
+}
+.thumb-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(4px);
+  border-radius: 6px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.thumb-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 10, 14, 0.35);
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+.result-card:hover .thumb-play {
+  opacity: 1;
+}
+
+.cue-line mark,
+mark {
+  background: linear-gradient(120deg, rgba(139, 92, 246, 0.45), rgba(34, 211, 238, 0.3));
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+.clamp-1 {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.fade-in {
+  animation: fadeIn 220ms ease both;
+}
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5);
+  animation: pulse 1.8s infinite;
+}
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(34, 197, 94, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+  }
+}
+
+.mono {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+}
+
+.cue-row {
+  border-left: 2px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.cue-row.selected {
+  background: rgba(139, 92, 246, 0.14);
+  border-left-color: #8b5cf6;
+}
+.cue-row.outside {
+  opacity: 0.42;
+}
+
+.stat-card {
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  background: rgba(24, 24, 33, 0.75) !important;
+}
+
+.hover-actions {
+  opacity: 0.92;
+}
+.result-card:hover .hover-actions {
+  opacity: 1;
+}

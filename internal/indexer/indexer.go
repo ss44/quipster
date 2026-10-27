@@ -1,10 +1,14 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"strings"
 	"time"
 
 	meili "github.com/meilisearch/meilisearch-go"
@@ -17,6 +21,8 @@ const IndexName = "lines"
 type Indexer struct {
 	st     *store.Store
 	client meili.ServiceManager
+	url    string
+	key    string
 	batch  int
 }
 
@@ -24,6 +30,8 @@ func New(st *store.Store, url, masterKey string) *Indexer {
 	return &Indexer{
 		st:     st,
 		client: meili.New(url, meili.WithAPIKey(masterKey)),
+		url:    url,
+		key:    masterKey,
 		batch:  500,
 	}
 }
@@ -81,6 +89,33 @@ func (ix *Indexer) EnsureSettings() error {
 	}
 	if _, err := ix.client.WaitForTask(task.TaskUID, 200*time.Millisecond); err != nil {
 		return fmt.Errorf("settings wait: %w", err)
+	}
+	if err := ix.applyTypoTolerance(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// applyTypoTolerance patches typo settings directly: the Go client always
+// serializes newer fields (disableOnNumbers) that Meili 1.11 rejects.
+func (ix *Indexer) applyTypoTolerance() error {
+	body := []byte(`{"typoTolerance":{"enabled":true,"minWordSizeForTypos":{"oneTypo":6,"twoTypos":10}}}`)
+	req, err := http.NewRequest(http.MethodPatch, strings.TrimRight(ix.url, "/")+"/indexes/"+IndexName+"/settings", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if ix.key != "" {
+		req.Header.Set("Authorization", "Bearer "+ix.key)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("typo settings: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("typo settings: %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
 	return nil
 }

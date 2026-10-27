@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -618,6 +620,13 @@ type Job struct {
 	CreatedAt  int64   `json:"createdAt"`
 	StartedAt  int64   `json:"startedAt"`
 	FinishedAt int64   `json:"finishedAt"`
+
+	MediaID     int64  `json:"mediaId"`
+	MediaTitle  string `json:"mediaTitle"`
+	MediaPath   string `json:"mediaPath"`
+	MediaStatus string `json:"mediaStatus"`
+	MediaCues   int64  `json:"mediaCues"`
+	MediaChunks int64  `json:"mediaChunks"`
 }
 
 func (s *Store) EnqueueJob(jobType, payload string, priority int) (int64, error) {
@@ -721,6 +730,28 @@ func (s *Store) ListJobs(limit int) ([]Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	out, err := scanJobs(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.enrichJobs(out), nil
+}
+
+// RunningJobs lists currently executing jobs with media metadata attached.
+func (s *Store) RunningJobs(limit int) ([]Job, error) {
+	rows, err := s.db.Query(`SELECT id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at
+		FROM jobs WHERE status='running' ORDER BY started_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	out, err := scanJobs(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.enrichJobs(out), nil
+}
+
+func scanJobs(rows *sql.Rows) ([]Job, error) {
 	defer rows.Close()
 	var out []Job
 	for rows.Next() {
@@ -731,6 +762,115 @@ func (s *Store) ListJobs(limit int) ([]Job, error) {
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+func mediaIDFromPayload(payload string) int64 {
+	var p struct {
+		MediaID int64 `json:"mediaId"`
+	}
+	_ = json.Unmarshal([]byte(payload), &p)
+	return p.MediaID
+}
+
+// enrichJobs attaches media title/path/status and cue/chunk counts to jobs.
+func (s *Store) enrichJobs(jobs []Job) []Job {
+	if len(jobs) == 0 {
+		return jobs
+	}
+	idSet := map[int64]bool{}
+	for i := range jobs {
+		jobs[i].MediaID = mediaIDFromPayload(jobs[i].Payload)
+		if jobs[i].MediaID > 0 {
+			idSet[jobs[i].MediaID] = true
+		}
+	}
+	if len(idSet) == 0 {
+		return jobs
+	}
+	ids := make([]int64, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	ph := strings.Join(placeholders, ",")
+
+	media := map[int64]MediaFile{}
+	rows, err := s.db.Query(`SELECT `+mediaCols+` FROM media_files WHERE id IN (`+ph+`)`, args...)
+	if err == nil {
+		for rows.Next() {
+			if m, err := scanMedia(rows); err == nil && m != nil {
+				media[m.ID] = *m
+			}
+		}
+		rows.Close()
+	}
+
+	type count struct{ mediaID, n int64 }
+	loadCounts := func(table string) map[int64]int64 {
+		out := map[int64]int64{}
+		rows, err := s.db.Query(`SELECT media_file_id, COUNT(*) FROM `+table+` WHERE media_file_id IN (`+ph+`) GROUP BY media_file_id`, args...)
+		if err != nil {
+			return out
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var c count
+			if err := rows.Scan(&c.mediaID, &c.n); err == nil {
+				out[c.mediaID] = c.n
+			}
+		}
+		return out
+	}
+	cues := loadCounts("cues")
+	chunks := loadCounts("chunks")
+
+	for i := range jobs {
+		if m, ok := media[jobs[i].MediaID]; ok {
+			jobs[i].MediaTitle = displayName(&m)
+			jobs[i].MediaPath = m.Path
+			jobs[i].MediaStatus = m.Status
+		}
+		jobs[i].MediaCues = cues[jobs[i].MediaID]
+		jobs[i].MediaChunks = chunks[jobs[i].MediaID]
+	}
+	return jobs
+}
+
+func displayName(m *MediaFile) string {
+	if m.ShowTitle != "" {
+		if m.Season > 0 && m.Episode > 0 {
+			return fmt.Sprintf("%s S%02dE%02d", m.ShowTitle, m.Season, m.Episode)
+		}
+		return m.ShowTitle
+	}
+	if m.Title != "" {
+		if m.Year > 0 {
+			return fmt.Sprintf("%s (%d)", m.Title, m.Year)
+		}
+		return m.Title
+	}
+	return filepath.Base(m.Path)
+}
+
+// LineStats summarises how much dialogue has been digested and indexed.
+type LineStats struct {
+	Cues          int64 `json:"cues"`
+	Chunks        int64 `json:"chunks"`
+	ChunksIndexed int64 `json:"chunksIndexed"`
+}
+
+func (s *Store) LineStats() (*LineStats, error) {
+	st := &LineStats{}
+	err := s.db.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM cues),
+		(SELECT COUNT(*) FROM chunks),
+		(SELECT COUNT(*) FROM chunks WHERE indexed_at > 0)`).Scan(&st.Cues, &st.Chunks, &st.ChunksIndexed)
+	return st, err
 }
 
 type Scan struct {

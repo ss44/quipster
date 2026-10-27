@@ -83,20 +83,34 @@ export interface Job {
   status: string
   priority: number
   attempts: number
-  worker_id: string
+  workerId: string
   error: string
   progress: number
-  created_at: number
-  started_at: number
-  finished_at: number
+  createdAt: number
+  startedAt: number
+  finishedAt: number
+  mediaId: number
+  mediaTitle: string
+  mediaPath: string
+  mediaStatus: string
+  mediaCues: number
+  mediaChunks: number
+}
+
+export interface LineStats {
+  cues: number
+  chunks: number
+  chunksIndexed: number
 }
 
 export interface AdminSnapshot {
-  scan: { id: number; root_path: string; status: string; files_seen: number; files_done: number } | null
+  scan: { id: number; rootPath: string; status: string; filesSeen: number; filesDone: number } | null
   queue: { queued: number; running: number; done: number; error: number } | null
   mediaCounts: Record<string, number>
+  lines: LineStats | null
   cacheBytes: number
   recentJobs: Job[] | null
+  runningJobs: Job[] | null
   meiliUp: boolean
 }
 
