@@ -91,7 +91,7 @@ func dotsToSpaces(s string) string {
 var stopwords = map[string]bool{"the": true, "a": true, "an": true, "of": true, "and": true, "part": true, "movie": true, "film": true, "edit": true, "cut": true, "version": true, "one": true, "two": true, "three": true}
 
 func looksLikeGroupToken(tail string) bool {
-	if tail == "" || strings.Contains(tail, " ") || len(tail) > 10 || stopwords[strings.ToLower(tail)] {
+	if tail == "" || strings.Contains(tail, " ") || len(tail) > 16 || stopwords[strings.ToLower(tail)] {
 		return false
 	}
 	hasUpper, hasLower, hasDigit := false, false, false
@@ -142,10 +142,12 @@ func cleanTitle(s string) string {
 	i := 0
 	for i < len(s) {
 		r := s[i]
-		if r == '[' || r == '(' {
+		if r == '[' || r == '(' || r == '{' {
 			closer := byte(']')
 			if r == '(' {
 				closer = ')'
+			} else if r == '{' {
+				closer = '}'
 			}
 			if end := strings.IndexByte(s[i+1:], closer); end >= 0 {
 				inner := s[i+1 : i+1+end]

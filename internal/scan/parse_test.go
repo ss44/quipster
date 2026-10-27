@@ -69,6 +69,8 @@ func TestParseMovies(t *testing.T) {
 		{"Movies/Arrival.2016.720p.WEB-DL.mkv", "Arrival", 2016},
 		{"Movies/1983 - Something (2019)/1983 Something (2019).mkv", "Something", 2019},
 		{"movies/Stand By Me.mkv", "Stand By Me", 0},
+		{"movies/The Tank (2025)/The Tank (2025) {imdb-tt31495504} [WEBDL-2160p][EAC3 5.1][h265]-BiVerseADWeb.mkv", "The Tank", 2025},
+		{"movies/It's a Wonderful Knife (2023)/It's a Wonderful Knife (2023) {imdb-tt27619382} [WEBDL-1080p][EAC3 5.1][h264]-FLUX.mkv", "It's a Wonderful Knife", 2023},
 	}
 	for _, c := range cases {
 		got := Parse(c.rel)
