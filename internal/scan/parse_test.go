@@ -4,9 +4,9 @@ import "testing"
 
 func TestParseTV(t *testing.T) {
 	cases := []struct {
-		rel                          string
-		show, title                  string
-		year, season, episode        int
+		rel                   string
+		show, title           string
+		year, season, episode int
 	}{
 		{
 			rel:     "tv/Link Click/Season 1/Link Click (2021) - S01E11 - Pinnacle of Light [WEBRip-1080p][EAC3 2.0][x265]-iVy.mkv",
@@ -93,13 +93,13 @@ func TestParseMovies(t *testing.T) {
 
 func TestStripTrailingGroup(t *testing.T) {
 	cases := map[string]string{
-		"Pinnacle of Light -iVy":        "Pinnacle of Light",
-		"Secret Recipe -ADWeb":          "Secret Recipe",
-		"Search of the Child -playWEB":  "Search of the Child",
-		"Spider-Man":                    "Spider-Man",
-		"Bill - The Movie":              "Bill - The Movie",
-		"Fury - 2014":                   "Fury - 2014",
-		"Trap -TRAILER":                 "Trap",
+		"Pinnacle of Light -iVy":       "Pinnacle of Light",
+		"Secret Recipe -ADWeb":         "Secret Recipe",
+		"Search of the Child -playWEB": "Search of the Child",
+		"Spider-Man":                   "Spider-Man",
+		"Bill - The Movie":             "Bill - The Movie",
+		"Fury - 2014":                  "Fury - 2014",
+		"Trap -TRAILER":                "Trap",
 	}
 	for in, want := range cases {
 		if got := stripTrailingGroup(in); got != want {
