@@ -101,7 +101,7 @@ func (s *Service) Search(q, show string, page, perPage int) (*Response, error) {
 	if page <= 0 {
 		page = 1
 	}
-	resp := &Response{Query: q, Page: page, PerPage: perPage}
+	resp := &Response{Query: q, Page: page, PerPage: perPage, Hits: []Hit{}, TitleMatches: []TitleMatch{}}
 
 	req := meili.SearchRequest{
 		Query:                 q,
