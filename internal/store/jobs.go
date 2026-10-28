@@ -493,3 +493,17 @@ func (s *Store) EnqueueUniqueJob(jobType, payload string, priority int) (int64, 
 	id, err := s.EnqueueJob(jobType, payload, priority)
 	return id, true, err
 }
+
+// JobByID loads one job row by id, returning nil when absent.
+func (s *Store) JobByID(id int64) (*Job, error) {
+	row := s.db.QueryRow(`SELECT id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at FROM jobs WHERE id=?`, id)
+	var j Job
+	err := row.Scan(&j.ID, &j.Type, &j.Payload, &j.Status, &j.Priority, &j.Attempts, &j.WorkerID, &j.Error, &j.Progress, &j.CreatedAt, &j.StartedAt, &j.FinishedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &j, nil
+}

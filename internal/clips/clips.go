@@ -253,46 +253,14 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 	if err != nil {
 		return "", "", err
 	}
-	pad := float64(r.PadMs) / 1000
-	outDir := filepath.Join(s.cfg.CacheDir, "clips")
-	if mkErr := os.MkdirAll(outDir, 0o750); mkErr != nil {
-		return "", "", mkErr
-	}
-	start := r.Start - pad
-	if start < 0 {
-		start = 0
-	}
-	outBase := filepath.Join(outDir, key)
-
-	var path string
-	if r.Mode == "fast" {
-		dur := (r.End + pad) - start
-		if dur > s.cfg.MaxClipSec {
-			dur = s.cfg.MaxClipSec
-		}
-		path, err = s.cutFast(ctx, m.Path, start, dur, m.AudioStreamIndex, outBase)
-	} else {
-		dur := r.End - r.Start + 2*pad
-		if dur > s.cfg.MaxClipSec {
-			dur = s.cfg.MaxClipSec
-		}
-		if r.Mode == "preview" {
-			path, err = s.cutPreview(ctx, m.Path, start, dur, m.AudioStreamIndex, outBase)
-		} else {
-			path, err = s.cutAccurate(ctx, m.Path, start, dur, m.AudioStreamIndex, outBase)
-		}
-	}
+	path, ext, err := s.cut(ctx, key, m.Path, m.AudioStreamIndex, r, nil)
 	if err != nil {
 		return "", "", err
 	}
-	st, err := os.Stat(path)
-	if err != nil {
+	if err := s.registerCacheEntry(key, path); err != nil {
 		return "", "", err
 	}
-	if err := s.st.UpsertCacheEntry(key, path, "clip", st.Size()); err != nil {
-		return "", "", err
-	}
-	return path, strings.TrimPrefix(filepath.Ext(path), "."), nil
+	return path, ext, nil
 }
 
 // cutFast stream-copies the clip region. Input-side seek lets ffmpeg start at
@@ -328,10 +296,11 @@ func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64
 }
 
 // cutAccurate transcodes a high-quality 720p clip, preferring the hardware
-// pipeline and falling back to libx264 when hardware encoding fails.
-func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
+// pipeline and falling back to libx264 when hardware encoding fails. report
+// forwards ffmpeg progress when non-nil.
+func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string, report func(float64)) (string, error) {
 	out := outBase + ".mp4"
-	if err := s.runTranscode(ctx, src, out, start, dur, audioOrdinal, s.accurateProfile(), nil); err != nil {
+	if err := s.runTranscode(ctx, src, out, start, dur, audioOrdinal, s.accurateProfile(), report); err != nil {
 		removePartial(out)
 		return "", fmt.Errorf("accurate cut failed: %w", err)
 	}
@@ -503,39 +472,17 @@ func (s *Service) RunWithProgress(ctx context.Context, r Request, report func(fl
 		f.err = err
 		return "", "", err
 	}
-	pad := float64(r.PadMs) / 1000
-	outDir := filepath.Join(s.cfg.CacheDir, "clips")
-	if mkErr := os.MkdirAll(outDir, 0o750); mkErr != nil {
-		f.err = mkErr
-		return "", "", mkErr
+	path, ext, rerr := s.cut(ctx, key, m.Path, m.AudioStreamIndex, r, report)
+	if rerr != nil {
+		f.err = rerr
+		return "", "", rerr
 	}
-	start := r.Start - pad
-	if start < 0 {
-		start = 0
-	}
-	dur := r.End - r.Start + 2*pad
-	if dur > s.cfg.MaxClipSec {
-		dur = s.cfg.MaxClipSec
-	}
-	path := filepath.Join(outDir, key) + ".mp4"
-
-	if terr := s.runTranscode(ctx, m.Path, path, start, dur, m.AudioStreamIndex, s.accurateProfile(), report); terr != nil {
-		removePartial(path)
-		f.err = terr
-		return "", "", terr
-	}
-	st, err := os.Stat(path)
-	if err != nil {
+	if err := s.registerCacheEntry(key, path); err != nil {
 		f.err = err
 		return "", "", err
 	}
-	if err := s.st.UpsertCacheEntry(key, path, "clip", st.Size()); err != nil {
-		f.err = err
-		return "", "", err
-	}
-	f.path = path
-	f.ext = "mp4"
-	return path, "mp4", nil
+	f.path, f.ext = path, ext
+	return path, ext, nil
 }
 
 func runFFmpegProgress(ctx context.Context, args []string, dur float64, report func(float64)) error {

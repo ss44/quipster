@@ -29,6 +29,7 @@
 - [Features](#features)
 - [How it works](#how-it-works)
 - [Quickstart (Docker)](#quickstart-docker)
+- [Worker nodes](#worker-nodes)
 - [Configuration](#configuration)
 - [API](#api)
 - [MCP for AI agents](#mcp-for-ai-agents)
@@ -223,12 +224,81 @@ everything behaves exactly as before — queries degrade to plain keyword search
 settings makes Meilisearch re-embed the whole index on startup; run **Admin → Reindex** after
 switching models or dimensions to be safe.
 
+## Worker nodes
+
+One machine probing a large library can bottleneck on storage I/O and CPU. Worker nodes scale
+probing and clip rendering horizontally: the same binary runs in `node` mode, talks to the main
+app over HTTP, and processes jobs while the main app keeps serving search and the UI.
+
+### Launching a node
+
+```sh
+quipster node --server http://main:8080 --media /mnt/library
+```
+
+That is the whole setup. The node registers itself, prints a "waiting for approval" line, and
+stays idle until you approve it:
+
+1. Open **Admin → Nodes** on the main app.
+2. Click **Approve** next to the pending node.
+3. The node receives a token (stored in its user config directory), starts claiming jobs, and
+   shows up in the panel with live status, current work, and throughput.
+
+State lives in cross-platform defaults with environment overrides, so the same command works on
+Windows, macOS and Linux: identity/token in the user config dir (`~/.config/quipster/node.json`,
+`%AppData%\quipster\node.json`, `~/Library/Application Support/quipster/node.json`) and scratch
+cache in the user cache dir (`~/.cache/quipster`, ...).
+
+### How paths are mapped
+
+Nodes mount the same media library locally, but mount points can differ per node. The server
+sends its media root with every claimed job; the node replaces that prefix with its own
+`MEDIA_DIR`. If a node mounts only a subfolder (for example the `library` folder instead of the
+whole media root), tell it explicitly:
+
+```sh
+NODE_MEDIA_MAP=/srv/media/library=/mnt/library quipster node --server http://main:8080
+```
+
+Path comparisons are case-insensitive-tolerant and separator-agnostic, so mixed
+Windows/macOS/Linux clusters work.
+
+### What nodes run
+
+Nodes claim `probe` jobs (ffprobe + subtitle extraction, the ingestion bottleneck) and `clip`
+jobs (rendering). Results stream back to the main app, which owns the database, search index and
+cache. Scans and Meili indexing always run server-side. Each node needs `ffmpeg`/`ffprobe` on its
+`PATH` (or `FFMPEG_BIN`/`FFPROBE_BIN`); the Docker image ships them.
+
+### Safety
+
+- **Approval-gated access:** a node token is issued only when you approve it; revoke any time.
+  Node tokens can claim jobs but never touch admin APIs.
+- **Lease-safe queue:** jobs are claimed atomically and report progress via heartbeats. A node
+  that dies mid-job has its work requeued automatically (within ~1 minute), and late results from
+  a requeued job are dropped instead of double-applied.
+- **Pause/stop respected:** queue pause and scan exclusivity propagate to nodes on the next
+  heartbeat, mirroring local worker behavior.
+
+### Docker
+
+```yaml
+# in docker-compose.yml (included, gated behind the "node" profile)
+docker compose --profile node up -d quipster-node
+```
+
+Set `NODE_SERVER_URL` to the main app's URL and mount the library the same way the app does.
+
 ## Configuration
 
 | Env | Default | Meaning |
 |---|---|---|
 | `ADDR` | `:8080` | HTTP listen address |
-| `ROLE` | `all` | `api`, `worker`, or `all` (single binary does both) |
+| `ROLE` | `all` | `api`, `worker`, `all`, or `node` (worker-node mode; needs `NODE_SERVER_URL`) |
+| `NODE_SERVER_URL` | — | worker-node mode: base URL of the main app (`quipster node --server` or this var) |
+| `NODE_NAME` | hostname | worker-node mode: display name shown in the admin Nodes panel |
+| `NODE_MEDIA_MAP` | — | worker-node mode: explicit media path mapping `serverPrefix=localPath` pairs; see [Worker nodes](#worker-nodes) |
+| `NODE_HEARTBEAT` | `10s` | worker-node mode: heartbeat cadence; a node silent for ~45s is treated offline and its jobs requeued |
 | `MEDIA_DIR` | `./media` | Library root (read-only bind mount) |
 | `LIBRARY_PATHS` | — | Comma-separated folders under `MEDIA_DIR` to index (e.g. `movies,tv`). Seeds the persisted setting on first run |
 | `DATA_DIR` | `./data` | SQLite database location |
@@ -289,6 +359,13 @@ switching models or dimensions to be safe.
     (pause + abort in-flight jobs + clear queued). Pause state is persisted and workers in any
     process stop claiming/cancel within a second.
   - `GET /api/admin/status`, `GET /api/admin/events` (SSE, 1s tick), `GET /api/admin/jobs`
+  - Nodes: `GET /api/admin/nodes`, `POST /api/admin/nodes/{id}/approve`,
+    `POST /api/admin/nodes/{id}/revoke`, `DELETE /api/admin/nodes/{id}`
+- Worker nodes (token issued at approval; see [Worker nodes](#worker-nodes)):
+  - `POST /api/nodes/register` — register for approval (no auth; approval gates everything else)
+  - `GET /api/nodes/{id}/state` — approval poll with the registration secret
+  - `POST /api/nodes/claim`, `POST /api/nodes/heartbeat`
+  - `POST /api/nodes/jobs/{id}/complete`, `POST /api/nodes/jobs/{id}/result` (probe/clip artifacts)
 
 ## MCP for AI agents
 

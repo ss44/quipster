@@ -2,8 +2,13 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
+
+	"quipster/internal/clips"
+	"quipster/internal/probe"
+	"quipster/internal/store"
 )
 
 func TestEnvStr(t *testing.T) {
@@ -199,5 +204,74 @@ func TestLoadConfigOverrides(t *testing.T) {
 	}
 	if got := loadConfig(); got != want {
 		t.Errorf("loadConfig = %+v, want %+v", got, want)
+	}
+}
+
+func TestParseNodeArgs(t *testing.T) {
+	opts, err := parseNodeArgs([]string{
+		"--server", "http://main:8080",
+		"--name", "gpu-box",
+		"--media", "/mnt/library",
+		"--media-map", "/srv/media/library=/mnt/library",
+		"--cache", "/srv/cache",
+		"--state", "/srv/state/node.json",
+	})
+	if err != nil {
+		t.Fatalf("parseNodeArgs: %v", err)
+	}
+	if opts.ServerURL != "http://main:8080" || opts.Name != "gpu-box" || opts.MediaDir != "/mnt/library" {
+		t.Errorf("opts = %+v", opts)
+	}
+	if opts.MediaMap != "/srv/media/library=/mnt/library" || opts.CacheDir != "/srv/cache" || opts.StatePath != "/srv/state/node.json" {
+		t.Errorf("opts = %+v", opts)
+	}
+
+	// Unknown flags are parse errors, not fatals.
+	if _, err := parseNodeArgs([]string{"--bogus"}); err == nil {
+		t.Error("unknown flag must be a parse error")
+	}
+}
+
+func TestNewNodeServiceWiring(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Logf("close store: %v", err)
+		}
+	})
+	cfg := config{
+		mediaDir:   "/srv/media",
+		cacheDir:   dir,
+		maxClipSec: 90,
+	}
+	clipSvc := clips.New(st, clips.Config{
+		CacheDir:     dir,
+		PreviewRes:   "640:-2",
+		AccurateRes:  "1280:-2",
+		CPUPreset:    "veryfast",
+		MaxClipSec:   90,
+		DefaultPadMs: 250,
+	})
+	pipe := &probe.Pipeline{St: st, SubsCacheDir: filepath.Join(dir, "subs")}
+	svc := newNodeService(cfg, st, pipe, clipSvc)
+	if svc == nil {
+		t.Fatal("newNodeService returned nil")
+	}
+	got := svc.Settings()
+	if got.MediaRoot != "/srv/media" {
+		t.Errorf("MediaRoot = %q, want the scanner's exact string", got.MediaRoot)
+	}
+	if got.Clips.PreviewRes != "640:-2" || got.Clips.AccurateRes != "1280:-2" || got.Clips.CPUPreset != "veryfast" {
+		t.Errorf("clip settings not mirrored: %+v", got.Clips)
+	}
+	if got.Clips.MaxClipSec != 90 || got.Clips.DefaultPadMs != 250 {
+		t.Errorf("clip settings not mirrored: %+v", got.Clips)
+	}
+	if got.Version != version {
+		t.Errorf("Version = %q, want %q", got.Version, version)
 	}
 }

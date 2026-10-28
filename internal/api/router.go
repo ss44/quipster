@@ -22,6 +22,7 @@ import (
 	"quipster/internal/events"
 	"quipster/internal/indexer"
 	"quipster/internal/jobs"
+	"quipster/internal/nodes"
 	"quipster/internal/scan"
 	"quipster/internal/search"
 	"quipster/internal/store"
@@ -47,7 +48,8 @@ type Deps struct {
 	SubsDir     string
 	APIToken    string
 	Diagnostics *diagnostics.Collector
-	MCP         http.Handler // Model Context Protocol endpoint at /mcp; nil disables it
+	MCP         http.Handler   // Model Context Protocol endpoint at /mcp; nil disables it
+	Nodes       *nodes.Service // nil disables the worker-node endpoints
 }
 
 // Router builds the application HTTP handler: standard middleware, public
@@ -116,6 +118,30 @@ func Router(d Deps) http.Handler {
 		r.Post("/api/admin/diagnostics/report", d.handleDiagnosticsReport)
 		r.Get("/api/admin/logs", d.handleLogs)
 	})
+
+	// Worker-node cluster endpoints. Registration is open (approval gates
+	// access); everything else requires the node token issued on approval.
+	if d.Nodes != nil {
+		r.Post("/api/nodes/register", d.handleNodeRegister)
+		r.Get("/api/nodes/{id}/state", d.handleNodeState)
+		r.Group(func(r chi.Router) {
+			r.Use(d.nodeAuth)
+			r.Post("/api/nodes/claim", d.handleNodeClaim)
+			r.Post("/api/nodes/heartbeat", d.handleNodeHeartbeat)
+			r.Post("/api/nodes/jobs/{id}/complete", d.handleNodeComplete)
+			r.Post("/api/nodes/jobs/{id}/result", d.handleNodeResult)
+		})
+		// Node administration joins the token-guarded admin surface.
+		r.Group(func(r chi.Router) {
+			if d.APIToken != "" {
+				r.Use(d.tokenAuth)
+			}
+			r.Get("/api/admin/nodes", d.handleNodesList)
+			r.Post("/api/admin/nodes/{id}/approve", d.handleNodeApprove)
+			r.Post("/api/admin/nodes/{id}/revoke", d.handleNodeRevoke)
+			r.Delete("/api/admin/nodes/{id}", d.handleNodeDelete)
+		})
+	}
 
 	if d.WebFS != nil {
 		r.NotFound(d.spaHandler())

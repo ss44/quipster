@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -24,6 +26,8 @@ import (
 	"quipster/internal/jobs"
 	"quipster/internal/logbuf"
 	"quipster/internal/mcp"
+	"quipster/internal/node"
+	"quipster/internal/nodes"
 	"quipster/internal/probe"
 	"quipster/internal/scan"
 	"quipster/internal/search"
@@ -153,7 +157,7 @@ func parseDuration(s string) time.Duration {
 // registerJobHandlers wires the media-ingestion and clip handlers into the
 // job runner. Worker pools stay I/O-tuned: subtitle extraction is NFS-bound,
 // so its pool size is the throughput lever.
-func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *indexer.Indexer, clipSvc *clips.Service) {
+func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *indexer.Indexer, clipSvc *clips.Service, pipeline *probe.Pipeline) {
 	onDeleted := func(ids []int64) {
 		if err := ix.DeleteMedia(ids); err != nil {
 			log.Printf("delete media docs %v: %v", ids, err)
@@ -164,16 +168,22 @@ func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *i
 	// probes are canceled and requeued, and new probes wait for the walk.
 	gate := jobs.NewGate(runner)
 	runner.Register("scan", 1, gate.Scan(scan.JobHandler(cfg.mediaDir, st, onDeleted, scan.WithTimeout(cfg.scanTimeout))))
-	pipeline := &probe.Pipeline{
+	runner.Register("probe", cfg.subWorkers, gate.Probe(pipeline.JobHandler()))
+	runner.Register("index", cfg.indexWorkers, ix.JobHandler())
+	runner.Register("clip", cfg.clipWorkers, clipSvc.JobHandler())
+}
+
+// buildProbePipeline constructs the probe pipeline shared by the local job
+// runner and the worker-node protocol (which applies remote results through
+// the same Apply path).
+func buildProbePipeline(cfg config, st *store.Store) *probe.Pipeline {
+	return &probe.Pipeline{
 		St:             st,
 		SubsCacheDir:   filepath.Join(cfg.cacheDir, "subs"),
 		ExtractConns:   envInt("EXTRACT_CONNS", 4),
 		ProbeTimeout:   cfg.probeTimeout,
 		ExtractTimeout: cfg.extractTimeout,
 	}
-	runner.Register("probe", cfg.subWorkers, gate.Probe(pipeline.JobHandler()))
-	runner.Register("index", cfg.indexWorkers, ix.JobHandler())
-	runner.Register("clip", cfg.clipWorkers, clipSvc.JobHandler())
 }
 
 // app bundles the wired services a running quipster process needs. Keeping
@@ -223,8 +233,17 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 
 	runner := jobs.NewRunner(st, "worker")
 	runner.SetJobTimeout(parseDuration(envStr("JOB_TIMEOUT", "3h")))
+	pipeline := buildProbePipeline(cfg, st)
 	if cfg.role == "all" || cfg.role == "worker" {
-		registerJobHandlers(cfg, st, runner, ix, clipSvc)
+		registerJobHandlers(cfg, st, runner, ix, clipSvc, pipeline)
+	}
+
+	// API-serving roles host the worker-node protocol; the janitor
+	// requeues jobs whose claiming node went quiet.
+	var nodeSvc *nodes.Service
+	if cfg.role == "all" || cfg.role == "api" {
+		nodeSvc = newNodeService(cfg, st, pipeline, clipSvc)
+		go nodeSvc.Janitor(ctx, nodesJanitorInterval)
 	}
 
 	if cfg.scanIntvl > 0 && (cfg.role == "all" || cfg.role == "api") {
@@ -243,6 +262,7 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 		WebFS:       web.Dist,
 		APIToken:    cfg.apiToken,
 		Diagnostics: diag,
+		Nodes:       nodeSvc,
 	}
 	// MCP is served in two modes: streamable HTTP mounted at /mcp on API
 	// processes, and stdio for local single-process integrations (worker role
@@ -276,7 +296,19 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 var version = "dev"
 
 func main() {
+	// `quipster node` launches the stateless worker-node mode: it talks to
+	// a main app over HTTP instead of opening the store directly.
+	if len(os.Args) > 1 && os.Args[1] == "node" {
+		runNodeCmd(os.Args[2:])
+		return
+	}
 	cfg := loadConfig()
+	if cfg.role == "node" {
+		// Env-driven node mode for container deployments: ROLE=node plus
+		// NODE_SERVER_URL behaves exactly like the subcommand.
+		startNode(node.Options{})
+		return
+	}
 	cfg.logs = logbuf.New(0)
 	log.SetOutput(io.MultiWriter(os.Stderr, cfg.logs))
 	log.Printf("quipster starting: role=%s addr=%s media=%s data=%s cache=%s meili=%s",
@@ -379,6 +411,90 @@ func waitForSignal(application *app) {
 	<-sig
 	log.Printf("shutting down")
 	application.Stop()
+}
+
+// runNodeCmd implements `quipster node`: the same binary acting as a
+// stateless worker node that claims jobs from a main app over HTTP.
+func runNodeCmd(args []string) {
+	opts, err := parseNodeArgs(args)
+	if err != nil {
+		log.Fatalf("node flags: %v", err)
+	}
+	startNode(opts)
+}
+
+// parseNodeArgs parses the `node` subcommand flags into node options. It is
+// separated from runNodeCmd so flag handling is testable without launching a
+// node session.
+func parseNodeArgs(args []string) (node.Options, error) {
+	fs := flag.NewFlagSet("node", flag.ContinueOnError)
+	fs.Usage = func() {
+		// Usage output goes to a writer the caller chose; a write
+		// failure cannot be meaningfully handled here.
+		fmt.Fprintln(fs.Output(), "usage: quipster node [flags]")                                                   //nolint:errcheck // usage output, nothing sensible on failure
+		fmt.Fprintln(fs.Output(), "\nRuns a worker node that claims probe and clip jobs from a main quipster app.") //nolint:errcheck // usage output, nothing sensible on failure
+		fs.PrintDefaults()
+	}
+	var (
+		server   = fs.String("server", "", "base URL of the main quipster app (or NODE_SERVER_URL)")
+		name     = fs.String("name", "", "display name shown in the admin Nodes panel (default: hostname)")
+		media    = fs.String("media", "", "local mount of the media library (default: ./media)")
+		mediaMap = fs.String("media-map", "", "explicit media path mapping serverPrefix=localPath (or NODE_MEDIA_MAP)")
+		cache    = fs.String("cache", "", "scratch cache dir (default: user cache dir/quipster)")
+		state    = fs.String("state", "", "identity and token state file (default: user config dir/quipster/node.json)")
+	)
+	if err := fs.Parse(args); err != nil {
+		return node.Options{}, err
+	}
+	return node.Options{
+		ServerURL: *server,
+		Name:      *name,
+		MediaDir:  *media,
+		MediaMap:  *mediaMap,
+		CacheDir:  *cache,
+		StatePath: *state,
+	}, nil
+}
+
+// startNode resolves the configuration and runs the node until interrupted.
+func startNode(opts node.Options) {
+	log.SetFlags(log.LstdFlags)
+	cfg, err := node.LoadConfig(opts)
+	if err != nil {
+		log.Fatalf("node config: %v", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := node.Run(ctx, cfg, version); err != nil {
+		log.Fatalf("node: %v", err)
+	}
+}
+
+// nodesJanitorInterval is how often the server sweeps for jobs orphaned by
+// offline worker nodes.
+const nodesJanitorInterval = 20 * time.Second
+
+// newNodeService builds the server side of the worker-node protocol for
+// API-serving roles. MediaRoot is passed exactly as the scanner receives it,
+// because media paths in the store are built from that same string; nodes
+// remap it onto their own mounts.
+func newNodeService(cfg config, st *store.Store, pipe *probe.Pipeline, clipSvc *clips.Service) *nodes.Service {
+	ccfg := clipSvc.Config()
+	svc := nodes.NewService(st, nodes.Settings{
+		MediaRoot:    cfg.mediaDir,
+		SubsCacheDir: filepath.Join(cfg.cacheDir, "subs"),
+		Clips: nodes.ClipSettings{
+			PreviewRes:   ccfg.PreviewRes,
+			AccurateRes:  ccfg.AccurateRes,
+			CPUPreset:    ccfg.CPUPreset,
+			MaxClipSec:   ccfg.MaxClipSec,
+			DefaultPadMs: ccfg.DefaultPadMs,
+		},
+		Version: version,
+	})
+	svc.Pipeline = pipe
+	svc.Clips = clipSvc
+	return svc
 }
 
 // seedLibraryPaths seeds the persisted library-folders setting from the

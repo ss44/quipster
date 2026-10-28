@@ -11,6 +11,7 @@ export default createRouter({
       children: [
         { path: 'library', name: 'admin-library', component: () => import('./components/LibraryPanel.vue') },
         { path: 'diagnostics', name: 'admin-diagnostics', component: () => import('./components/DiagnosticsView.vue') },
+        { path: 'nodes', name: 'admin-nodes', component: () => import('./components/NodesView.vue') },
       ],
     },
   ],
