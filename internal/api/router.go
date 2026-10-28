@@ -304,12 +304,12 @@ func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {
 	// Long accurate cuts run as background jobs with progress.
 	span := req.End - req.Start
 	if mode == "accurate" && span > d.Clips.Config().LongCutSec {
-		jobID, queued, err := d.enqueueClipJob(req)
+		jobID, newlyQueued, err := d.St.EnqueueUniqueJob("clip", clips.AsyncJobPayload(req), 1)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if queued {
+		if newlyQueued || jobID > 0 { // always return accepted if it's async
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			writeJSON(w, map[string]any{"status": "queued", "jobId": jobID, "cacheKey": key})
@@ -330,20 +330,6 @@ func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {
 	d.serveClip(w, r, path, m, req)
 }
 
-func (d Deps) enqueueClipJob(req clips.Request) (int64, bool, error) {
-	payload := clips.AsyncJobPayload(req)
-	jobs, err := d.St.ListJobs(200)
-	if err != nil {
-		return 0, false, err
-	}
-	for _, j := range jobs {
-		if j.Type == "clip" && j.Payload == payload && (j.Status == "queued" || j.Status == "running") {
-			return j.ID, true, nil
-		}
-	}
-	id, err := d.St.EnqueueJob("clip", payload, 1)
-	return id, true, err
-}
 
 func (d Deps) serveClip(w http.ResponseWriter, r *http.Request, path string, m *store.MediaFile, req clips.Request) {
 	f, err := os.Open(path)
