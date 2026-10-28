@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# Pre-commit hook to run tests, golangci-lint, and check coverage
+
+echo "Running golangci-lint..."
+if ! golangci-lint run; then
+    echo "❌ golangci-lint failed. Please fix the reported errors."
+    exit 1
+fi
+echo "✅ golangci-lint passed!"
+
+echo "Running go test and checking coverage..."
+if ! go test -coverprofile=coverage.out ./...; then
+    echo "❌ Tests failed. Please fix broken tests before committing."
+    exit 1
+fi
+
+# Calculate total coverage percentage
+TOTAL_COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+echo "Total Coverage: ${TOTAL_COVERAGE}%"
+
+# Check if coverage is below 85% (using awk to handle floating point comparison)
+if awk "BEGIN {exit !($TOTAL_COVERAGE < 85.0)}"; then
+    echo "❌ Test coverage is below 85% (currently ${TOTAL_COVERAGE}%). Please add more tests."
+    exit 1
+fi
+
+echo "✅ Test coverage is >= 85%!"
+echo "✅ All checks passed!"
+exit 0

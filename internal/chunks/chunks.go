@@ -1,3 +1,5 @@
+// Package chunks merges subtitle cues into non-overlapping, search-sized
+// dialog chunks for indexing.
 package chunks
 
 import (
@@ -10,17 +12,19 @@ const (
 	gapCloseSec = 5.0
 )
 
+// Cue is one timed subtitle line as consumed from the cue store.
 type Cue struct {
-	Idx      int
+	Text     string
 	StartSec float64
 	EndSec   float64
-	Text     string
+	Idx      int
 }
 
+// Chunk is the merged result: a cue index range plus the joined dialog text.
 type Chunk struct {
+	Text        string
 	StartCueIdx int
 	EndCueIdx   int
-	Text        string
 }
 
 // Build merges consecutive cues into non-overlapping chunks of at most ~280

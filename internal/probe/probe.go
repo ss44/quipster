@@ -1,67 +1,94 @@
+// Package probe wraps ffprobe/ffmpeg to inspect media files, pick the best
+// audio and text-subtitle tracks, and extract embedded subtitles to SRT.
 package probe
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
+// Probing must read container headers, not crawl the media payload. Without
+// caps, files with a trailing or missing index (MP4 with moov at the end, MKV
+// without cues) can make ffprobe scan an entire 20GB+ file. These bounds keep
+// probe time independent of file size (issue #1).
+const (
+	// defaultAnalyzeDuration caps ffprobe's per-stream analysis window
+	// (flag value is microseconds).
+	defaultAnalyzeDuration = 10 * time.Second
+	// defaultProbeSize caps how many input bytes ffprobe inspects.
+	defaultProbeSize = 50 << 20 // 50 MiB
+	// defaultProbeTimeout bounds one ffprobe run before it is killed and the
+	// file skipped.
+	defaultProbeTimeout = 60 * time.Second
+)
+
+// SubtitleStream describes one embedded subtitle stream reported by ffprobe.
 type SubtitleStream struct {
-	Index   int    // absolute ffprobe stream index
-	Ordinal int    // index among subtitle streams only
 	Codec   string // subrip, mov_text, ass, ...
 	Lang    string
+	Index   int // absolute ffprobe stream index
+	Ordinal int // index among subtitle streams only
 }
 
+// AudioStream describes one audio track reported by ffprobe.
 type AudioStream struct {
-	Index    int // absolute ffprobe stream index
-	Ordinal  int // index among audio streams only
 	Codec    string
 	Lang     string
 	Title    string // track title, e.g. "Commentary"
-	Default  bool
+	Index    int    // absolute ffprobe stream index
+	Ordinal  int    // index among audio streams only
 	Channels int
+	Default  bool
 }
 
+// Result is the probe summary of a media file: format metadata plus the
+// audio and subtitle streams relevant for clip building.
 type Result struct {
-	Duration   float64
-	Width      int
-	Height     int
 	VideoCodec string
 	AudioCodec string
 	Container  string
-	StartTime  float64
 	Subs       []SubtitleStream
 	Audio      []AudioStream
+	Duration   float64
+	Width      int
+	Height     int
+	StartTime  float64
 }
 
+// ffprobeOut mirrors the subset of ffprobe JSON output the pipeline consumes.
+// Fields are ordered for compact layout; JSON decoding is name-based.
 type ffprobeOut struct {
-	Streams []struct {
-		Index       int    `json:"index"`
-		CodecName   string `json:"codec_name"`
-		CodecType   string `json:"codec_type"`
-		Width       int    `json:"width"`
-		Height      int    `json:"height"`
-		Channels    int    `json:"channels"`
-		Duration    string `json:"duration"`
-		Disposition struct {
-			Default int `json:"default"`
-		} `json:"disposition"`
-		Tags map[string]string `json:"tags"`
-	} `json:"streams"`
 	Format struct {
 		FormatName string `json:"format_name"`
 		Duration   string `json:"duration"`
 		StartTime  string `json:"start_time"`
 	} `json:"format"`
+	Streams []struct {
+		Tags        map[string]string `json:"tags"`
+		CodecName   string            `json:"codec_name"`
+		CodecType   string            `json:"codec_type"`
+		Duration    string            `json:"duration"`
+		Index       int               `json:"index"`
+		Width       int               `json:"width"`
+		Height      int               `json:"height"`
+		Channels    int               `json:"channels"`
+		Disposition struct {
+			Default int `json:"default"`
+		} `json:"disposition"`
+	} `json:"streams"`
 }
 
+// FfprobeBin resolves the ffprobe binary, overridable via FFPROBE_BIN.
 func FfprobeBin() string { return envOr("FFPROBE_BIN", "ffprobe") }
 
+// FfmpegBin resolves the ffmpeg binary, overridable via FFMPEG_BIN.
 func FfmpegBin() string { return envOr("FFMPEG_BIN", "ffmpeg") }
 
 func envOr(k, d string) string {
@@ -87,12 +114,46 @@ func fileDuration(o *ffprobeOut) float64 {
 	return 0
 }
 
-// Probe runs ffprobe and summarises streams of interest.
-func Probe(path string) (*Result, error) {
-	out, err := exec.Command(FfprobeBin(), "-v", "error", "-print_format", "json",
-		"-show_format", "-show_streams", "--", path).Output()
+// probeArgs builds the ffprobe invocation: capped analysis (-analyzeduration,
+// -probesize) so large files are probed from headers instead of scanned whole.
+func probeArgs(path string) []string {
+	return []string{
+		"-v", "error",
+		"-analyzeduration", strconv.FormatInt(int64(defaultAnalyzeDuration/time.Microsecond), 10),
+		"-probesize", strconv.FormatInt(int64(defaultProbeSize), 10),
+		"-print_format", "json",
+		"-show_format", "-show_streams",
+		"--", path,
+	}
+}
+
+// stderrDetail surfaces ffprobe's stderr (-v error output) for diagnosis,
+// capped since it is stored in the media error column shown in the UI.
+func stderrDetail(err error) string {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || len(ee.Stderr) == 0 {
+		return ""
+	}
+	s := strings.TrimSpace(string(ee.Stderr))
+	if s == "" {
+		return ""
+	}
+	if r := []rune(s); len(r) > 200 {
+		s = string(r[:200]) + "..."
+	}
+	return ": " + s
+}
+
+// Probe runs ffprobe and summarizes streams of interest. ctx must be non-nil
+// and bounds the run: expiry kills ffprobe and returns a context error the
+// caller can detect with errors.Is.
+func Probe(ctx context.Context, path string) (*Result, error) {
+	out, err := exec.CommandContext(ctx, FfprobeBin(), probeArgs(path)...).Output() //nolint:gosec // probing user-supplied media paths is the package's purpose
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe %s: %w", path, err)
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, fmt.Errorf("ffprobe %s: %w", path, cerr)
+		}
+		return nil, fmt.Errorf("ffprobe %s: %w%s", path, err, stderrDetail(err))
 	}
 	var o ffprobeOut
 	if err := json.Unmarshal(out, &o); err != nil {
@@ -102,8 +163,10 @@ func Probe(path string) (*Result, error) {
 		Duration:  fileDuration(&o),
 		Container: o.Format.FormatName,
 	}
-	if o.Format.StartTime != "" {
-		r.StartTime, _ = strconv.ParseFloat(o.Format.StartTime, 64)
+	// start_time is best-effort metadata; a missing or unparsable value
+	// simply means no drift correction later.
+	if st, err := strconv.ParseFloat(o.Format.StartTime, 64); err == nil {
+		r.StartTime = st
 	}
 	ord := 0
 	audioOrd := 0
@@ -200,7 +263,7 @@ func IsTextSubtitle(codec string) bool { return textSubCodecs[strings.ToLower(co
 // ExtractSubtitle dumps one subtitle stream to SRT. Extraction requires
 // scanning the whole container, so callers should bound ctx.
 func ExtractSubtitle(ctx context.Context, path string, ordinal int, outPath string) error {
-	cmd := exec.CommandContext(ctx, FfmpegBin(), "-v", "error", "-y", "-i", path,
+	cmd := exec.CommandContext(ctx, FfmpegBin(), "-v", "error", "-y", "-i", path, //nolint:gosec // extracting from user-supplied media paths is the package's purpose
 		"-map", fmt.Sprintf("0:s:%d", ordinal), "-vn", "-an", "-c:s", "srt", outPath)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("extract subtitle stream %d: %w: %s", ordinal, err, strings.TrimSpace(string(b)))

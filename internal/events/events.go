@@ -1,3 +1,5 @@
+// Package events streams admin progress snapshots to browsers over
+// server-sent events.
 package events
 
 import (
@@ -11,29 +13,34 @@ import (
 	"quipster/internal/store"
 )
 
-// Snapshot is the admin progress payload streamed over SSE.
+// Snapshot is the admin progress payload streamed over SSE each tick.
+// Fields are ordered to group pointer-carrying data for compact layout;
+// JSON decoding is name-based so order is not significant on the wire.
 type Snapshot struct {
 	Scan        *store.Scan      `json:"scan"`
 	Queue       *store.JobStats  `json:"queue"`
 	MediaCounts map[string]int64 `json:"mediaCounts"`
 	Lines       *store.LineStats `json:"lines"`
-	CacheBytes  int64            `json:"cacheBytes"`
 	Recent      []store.Job      `json:"recentJobs"`
 	Running     []store.Job      `json:"runningJobs"`
+	CacheBytes  int64            `json:"cacheBytes"`
 	MeiliUp     bool             `json:"meiliUp"`
 }
 
+// Collector gathers a Snapshot from the store on demand and serves it as SSE.
 type Collector struct {
-	St      *store.Store
-	MeiliUp func() bool
-
-	mu       sync.Mutex
-	users    int
-	state    []byte
+	St       *store.Store
+	MeiliUp  func() bool
 	notifyCh chan struct{}
+	state    []byte
+	users    int
 	once     sync.Once
+	mu       sync.Mutex
 }
 
+// Collect builds a snapshot of current scan/queue/media state. Individual
+// store reads are best-effort: a failing read leaves the corresponding
+// snapshot field nil rather than failing the whole stream.
 func (c *Collector) Collect() *Snapshot {
 	snap := &Snapshot{}
 	if sc, err := c.St.RunningScan(); err == nil {
@@ -137,7 +144,11 @@ func (c *Collector) Handler() http.HandlerFunc {
 		}()
 
 		if state != nil {
-			fmt.Fprintf(w, "event: tick\ndata: %s\n\n", state)
+			// A write error here almost always means the client disconnected;
+			// stop sending rather than logging on every tick.
+			if _, werr := fmt.Fprintf(w, "event: tick\ndata: %s\n\n", state); werr != nil {
+				return
+			}
 			fl.Flush()
 		}
 
@@ -155,10 +166,14 @@ func (c *Collector) Handler() http.HandlerFunc {
 				notifyCh = c.notifyCh
 				c.mu.Unlock()
 
-				fmt.Fprintf(w, "event: tick\ndata: %s\n\n", state)
+				if _, werr := fmt.Fprintf(w, "event: tick\ndata: %s\n\n", state); werr != nil {
+					return
+				}
 				fl.Flush()
 			case <-keepAlive.C:
-				fmt.Fprintf(w, "event: ping\ndata: \n\n")
+				if _, werr := fmt.Fprintf(w, "event: ping\ndata: \n\n"); werr != nil {
+					return
+				}
 				fl.Flush()
 			}
 		}

@@ -62,6 +62,7 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
 | `SCAN_INTERVAL` | off | e.g. `12h` periodic rescan |
 | `SUBTITLE_WORKERS` | `4` | probe/extract/chunk worker pool |
 | `EXTRACT_CONNS` | `4` | parallel embedded-subtitle extractions (each scans the whole file; tune to storage throughput) |
+| `PROBE_TIMEOUT` | `60s` | per-file ffprobe cap; a stalled probe is killed and the file marked errored instead of blocking the queue |
 | `JOB_TIMEOUT` | `3h` | hard per-job timeout |
 | `INDEX_WORKERS` | `1` | Meili indexer pool |
 | `CLIP_WORKERS` | `2` | async clip render pool |
@@ -94,6 +95,16 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
 
 ## Development
 
+The easiest way to run the full stack locally with hot-reloading is using the included dev script. It will automatically spin up an ephemeral Meilisearch container, generate dummy media test data, run the Go backend, and launch the Vite frontend server.
+
+```sh
+./dev.sh
+```
+
+When you stop the script (`Ctrl+C`), it cleans up the background processes and containers automatically.
+
+Manual commands:
+
 ```sh
 (cd web && npm install && npm run dev)      # Vite dev server proxies /api → :8080
 go run ./cmd/quipster                        # API + workers in one process
@@ -106,6 +117,9 @@ before `go build` after frontend changes.
 
 ## Notes & limits (MVP)
 
+- Probing is bounded so file size cannot stall ingestion: ffprobe runs with a 10-second analysis
+  window and a 50 MiB probe budget, and is killed after `PROBE_TIMEOUT` (default 60s); pathological
+  files (e.g. missing `moov`/cues index) are marked errored and skipped instead of blocking the queue.
 - English-only subtitle indexing; OpenSubtitles download, TMDB enrichment, burned-in subs and
   share links are phase 2.
 - mp4 stream-copy falls back to Matroska output when codecs are not mp4-compatible.

@@ -1,3 +1,4 @@
+// Package cache provides size-capped eviction for generated media artifacts.
 package cache
 
 import (
@@ -9,6 +10,10 @@ import (
 	"quipster/internal/store"
 )
 
+// LRU evicts the least-recently-accessed cache entries of the given kinds
+// once their total size exceeds MaxBytes.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
 type LRU struct {
 	St       *store.Store
 	MaxBytes int64
@@ -49,7 +54,7 @@ func (l *LRU) Evict(ctx context.Context) error {
 	return nil
 }
 
-// RunDaemon evicts periodically until ctx is cancelled.
+// RunDaemon evicts periodically until ctx is canceled.
 func RunDaemon(ctx context.Context, l *LRU, interval time.Duration) {
 	go func() {
 		t := time.NewTicker(interval)
