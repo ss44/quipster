@@ -21,6 +21,8 @@ func diskFree(path string) (int64, int64, error) {
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0, 0, err
 	}
+	//nolint:unconvert // Bsize is int32 on some unix platforms
+	bsize := int64(st.Bsize)
 	//nolint:gosec // G115: block counts on real filesystems fit in int64
-	return int64(st.Bavail) * st.Bsize, int64(st.Blocks) * st.Bsize, nil
+	return int64(st.Bavail) * bsize, int64(st.Blocks) * bsize, nil
 }

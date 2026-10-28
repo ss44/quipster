@@ -22,6 +22,31 @@ func openTest(t *testing.T) *Store {
 	return s
 }
 
+// TestUpsertMediaReturnsUpdatedRowID guards against using LastInsertId after
+// an ON CONFLICT DO UPDATE: that rowid belongs to whichever row was inserted
+// last on the connection, so a changed existing file would hand scan the wrong
+// id and enqueue a probe job for a nonexistent or unrelated media row.
+func TestUpsertMediaReturnsUpdatedRowID(t *testing.T) {
+	s := openTest(t)
+	s.db.SetMaxOpenConns(1)
+
+	idA, changed, err := s.UpsertMedia("/media/a.mkv", "mkv", 1, 1, "A", 0, 0, 0, "")
+	if err != nil || !changed {
+		t.Fatalf("insert A: id=%d changed=%v err=%v", idA, changed, err)
+	}
+	if _, _, insErr := s.UpsertMedia("/media/b.mkv", "mkv", 1, 1, "B", 0, 0, 0, ""); insErr != nil {
+		t.Fatalf("insert B: %v", insErr)
+	}
+
+	gotA, changed, err := s.UpsertMedia("/media/a.mkv", "mkv", 2, 2, "A", 0, 0, 0, "")
+	if err != nil || !changed {
+		t.Fatalf("update A: id=%d changed=%v err=%v", gotA, changed, err)
+	}
+	if gotA != idA {
+		t.Fatalf("upsert of A returned id %d, want %d", gotA, idA)
+	}
+}
+
 func TestUpsertMediaChangeDetection(t *testing.T) {
 	s := openTest(t)
 	id, changed, err := s.UpsertMedia("/media/a.mkv", "mkv", 100, 1000, "A", 2020, 0, 0, "")

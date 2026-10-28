@@ -264,7 +264,7 @@ func (d Deps) handleThumb(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, e.Path)
 }
 
-// handleQuotes serves real subtitle lines from the indexed library for the
+// handleQuotes serves real dialog lines from the indexed library for the
 // landing page.
 func (d Deps) handleQuotes(w http.ResponseWriter, r *http.Request) {
 	limit := atoiQuery(r.URL.Query().Get("limit"))

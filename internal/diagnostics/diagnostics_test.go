@@ -170,8 +170,8 @@ func TestCollectorBenchmarksAndReadThroughput(t *testing.T) {
 		t.Fatalf("UpsertMedia: %v", err)
 	}
 	payload := fmt.Sprintf(`{"mediaId":%d}`, id)
-	if _, eerr := st.EnqueueJob("probe", payload, 0); eerr != nil {
-		t.Fatalf("enqueue: %v", eerr)
+	if _, enqErr := st.EnqueueJob("probe", payload, 0); enqErr != nil {
+		t.Fatalf("enqueue: %v", enqErr)
 	}
 	job, err := st.ClaimJob(context.Background(), "test", []string{"probe"})
 	if err != nil || job == nil {
@@ -219,27 +219,27 @@ func TestBundleContentsAndPathRedaction(t *testing.T) {
 	if _, err := c.LogBuffer.Write([]byte("key token-abc-123\n")); err != nil {
 		t.Fatalf("log write: %v", err)
 	}
-	data, err := c.Bundle(context.Background(), BundleOptions{})
-	if err != nil {
-		t.Fatalf("Bundle: %v", err)
+	data, bundleErr := c.Bundle(context.Background(), BundleOptions{})
+	if bundleErr != nil {
+		t.Fatalf("Bundle: %v", bundleErr)
 	}
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		t.Fatalf("zip: %v", err)
+	zr, zipErr := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if zipErr != nil {
+		t.Fatalf("zip: %v", zipErr)
 	}
 	names := map[string]bool{}
 	for _, f := range zr.File {
 		names[f.Name] = true
-		rc, oerr := f.Open()
-		if oerr != nil {
-			t.Fatal(oerr)
+		rc, openErr := f.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
 		}
-		body, rerr := io.ReadAll(rc)
+		body, readErr := io.ReadAll(rc)
 		if cerr := rc.Close(); cerr != nil {
 			t.Logf("close: %v", cerr)
 		}
-		if rerr != nil {
-			t.Fatal(rerr)
+		if readErr != nil {
+			t.Fatal(readErr)
 		}
 		if strings.Contains(string(body), "token-abc-123") {
 			t.Errorf("%s leaked a secret", f.Name)
@@ -251,9 +251,9 @@ func TestBundleContentsAndPathRedaction(t *testing.T) {
 		}
 	}
 
-	withPaths, err := c.Bundle(context.Background(), BundleOptions{IncludePaths: true})
-	if err != nil {
-		t.Fatalf("Bundle paths: %v", err)
+	withPaths, pathsErr := c.Bundle(context.Background(), BundleOptions{IncludePaths: true})
+	if pathsErr != nil {
+		t.Fatalf("Bundle paths: %v", pathsErr)
 	}
 	if !bytes.Contains(withPaths, []byte("include")) && !bytes.Contains(withPaths, []byte("redacted")) {
 		t.Error("bundle README missing path note")
