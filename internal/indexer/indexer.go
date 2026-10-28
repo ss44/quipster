@@ -23,28 +23,70 @@ const IndexName = "lines"
 
 // Indexer wraps the Meilisearch client and mediates all index mutations for
 // the local SQLite store.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
 type Indexer struct {
 	st     *store.Store
 	client meili.ServiceManager
 	url    string
 	key    string
 	batch  int
+	emb    EmbedderConfig
+}
+
+// Option customizes an Indexer at construction time.
+type Option func(*Indexer)
+
+// WithEmbedder configures the semantic-search embedder installed on the index
+// during EnsureSettings. Passing a zero-valued config keeps semantic search
+// disabled and leaves any previously installed embedder untouched.
+func WithEmbedder(cfg EmbedderConfig) Option {
+	return func(ix *Indexer) { ix.emb = cfg }
 }
 
 // New builds an Indexer bound to the given store and Meilisearch endpoint.
-func New(st *store.Store, url, masterKey string) *Indexer {
-	return &Indexer{
+func New(st *store.Store, url, masterKey string, opts ...Option) *Indexer {
+	ix := &Indexer{
 		st:     st,
 		client: meili.New(url, meili.WithAPIKey(masterKey)),
 		url:    url,
 		key:    masterKey,
 		batch:  500,
 	}
+	for _, opt := range opts {
+		opt(ix)
+	}
+	return ix
 }
 
 // Client exposes the underlying Meilisearch service manager for readers such
 // as the search service.
 func (ix *Indexer) Client() meili.ServiceManager { return ix.client }
+
+// EmbedderEnabled reports whether a semantic-search embedder is configured.
+func (ix *Indexer) EmbedderEnabled() bool { return ix.emb.Enabled() }
+
+// EmbedderName returns the embedder key queries must reference, or "" when
+// semantic search is disabled.
+func (ix *Indexer) EmbedderName() string {
+	if !ix.emb.Enabled() {
+		return ""
+	}
+	return EmbedderName
+}
+
+// SemanticRatio returns the configured keyword/semantic blend for hybrid
+// queries, clamped to the 0..1 range Meilisearch accepts.
+func (ix *Indexer) SemanticRatio() float64 {
+	r := ix.emb.SemanticRatio
+	if r < 0 {
+		return 0
+	}
+	if r > 1 {
+		return 1
+	}
+	return r
+}
 
 // Healthy reports whether Meilisearch is reachable.
 func (ix *Indexer) Healthy() bool {
@@ -75,7 +117,8 @@ func DocID(mediaID int64, startIdx, endIdx int) string {
 	return fmt.Sprintf("%d_%d-%d", mediaID, startIdx, endIdx)
 }
 
-// EnsureSettings idempotently creates the index and applies MVP settings.
+// EnsureSettings idempotently creates the index and applies MVP settings,
+// then installs the configured semantic-search embedder when enabled.
 func (ix *Indexer) EnsureSettings() error {
 	if _, err := ix.client.GetIndex(IndexName); err != nil {
 		task, cerr := ix.client.CreateIndex(&meili.IndexConfig{Uid: IndexName, PrimaryKey: "id"})
@@ -84,8 +127,10 @@ func (ix *Indexer) EnsureSettings() error {
 			if _, gerr := ix.client.GetIndex(IndexName); gerr != nil {
 				return fmt.Errorf("create index: %w", cerr)
 			}
-		} else if _, err := ix.client.WaitForTask(task.TaskUID, 200*time.Millisecond); err != nil {
+		} else if res, err := ix.client.WaitForTask(task.TaskUID, 200*time.Millisecond); err != nil {
 			return fmt.Errorf("create index wait: %w", err)
+		} else if res.Status == meili.TaskStatusFailed {
+			return fmt.Errorf("create index task failed: %s", res.Error)
 		}
 	}
 	settings := meili.Settings{
@@ -98,11 +143,23 @@ func (ix *Indexer) EnsureSettings() error {
 	if err != nil {
 		return fmt.Errorf("update settings: %w", err)
 	}
-	if _, err := ix.client.WaitForTask(task.TaskUID, 200*time.Millisecond); err != nil {
+	// A settings task can fail asynchronously (e.g. a rejected embedder
+	// payload), so the awaited task status must be checked before reporting
+	// the index as ready.
+	res, err := ix.client.WaitForTask(task.TaskUID, 200*time.Millisecond)
+	if err != nil {
 		return fmt.Errorf("settings wait: %w", err)
+	}
+	if res.Status == meili.TaskStatusFailed {
+		return fmt.Errorf("settings task failed: %s", res.Error)
 	}
 	if err := ix.applyTypoTolerance(); err != nil {
 		return err
+	}
+	if ix.emb.Enabled() {
+		if err := ix.applyEmbedders(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -111,6 +168,25 @@ func (ix *Indexer) EnsureSettings() error {
 // serializes newer fields (disableOnNumbers) that Meili 1.11 rejects.
 func (ix *Indexer) applyTypoTolerance() error {
 	body := []byte(`{"typoTolerance":{"enabled":true,"minWordSizeForTypos":{"oneTypo":6,"twoTypos":10}}}`)
+	return ix.patchSettings(body, "typo settings")
+}
+
+// applyEmbedders installs the configured embedder under the "default" key so
+// Meilisearch generates document vectors during the ingestion phase and can
+// serve hybrid/vector queries. Updating the embedder makes Meilisearch
+// re-embed every existing document inside the settings task itself.
+func (ix *Indexer) applyEmbedders() error {
+	body, err := ix.emb.settingsPatch()
+	if err != nil {
+		return fmt.Errorf("embedder settings: %w", err)
+	}
+	return ix.patchSettings(body, "embedder settings")
+}
+
+// patchSettings sends a raw partial settings update and waits for the
+// resulting task, rejecting failed tasks. It bypasses the Go client because
+// the client serializes settings fields newer Meilisearch releases reject.
+func (ix *Indexer) patchSettings(body []byte, what string) error {
 	req, err := http.NewRequest(http.MethodPatch, strings.TrimRight(ix.url, "/")+"/indexes/"+IndexName+"/settings", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -121,24 +197,42 @@ func (ix *Indexer) applyTypoTolerance() error {
 	}
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
-		return fmt.Errorf("typo settings: %w", err)
+		return fmt.Errorf("%s: %w", what, err)
 	}
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil {
-			log.Printf("[indexer] close typo settings response: %v", cerr)
+			log.Printf("[indexer] close %s response: %v", what, cerr)
 		}
 	}()
 	if resp.StatusCode >= 300 {
 		b, rerr := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		if rerr != nil {
-			return fmt.Errorf("typo settings: %s: read body: %w", resp.Status, rerr)
+			return fmt.Errorf("%s: %s: read body: %w", what, resp.Status, rerr)
 		}
-		return fmt.Errorf("typo settings: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+		return fmt.Errorf("%s: %s: %s", what, resp.Status, strings.TrimSpace(string(b)))
+	}
+	// The PATCH enqueues a settings task; wait for it and surface failures so
+	// the startup loop keeps retrying until the settings actually apply.
+	var enqueued struct {
+		TaskUID int64 `json:"taskUid"`
+	}
+	if derr := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&enqueued); derr != nil {
+		return fmt.Errorf("%s: decode task: %w", what, derr)
+	}
+	res, err := ix.client.WaitForTask(enqueued.TaskUID, 200*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("%s wait: %w", what, err)
+	}
+	if res.Status == meili.TaskStatusFailed {
+		return fmt.Errorf("%s task failed: %s", what, res.Error)
 	}
 	return nil
 }
 
 // IndexMedia replaces all docs of a media and marks its chunks indexed.
+// With a semantic-search embedder configured, Meilisearch generates the
+// document vectors during this add phase from the embedder's document
+// template, so no local embedding step is required here.
 func (ix *Indexer) IndexMedia(mediaID int64) error {
 	chunkList, err := ix.st.PendingIndexChunks(mediaID, 200000)
 	if err != nil {

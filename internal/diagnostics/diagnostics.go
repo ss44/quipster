@@ -581,9 +581,9 @@ func clampPct(v float64) float64 {
 	if v < 0 {
 		return 0
 	}
-	max := float64(runtime.NumCPU()) * 100
-	if v > max {
-		return max
+	cpuMax := float64(runtime.NumCPU()) * 100
+	if v > cpuMax {
+		return cpuMax
 	}
 	return v
 }

@@ -35,6 +35,7 @@ type fakeMeili struct {
 	nextUID       int64
 	settingsCalls int
 	typoCalls     int
+	embedderCalls int
 	mu            sync.Mutex
 	indexExists   bool
 	failCreate    bool
@@ -47,6 +48,8 @@ type fakeMeili struct {
 	failAdd       bool
 	failDelete    bool
 	addTasksFail  bool
+	failEmbedder  bool
+	failEmbTask   bool
 }
 
 // respWriter funnels all fake-server JSON writes through checked calls so the
@@ -301,6 +304,19 @@ func (f *fakeMeili) handleDeleteDocuments(rw *respWriter) {
 }
 
 func (f *fakeMeili) handleSettings(rw *respWriter, body []byte) {
+	if strings.Contains(string(body), "embedders") {
+		f.mu.Lock()
+		f.embedderCalls++
+		fail, failTask := f.failEmbedder, f.failEmbTask
+		f.mu.Unlock()
+		if fail {
+			rw.fail(http.StatusInternalServerError, "internal", "embedder boom")
+			return
+		}
+		uid := f.enqueue("settingsUpdate", failTask)
+		f.writeTaskInfo(rw, uid)
+		return
+	}
 	if strings.Contains(string(body), "typoTolerance") {
 		f.mu.Lock()
 		f.typoCalls++
@@ -373,6 +389,19 @@ func (f *fakeMeili) addedDocs() []map[string]any {
 		var docs []map[string]any
 		if err := json.Unmarshal(r.body, &docs); err == nil {
 			out = append(out, docs...)
+		}
+	}
+	return out
+}
+
+// patchBodies returns the raw bodies of every recorded settings PATCH.
+func (f *fakeMeili) patchBodies() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, r := range f.requests {
+		if r.method == http.MethodPatch {
+			out = append(out, string(r.body))
 		}
 	}
 	return out

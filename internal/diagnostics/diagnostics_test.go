@@ -170,8 +170,8 @@ func TestCollectorBenchmarksAndReadThroughput(t *testing.T) {
 		t.Fatalf("UpsertMedia: %v", err)
 	}
 	payload := fmt.Sprintf(`{"mediaId":%d}`, id)
-	if _, err := st.EnqueueJob("probe", payload, 0); err != nil {
-		t.Fatalf("enqueue: %v", err)
+	if _, eerr := st.EnqueueJob("probe", payload, 0); eerr != nil {
+		t.Fatalf("enqueue: %v", eerr)
 	}
 	job, err := st.ClaimJob(context.Background(), "test", []string{"probe"})
 	if err != nil || job == nil {
@@ -230,16 +230,16 @@ func TestBundleContentsAndPathRedaction(t *testing.T) {
 	names := map[string]bool{}
 	for _, f := range zr.File {
 		names[f.Name] = true
-		rc, err := f.Open()
-		if err != nil {
-			t.Fatal(err)
+		rc, oerr := f.Open()
+		if oerr != nil {
+			t.Fatal(oerr)
 		}
-		body, err := io.ReadAll(rc)
+		body, rerr := io.ReadAll(rc)
 		if cerr := rc.Close(); cerr != nil {
 			t.Logf("close: %v", cerr)
 		}
-		if err != nil {
-			t.Fatal(err)
+		if rerr != nil {
+			t.Fatal(rerr)
 		}
 		if strings.Contains(string(body), "token-abc-123") {
 			t.Errorf("%s leaked a secret", f.Name)

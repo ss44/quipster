@@ -126,7 +126,7 @@ func TestSearchJoinsHitsToStore(t *testing.T) {
 	}
 	fx.f.total, fx.f.pages = 7, 2
 
-	resp, err := fx.svc.Search("hello", "", 1, 20)
+	resp, err := fx.svc.Search("hello", "", 1, 20, "")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestSearchTitleFallbackForNoSubs(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Only the subtitle-less media matches "Gone".
-	resp, err := fx.svc.Search("Gone", "", 1, 20)
+	resp, err := fx.svc.Search("Gone", "", 1, 20, "")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestSearchTitleFallbackForIndexed(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An indexed media that did not appear as a hit gets NoSubtitle=false.
-	resp, err := fx.svc.Search("lost", "", 1, 20)
+	resp, err := fx.svc.Search("lost", "", 1, 20, "")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestSearchTitleDedupAgainstChunkHits(t *testing.T) {
 	// The media already surfaced as a chunk hit: it must not be duplicated
 	// as a title match.
 	fx.f.hits = []map[string]any{{"id": indexer.DocID(fx.id, 0, 1), "text": "hello world"}}
-	resp, err := fx.svc.Search("lost", "", 1, 20)
+	resp, err := fx.svc.Search("lost", "", 1, 20, "")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -254,21 +254,21 @@ func TestSearchPaginationAndFilter(t *testing.T) {
 	fx := newSearchFixture(t)
 
 	// Defaults: perPage<=0 or >50 becomes 20; page<=0 becomes 1.
-	if _, err := fx.svc.Search("x", "", 0, 0); err != nil {
+	if _, err := fx.svc.Search("x", "", 0, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	assertSearchReq(t, fx.f, 20, 1, "")
-	if _, err := fx.svc.Search("x", "", -1, 100); err != nil {
+	if _, err := fx.svc.Search("x", "", -1, 100, ""); err != nil {
 		t.Fatal(err)
 	}
 	assertSearchReq(t, fx.f, 20, 1, "")
 	// In-range values pass through.
-	if _, err := fx.svc.Search("x", "", 2, 30); err != nil {
+	if _, err := fx.svc.Search("x", "", 2, 30, ""); err != nil {
 		t.Fatal(err)
 	}
 	assertSearchReq(t, fx.f, 30, 2, "")
 	// A show filter is escaped and passed along.
-	if _, err := fx.svc.Search("x", `Fa"ke\`, 1, 20); err != nil {
+	if _, err := fx.svc.Search("x", `Fa"ke\`, 1, 20, ""); err != nil {
 		t.Fatal(err)
 	}
 	assertSearchReq(t, fx.f, 20, 1, `showTitle = "Fa\"ke\\"`)
@@ -298,7 +298,7 @@ func assertSearchReq(t *testing.T, f *fakeSearch, perPage int, page int, filter 
 
 func TestSearchEmptyArraysAreNotNull(t *testing.T) {
 	fx := newSearchFixture(t)
-	resp, err := fx.svc.Search("", "", 1, 20)
+	resp, err := fx.svc.Search("", "", 1, 20, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestSearchEmptyArraysAreNotNull(t *testing.T) {
 func TestSearchMeiliError(t *testing.T) {
 	fx := newSearchFixture(t)
 	fx.f.fail = true
-	resp, err := fx.svc.Search("x", "", 1, 20)
+	resp, err := fx.svc.Search("x", "", 1, 20, "")
 	if err == nil || resp != nil {
 		t.Fatalf("want error and nil response, got %v / %+v", err, resp)
 	}
@@ -406,7 +406,7 @@ func TestSearchFormattedPayloadVariants(t *testing.T) {
 		// _formatted as garbage JSON: falls back too.
 		{"id": indexer.DocID(fx.id, 2, 3), "text": "goodbye moon", "_formatted": "junk"},
 	}
-	resp, err := fx.svc.Search("x", "", 1, 20)
+	resp, err := fx.svc.Search("x", "", 1, 20, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +420,7 @@ func TestSearchFormattedPayloadVariants(t *testing.T) {
 
 func TestSearchShowFilterBlankIgnored(t *testing.T) {
 	fx := newSearchFixture(t)
-	if _, err := fx.svc.Search("x", "   ", 1, 20); err != nil {
+	if _, err := fx.svc.Search("x", "   ", 1, 20, ""); err != nil {
 		t.Fatal(err)
 	}
 	assertSearchReq(t, fx.f, 20, 1, "")

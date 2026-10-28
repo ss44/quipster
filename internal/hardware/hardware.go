@@ -408,10 +408,10 @@ func selectionFor(caps Capabilities, requested string) Selection {
 		return sel
 	}
 	sel.Encoder = "libx264"
-	switch {
-	case requested == "none":
+	switch requested {
+	case "none":
 		sel.Reason = "hardware acceleration disabled via HWACCEL"
-	case requested == "auto":
+	case "auto":
 		sel.Reason = "no usable hardware backend detected"
 	default:
 		sel.Reason = fmt.Sprintf("requested %s but the probe failed; using CPU", requested)

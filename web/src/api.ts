@@ -21,6 +21,8 @@ export interface Hit {
   contextBefore: CueDTO[]
   contextAfter: CueDTO[]
   thumbUrl: string
+  /** Meilisearch ranking score (0..1); meaningful for semantic matches. */
+  score?: number
 }
 
 export interface TitleMatch {
@@ -35,6 +37,9 @@ export interface TitleMatch {
   noSubtitle: boolean
 }
 
+/** Search retrieval mode; '' lets the server pick (hybrid when available). */
+export type SearchMode = 'keyword' | 'hybrid' | 'semantic' | ''
+
 export interface SearchResponse {
   query: string
   page: number
@@ -43,6 +48,9 @@ export interface SearchResponse {
   totalPages: number
   hits: Hit[]
   titleMatches: TitleMatch[]
+  /** Mode actually executed after server-side auto-resolution. */
+  mode: string
+  semanticAvailable: boolean
 }
 
 export interface Quote {
@@ -287,9 +295,9 @@ export const api = {
   quotes: (limit = 4) => getJSON<{ quotes: Quote[] }>(`/api/quotes?limit=${limit}`),
   suggest: (q: string) =>
     getJSON<{ suggestions: Suggestion[] }>(`/api/suggest?q=${encodeURIComponent(q)}`),
-  search: (q: string, show: string, page: number) =>
+  search: (q: string, show: string, page: number, mode: SearchMode = '') =>
     getJSON<SearchResponse>(
-      `/api/search?q=${encodeURIComponent(q)}&show=${encodeURIComponent(show)}&page=${page}`
+      `/api/search?q=${encodeURIComponent(q)}&show=${encodeURIComponent(show)}&page=${page}&mode=${encodeURIComponent(mode)}`
     ),
   chunk: (id: string) => getJSON<ChunkDetail>(`/api/chunks/${encodeURIComponent(id)}`),
   scan: (root: string) =>
