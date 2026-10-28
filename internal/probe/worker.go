@@ -25,7 +25,7 @@ type Pipeline struct {
 	// ExtractConns bounds parallel embedded-subtitle extractions; each one
 	// scans the entire media file, so unbounded parallelism thrashes storage.
 	ExtractConns int
-	// ProbeTimeout bounds each ffprobe run; <=0 uses DefaultProbeTimeout. A
+	// ProbeTimeout bounds each ffprobe run; <=0 uses defaultProbeTimeout. A
 	// timed-out probe is killed and the file skipped instead of stalling the
 	// queue (issue #1).
 	ProbeTimeout time.Duration
@@ -37,7 +37,7 @@ func (p *Pipeline) probeTimeout() time.Duration {
 	if p.ProbeTimeout > 0 {
 		return p.ProbeTimeout
 	}
-	return DefaultProbeTimeout
+	return defaultProbeTimeout
 }
 
 func (p *Pipeline) sem() chan struct{} {
@@ -86,16 +86,14 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 				// so the runner requeues instead of marking the media errored.
 				return ctx.Err()
 			}
+			note := perr.Error()
 			if errors.Is(perr, context.DeadlineExceeded) {
 				// Fallback for stalled probes (issue #1): the killed ffprobe
 				// must not block the queue; skip the file and log it.
-				note := fmt.Sprintf("probe timed out after %s; file skipped", p.probeTimeout())
-				log.Printf("[probe] media %d %s: %s (elapsed=%s)", m.ID, m.Path, note, elapsed)
-				p.St.SetMediaStatus(m.ID, "error", note)
-				return nil
+				note = fmt.Sprintf("probe timed out after %s; file skipped", p.probeTimeout())
 			}
-			log.Printf("[probe] media %d %s: probe failed after %s: %v", m.ID, m.Path, elapsed, perr)
-			p.St.SetMediaStatus(m.ID, "error", perr.Error())
+			log.Printf("[probe] media %d %s: probe failed after %s: %s", m.ID, m.Path, elapsed, note)
+			p.St.SetMediaStatus(m.ID, "error", note)
 			return nil
 		}
 		log.Printf("[probe] media %d %s: probe ok in %s", m.ID, m.Path, elapsed)

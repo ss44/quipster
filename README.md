@@ -107,9 +107,9 @@ before `go build` after frontend changes.
 
 ## Notes & limits (MVP)
 
-- Probing is bounded so file size cannot stall ingestion: ffprobe runs with `-analyzeduration 10s`
-  and `-probesize 50M` caps and is killed after `PROBE_TIMEOUT` (default 60s); pathological files
-  (e.g. missing `moov`/cues index) are marked errored and skipped instead of blocking the queue.
+- Probing is bounded so file size cannot stall ingestion: ffprobe runs with a 10-second analysis
+  window and a 50 MiB probe budget, and is killed after `PROBE_TIMEOUT` (default 60s); pathological
+  files (e.g. missing `moov`/cues index) are marked errored and skipped instead of blocking the queue.
 - English-only subtitle indexing; OpenSubtitles download, TMDB enrichment, burned-in subs and
   share links are phase 2.
 - mp4 stream-copy falls back to Matroska output when codecs are not mp4-compatible.

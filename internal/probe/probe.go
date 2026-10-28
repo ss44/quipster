@@ -17,14 +17,14 @@ import (
 // without cues) can make ffprobe scan an entire 20GB+ file. These bounds keep
 // probe time independent of file size (issue #1).
 const (
-	// DefaultAnalyzeDuration caps ffprobe's per-stream analysis window
+	// defaultAnalyzeDuration caps ffprobe's per-stream analysis window
 	// (flag value is microseconds).
-	DefaultAnalyzeDuration = 10 * time.Second
-	// DefaultProbeSize caps how many input bytes ffprobe inspects.
-	DefaultProbeSize = 50 << 20 // 50 MiB
-	// DefaultProbeTimeout bounds one ffprobe run before it is killed and the
+	defaultAnalyzeDuration = 10 * time.Second
+	// defaultProbeSize caps how many input bytes ffprobe inspects.
+	defaultProbeSize = 50 << 20 // 50 MiB
+	// defaultProbeTimeout bounds one ffprobe run before it is killed and the
 	// file skipped.
-	DefaultProbeTimeout = 60 * time.Second
+	defaultProbeTimeout = 60 * time.Second
 )
 
 type SubtitleStream struct {
@@ -109,38 +109,41 @@ func fileDuration(o *ffprobeOut) float64 {
 func probeArgs(path string) []string {
 	return []string{
 		"-v", "error",
-		"-analyzeduration", strconv.FormatInt(int64(DefaultAnalyzeDuration/time.Microsecond), 10),
-		"-probesize", strconv.FormatInt(int64(DefaultProbeSize), 10),
+		"-analyzeduration", strconv.FormatInt(int64(defaultAnalyzeDuration/time.Microsecond), 10),
+		"-probesize", strconv.FormatInt(int64(defaultProbeSize), 10),
 		"-print_format", "json",
 		"-show_format", "-show_streams",
 		"--", path,
 	}
 }
 
-// stderrTail surfaces ffprobe's stderr (-v error output) for diagnosis.
-func stderrTail(err error) string {
+// stderrDetail surfaces ffprobe's stderr (-v error output) for diagnosis,
+// capped since it is stored in the media error column shown in the UI.
+func stderrDetail(err error) string {
 	var ee *exec.ExitError
-	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-		if s := strings.TrimSpace(string(ee.Stderr)); s != "" {
-			return ": " + s
-		}
+	if !errors.As(err, &ee) || len(ee.Stderr) == 0 {
+		return ""
 	}
-	return ""
+	s := strings.TrimSpace(string(ee.Stderr))
+	if s == "" {
+		return ""
+	}
+	if r := []rune(s); len(r) > 200 {
+		s = string(r[:200]) + "..."
+	}
+	return ": " + s
 }
 
-// Probe runs ffprobe and summarises streams of interest. ctx bounds the run;
-// expiry kills ffprobe and returns a context error the caller can detect with
-// errors.Is.
+// Probe runs ffprobe and summarises streams of interest. ctx must be non-nil
+// and bounds the run: expiry kills ffprobe and returns a context error the
+// caller can detect with errors.Is.
 func Probe(ctx context.Context, path string) (*Result, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	out, err := exec.CommandContext(ctx, FfprobeBin(), probeArgs(path)...).Output()
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, fmt.Errorf("ffprobe %s: %w", path, cerr)
 		}
-		return nil, fmt.Errorf("ffprobe %s: %w%s", path, err, stderrTail(err))
+		return nil, fmt.Errorf("ffprobe %s: %w%s", path, err, stderrDetail(err))
 	}
 	var o ffprobeOut
 	if err := json.Unmarshal(out, &o); err != nil {

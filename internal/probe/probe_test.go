@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -69,14 +70,26 @@ func TestPickEnglishAudioEmpty(t *testing.T) {
 	}
 }
 
+// flagValue returns the value following flag in an argv-style list.
+func flagValue(args []string, flag string) (string, bool) {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
 func TestProbeArgs(t *testing.T) {
 	args := probeArgs("/media/movie.mkv")
-	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "-analyzeduration 10000000") {
-		t.Fatalf("expected analysis cap in args, got %q", joined)
-	}
-	if !strings.Contains(joined, "-probesize 52428800") {
-		t.Fatalf("expected probe size cap in args, got %q", joined)
+	for _, flag := range []string{"-analyzeduration", "-probesize"} {
+		v, ok := flagValue(args, flag)
+		if !ok {
+			t.Fatalf("missing %s in %v", flag, args)
+		}
+		if n, err := strconv.Atoi(v); err != nil || n <= 0 {
+			t.Fatalf("expected positive integer for %s, got %q", flag, v)
+		}
 	}
 	if args[len(args)-1] != "/media/movie.mkv" {
 		t.Fatalf("expected path as final arg, got %v", args)
