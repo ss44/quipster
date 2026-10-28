@@ -87,6 +87,47 @@ func (s *Store) EnqueueJobs(specs []JobSpec) ([]int64, error) {
 	return ids, nil
 }
 
+// EnqueueUniqueJobs inserts jobs that do not already have an identical
+// queued/running job. The scanner uses it to recover thousands of pending
+// probes in one transaction while still deduplicating against work already in
+// flight. It returns the number of rows actually inserted.
+func (s *Store) EnqueueUniqueJobs(specs []JobSpec) (int, error) {
+	if len(specs) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer rollbackTx(tx)
+	stmt, err := tx.Prepare(`INSERT INTO jobs (type, payload, priority, status, created_at)
+		SELECT ?,?,?,'queued',?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM jobs
+			WHERE type=? AND payload=? AND status IN ('queued','running')
+		)`)
+	if err != nil {
+		return 0, err
+	}
+	created := 0
+	for _, spec := range specs {
+		now := nowMillis()
+		res, err := stmt.Exec(spec.Type, spec.Payload, spec.Priority, now, spec.Type, spec.Payload)
+		if err != nil {
+			return created, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return created, err
+		}
+		created += int(n)
+	}
+	if err := tx.Commit(); err != nil {
+		return created, err
+	}
+	return created, nil
+}
+
 // ClaimJob atomically claims the next queued job of the given types using a
 // single BEGIN IMMEDIATE transaction with RETURNING.
 func (s *Store) ClaimJob(ctx context.Context, workerID string, types []string) (*Job, error) {

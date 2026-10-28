@@ -33,7 +33,6 @@ const (
 	defaultScanTimeout = 2 * time.Hour
 	progressInterval   = 2 * time.Second
 	probeEnqueueBatch  = 1000
-	pendingProbeLimit  = 10000
 )
 
 // Result summarizes one scan walk: how many files were seen, added,
@@ -444,63 +443,60 @@ func (b *mediaBatch) upsertOne(entry store.MediaUpsert) {
 	}
 }
 
-// enqueueProbes hands changed media to the probe queue in bounded batches.
-func enqueueProbes(ctx context.Context, st *store.Store, ids []int64) (int, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
+// probeSpecs converts media ids to deduplicated probe job specifications.
+func probeSpecs(ids []int64) ([]store.JobSpec, error) {
 	specs := make([]store.JobSpec, 0, len(ids))
 	for _, id := range ids {
 		payload, err := json.Marshal(map[string]any{"mediaId": id})
 		if err != nil {
-			return 0, fmt.Errorf("marshal probe payload %d: %w", id, err)
+			return nil, fmt.Errorf("marshal probe payload %d: %w", id, err)
 		}
 		specs = append(specs, store.JobSpec{Type: "probe", Payload: string(payload), Priority: 0})
 	}
+	return specs, nil
+}
+
+// enqueueProbeSpecs inserts batches of unique probe jobs and returns how many
+// were newly created. Batching keeps a large library's handoff to the queue
+// from paying one transaction (and fsync) per file.
+func enqueueProbeSpecs(ctx context.Context, st *store.Store, specs []store.JobSpec) (int, error) {
 	enqueued := 0
 	for start := 0; start < len(specs); start += probeEnqueueBatch {
 		if err := ctx.Err(); err != nil {
 			return enqueued, err
 		}
 		end := min(start+probeEnqueueBatch, len(specs))
-		if _, err := st.EnqueueJobs(specs[start:end]); err != nil {
+		n, err := st.EnqueueUniqueJobs(specs[start:end])
+		if err != nil {
 			return enqueued, err
 		}
-		enqueued += end - start
+		enqueued += n
 	}
 	return enqueued, nil
 }
 
+// enqueueProbes hands changed media to the probe queue in bounded batches.
+func enqueueProbes(ctx context.Context, st *store.Store, ids []int64) (int, error) {
+	specs, err := probeSpecs(ids)
+	if err != nil {
+		return 0, err
+	}
+	return enqueueProbeSpecs(ctx, st, specs)
+}
+
 // recoverPendingProbes re-enqueues probes for media that were left pending by
-// an interrupted or crashed scan. EnqueueUniqueJob makes this safe to run on
-// every scan even while a prior batch is still queued or running.
+// an interrupted or crashed scan. It recovers the whole pending set in bounded
+// batches; deduplication keeps active probe jobs from being duplicated.
 func recoverPendingProbes(ctx context.Context, st *store.Store) (int, error) {
 	ids, err := st.MediaIDsByStatus("pending")
 	if err != nil {
 		return 0, err
 	}
-	if len(ids) > pendingProbeLimit {
-		log.Printf("[scan] %d pending media rows; recovering the first %d", len(ids), pendingProbeLimit)
-		ids = ids[:pendingProbeLimit]
+	specs, err := probeSpecs(ids)
+	if err != nil {
+		return 0, err
 	}
-	recovered := 0
-	for _, id := range ids {
-		if err := ctx.Err(); err != nil {
-			return recovered, err
-		}
-		payload, err := json.Marshal(map[string]any{"mediaId": id})
-		if err != nil {
-			return recovered, err
-		}
-		_, created, err := st.EnqueueUniqueJob("probe", string(payload), 0)
-		if err != nil {
-			return recovered, err
-		}
-		if created {
-			recovered++
-		}
-	}
-	return recovered, nil
+	return enqueueProbeSpecs(ctx, st, specs)
 }
 
 // Done reports how many files the scan has processed so far.

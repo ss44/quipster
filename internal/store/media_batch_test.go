@@ -114,3 +114,33 @@ func TestRecoverClosesStaleScans(t *testing.T) {
 	assert.Equal(t, "error", status)
 	assert.NotZero(t, finished)
 }
+
+func TestEnqueueUniqueJobs(t *testing.T) {
+	s := openTest(t)
+	specs := []JobSpec{
+		{Type: "probe", Payload: `{"mediaId":1}`},
+		{Type: "probe", Payload: `{"mediaId":2}`},
+	}
+	n, err := s.EnqueueUniqueJobs(specs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("first enqueue created %d jobs, want 2", n)
+	}
+	n, err = s.EnqueueUniqueJobs(specs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("second enqueue created %d duplicate jobs, want 0", n)
+	}
+	// A completed job no longer blocks a future probe of the same media.
+	stats, err := s.JobStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Queued != 2 {
+		t.Fatalf("queued = %d, want 2", stats.Queued)
+	}
+}
