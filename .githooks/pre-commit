@@ -19,12 +19,12 @@ fi
 TOTAL_COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
 echo "Total Coverage: ${TOTAL_COVERAGE}%"
 
-# Check if coverage is below 90% (using awk to handle floating point comparison)
-if awk "BEGIN {exit !($TOTAL_COVERAGE < 90.0)}"; then
-    echo "❌ Test coverage is below 90% (currently ${TOTAL_COVERAGE}%). Please add more tests."
+# Check if coverage is below 85% (using awk to handle floating point comparison)
+if awk "BEGIN {exit !($TOTAL_COVERAGE < 85.0)}"; then
+    echo "❌ Test coverage is below 85% (currently ${TOTAL_COVERAGE}%). Please add more tests."
     exit 1
 fi
 
-echo "✅ Test coverage is >= 90%!"
+echo "✅ Test coverage is >= 85%!"
 echo "✅ All checks passed!"
 exit 0

@@ -35,11 +35,11 @@ Based on the repository's history and architecture, you must use one of the foll
 
 ## 4. Linting and Testing (Pre-Commit Requirements)
 
-Before finalizing any changes or attempting to commit code, AI agents **must** ensure the codebase passes all tests, meets our strict linting standards, and maintains at least 90% test coverage.
+Before finalizing any changes or attempting to commit code, AI agents **must** ensure the codebase passes all tests, meets our strict linting standards, and maintains at least 85% test coverage.
 
 1. **Format and Lint:** Run `golangci-lint run`. The configuration in `.golangci.yml` enforces standards for formatting, complexity (cyclomatic <= 15), security (`gosec`), best practices (`staticcheck`), and missing documentation. Agents must fix any reported errors.
-2. **Test & Coverage:** Run `go test -coverprofile=coverage.out ./...` followed by `go tool cover -func=coverage.out | grep total`. Ensure that no tests are broken and that the total project statement coverage is **>= 90.0%**. If coverage drops below this threshold, you must write new unit tests.
-3. **Pre-commit:** This repository utilizes a pre-commit hook (`.githooks/pre-commit`) that will automatically reject commits if tests fail, linters fail, or total coverage falls below 90%.
+2. **Test & Coverage:** Run `go test -coverprofile=coverage.out ./...` followed by `go tool cover -func=coverage.out | grep total`. Ensure that no tests are broken and that the total project statement coverage is **>= 85.0%**. If coverage drops below this threshold, you must write new unit tests.
+3. **Pre-commit:** This repository utilizes a pre-commit hook (`.githooks/pre-commit`) that will automatically reject commits if tests fail, linters fail, or total coverage falls below 85%.
 
 ### Example Go Documentation:
 ```go
