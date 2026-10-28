@@ -902,3 +902,20 @@ func TestStoreErrorPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleExamples(t *testing.T) {
+	st, deps := newEnv(t)
+	id := seedMedia(t, st)
+	seedChunks(t, st, id)
+
+	h := Router(deps)
+	rr := do(t, h, http.MethodGet, "/api/examples", nil, nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	body := decodeMap(t, rr)
+	if body["examples"] == nil {
+		t.Errorf("examples missing in response: %v", body)
+	}
+}

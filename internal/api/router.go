@@ -69,6 +69,7 @@ func Router(d Deps) http.Handler {
 	// Public read API
 	r.Get("/api/suggest", d.handleSuggest)
 	r.Get("/api/search", d.handleSearch)
+	r.Get("/api/examples", d.handleExamples)
 	r.Get("/api/media", d.handleMediaList)
 	r.Get("/api/media/{id}", d.handleMedia)
 	r.Get("/api/thumb/{mediaId}", d.handleThumb)

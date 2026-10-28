@@ -136,6 +136,7 @@ async function getJSON<T>(url: string): Promise<T> {
 }
 
 export const api = {
+  examples: () => getJSON<{ examples: string[] }>('/api/examples'),
   suggest: (q: string) =>
     getJSON<{ suggestions: Suggestion[] }>(`/api/suggest?q=${encodeURIComponent(q)}`),
   search: (q: string, show: string, page: number) =>
