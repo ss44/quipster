@@ -12,6 +12,10 @@ services:
       MEDIA_DIR: /media
       DATA_DIR: /data
       CACHE_DIR: /cache
+      CLIP_PREVIEW_RES: ${CLIP_PREVIEW_RES:-640:-2}
+      CLIP_ACCURATE_RES: ${CLIP_ACCURATE_RES:-1280:-2}
+      CLIP_CPU_PRESET: ${CLIP_CPU_PRESET:-}
+      EXTRACT_CONNS: ${EXTRACT_CONNS:-4}
     volumes:
       - type: bind
         source: ${MEDIA_DIR:?set MEDIA_DIR in .env}

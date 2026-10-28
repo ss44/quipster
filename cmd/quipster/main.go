@@ -36,6 +36,9 @@ type config struct {
 	meiliURL     string
 	meiliKey     string
 	apiToken     string
+	previewRes   string
+	accurateRes  string
+	cpuPreset    string
 	subWorkers   int
 	indexWorkers int
 	clipWorkers  int
@@ -91,6 +94,9 @@ func loadConfig() config {
 		cacheMaxGB:   envFloat("CACHE_MAX_GB", 10),
 		longCutSec:   envFloat("LONG_CUT_SEC", 20),
 		probeTimeout: parseDuration(envStr("PROBE_TIMEOUT", "")),
+		previewRes:   envStr("CLIP_PREVIEW_RES", ""),
+		accurateRes:  envStr("CLIP_ACCURATE_RES", ""),
+		cpuPreset:    envStr("CLIP_CPU_PRESET", ""),
 	}
 }
 
@@ -153,6 +159,9 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 		MaxClipSec:   cfg.maxClipSec,
 		DefaultPadMs: cfg.padMs,
 		LongCutSec:   cfg.longCutSec,
+		PreviewRes:   cfg.previewRes,
+		AccurateRes:  cfg.accurateRes,
+		CPUPreset:    cfg.cpuPreset,
 	})
 	thumbSvc := &thumbs.Service{St: st, CacheDir: cfg.cacheDir, Hw: clipSvc}
 	searchSvc := search.New(st, ix)

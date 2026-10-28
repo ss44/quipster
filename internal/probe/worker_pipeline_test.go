@@ -166,6 +166,7 @@ func TestJobHandlerMediaFileMissing(t *testing.T) {
 }
 
 func TestJobHandlerProbeFails(t *testing.T) {
+	logs := captureProbeLogs(t)
 	st := newTestStore(t)
 	dir, binDir := t.TempDir(), t.TempDir()
 	m := addMedia(t, st, filepath.Join(dir, "movie.mkv"), true)
@@ -182,9 +183,11 @@ func TestJobHandlerProbeFails(t *testing.T) {
 	if got.Status != "error" || !strings.Contains(got.Error, "ffprobe") {
 		t.Fatalf("status = %q error = %q", got.Status, got.Error)
 	}
+	assertProbeLogs(t, logs, "stage=metadata failed elapsed=", "stage=complete outcome=media_error total_elapsed=")
 }
 
 func TestJobHandlerEmbeddedSuccess(t *testing.T) {
+	logs := captureProbeLogs(t)
 	st := newTestStore(t)
 	dir, binDir, cacheDir := t.TempDir(), t.TempDir(), t.TempDir()
 	m := addMedia(t, st, filepath.Join(dir, "movie.mkv"), true)
@@ -204,6 +207,18 @@ func TestJobHandlerEmbeddedSuccess(t *testing.T) {
 	assertEmbeddedTrack(t, st, m.ID, cacheDir)
 	if len(seen) < 3 || seen[0] != 0.05 {
 		t.Fatalf("progress calls = %v", seen)
+	}
+	assertProbeLogs(t, logs, fmt.Sprintf("media %d job 0:", m.ID), "stage=metadata probing", "gpu=false",
+		"stage=metadata probe ok elapsed=", `container="matroska" duration_sec=120.000 video="h264"`,
+		"width=1280 height=720", `audio="aac" audio_streams=1 audio_ordinal=0 audio_lang="en" subtitle_streams=1`,
+		"stage=sidecar none selected", `stage=embedded_selection selected index=2 ordinal=0 codec="subrip" lang="en"`,
+		"stage=extraction_queue waiting", "stage=extraction_queue acquired wait_elapsed=", "active=1 capacity=1",
+		"stage=extraction started", "full-file container scan, storage-bound", "CPU subtitle conversion, no GPU",
+		"stage=extraction succeeded elapsed=", "stage=embedded_parse parsed cues=2 elapsed=",
+		"stage=cue_store stored cues=2", "stage=chunk_build building cues=2", "stage=chunk_store stored chunks=",
+		"stage=index_enqueue enqueued (indexing runs separately)", "stage=complete outcome=index_queued total_elapsed=")
+	if len(p.sem()) != 0 {
+		t.Fatal("successful extraction leaked capacity")
 	}
 }
 
@@ -270,6 +285,7 @@ func TestJobHandlerDriftOffset(t *testing.T) {
 }
 
 func TestJobHandlerNoSubs(t *testing.T) {
+	logs := captureProbeLogs(t)
 	st := newTestStore(t)
 	dir, binDir := t.TempDir(), t.TempDir()
 	m := addMedia(t, st, filepath.Join(dir, "movie.mkv"), true)
@@ -291,6 +307,7 @@ func TestJobHandlerNoSubs(t *testing.T) {
 	if n := countRows(t, st, `SELECT COUNT(*) FROM jobs WHERE type='index'`); n != 0 {
 		t.Fatal("no index job expected")
 	}
+	assertProbeLogs(t, logs, "stage=embedded_selection none eligible subtitle_streams=0", "stage=no_subs", "stage=complete outcome=no_subs total_elapsed=")
 }
 
 func TestJobHandlerBitmapSubsSkipped(t *testing.T) {
@@ -332,6 +349,7 @@ func TestJobHandlerUntaggedSub(t *testing.T) {
 }
 
 func TestJobHandlerSidecarWins(t *testing.T) {
+	logs := captureProbeLogs(t)
 	st := newTestStore(t)
 	dir, binDir, cacheDir := t.TempDir(), t.TempDir(), t.TempDir()
 	mediaPath := filepath.Join(dir, "Film.mkv")
@@ -356,9 +374,14 @@ func TestJobHandlerSidecarWins(t *testing.T) {
 	if len(tracks) != 1 || tracks[0].Source != "sidecar" || tracks[0].ExtractedPath != sidecar {
 		t.Fatalf("track = %+v, want sidecar %q", tracks, sidecar)
 	}
+	assertProbeLogs(t, logs, fmt.Sprintf("stage=sidecar selected path=%q; parsing", sidecar), "stage=sidecar parsed cues=2 elapsed=", "stage=cue_store storing source=sidecar cues=2")
+	if strings.Contains(logs.String(), "stage=extraction started") {
+		t.Fatal("sidecar path logged an extraction that did not occur")
+	}
 }
 
 func TestJobHandlerSidecarUnparsable(t *testing.T) {
+	logs := captureProbeLogs(t)
 	st := newTestStore(t)
 	dir, binDir, cacheDir := t.TempDir(), t.TempDir(), t.TempDir()
 	m := addMedia(t, st, filepath.Join(dir, "Film.mkv"), true)
@@ -385,9 +408,11 @@ func TestJobHandlerSidecarUnparsable(t *testing.T) {
 	if len(tracks) != 1 || tracks[0].Source != "embedded" {
 		t.Fatalf("track = %+v, want embedded fallback", tracks)
 	}
+	assertProbeLogs(t, logs, "stage=sidecar parse failed elapsed=", "falling back to embedded", "stage=embedded_parse parsed cues=2")
 }
 
 func TestJobHandlerExtractionFails(t *testing.T) {
+	logs := captureProbeLogs(t)
 	st := newTestStore(t)
 	dir, binDir := t.TempDir(), t.TempDir()
 	m := addMedia(t, st, filepath.Join(dir, "movie.mkv"), true)
@@ -408,9 +433,14 @@ func TestJobHandlerExtractionFails(t *testing.T) {
 	if err != nil || n != 0 {
 		t.Fatalf("cues = %d, %v, want 0", n, err)
 	}
+	assertProbeLogs(t, logs, "stage=extraction failed elapsed=", "boom", "stage=complete outcome=no_subs total_elapsed=")
+	if len(p.sem()) != 0 {
+		t.Fatal("failed extraction leaked capacity")
+	}
 }
 
 func TestJobHandlerEmbeddedUnparsable(t *testing.T) {
+	logs := captureProbeLogs(t)
 	st := newTestStore(t)
 	dir, binDir := t.TempDir(), t.TempDir()
 	m := addMedia(t, st, filepath.Join(dir, "movie.mkv"), true)
@@ -427,9 +457,11 @@ func TestJobHandlerEmbeddedUnparsable(t *testing.T) {
 	if got.Status != "no_subs" || !strings.Contains(got.Error, "embedded subs unparsable") {
 		t.Fatalf("status = %q error = %q", got.Status, got.Error)
 	}
+	assertProbeLogs(t, logs, "stage=embedded_parse failed elapsed=", "stage=complete outcome=no_subs total_elapsed=")
 }
 
 func TestJobHandlerReusesCache(t *testing.T) {
+	logs := captureProbeLogs(t)
 	st := newTestStore(t)
 	dir, binDir, cacheDir := t.TempDir(), t.TempDir(), t.TempDir()
 	m := addMedia(t, st, filepath.Join(dir, "movie.mkv"), true)
@@ -461,5 +493,9 @@ func TestJobHandlerReusesCache(t *testing.T) {
 	n, err := st.CueCount(m.ID)
 	if err != nil || n != 2 {
 		t.Fatalf("cues = %d, %v, want 2", n, err)
+	}
+	assertProbeLogs(t, logs, fmt.Sprintf("stage=extraction cache reused path=%q", cached), "stage=embedded_parse parsed cues=2")
+	if strings.Contains(logs.String(), "stage=extraction_queue") || strings.Contains(logs.String(), "stage=extraction started") {
+		t.Fatal("cache hit must neither queue nor start extraction")
 	}
 }

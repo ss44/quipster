@@ -340,7 +340,7 @@ func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, verr.Error())
 		return
 	}
-	key := clips.CacheKey(req.MediaID, req.Start, req.End, req.Mode, req.PadMs)
+	key := d.Clips.CacheKey(req)
 
 	if e, cerr := d.Clips.Cached(key); cerr != nil {
 		writeErr(w, http.StatusInternalServerError, cerr.Error())

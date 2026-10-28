@@ -68,6 +68,9 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
 | `CLIP_WORKERS` | `2` | async clip render pool |
 | `CLIP_PAD_MS` | `250` | head+tail padding |
 | `MAX_CLIP_SEC` | `120` | hard clip cap |
+| `CLIP_PREVIEW_RES` | `640:-2` | preview width:height; even dimensions, with `-2` in one dimension to preserve aspect ratio |
+| `CLIP_ACCURATE_RES` | `1280:-2` | optional precise transcode resolution; does not affect stream-copy downloads |
+| `CLIP_CPU_PRESET` | mode-specific | x264 preset override; blank keeps preview `ultrafast`, precise `veryfast`; ignored for VAAPI |
 | `CACHE_MAX_GB` | `10` | LRU cache cap (clips/thumbs/subs) |
 | `LONG_CUT_SEC` | `20` | accurate cuts longer than this run as async jobs with progress |
 | `API_TOKEN` | — | when set, guards `/api/admin/*` (header `X-API-Token`) |
@@ -124,7 +127,38 @@ before `go build` after frontend changes.
   share links are phase 2.
 - mp4 stream-copy falls back to Matroska output when codecs are not mp4-compatible.
 - The Meili index is derived state — `POST /api/admin/reindex` rebuilds it from SQLite.
-- VAAPI is probed at startup; without `/dev/dri` the app uses CPU encoding automatically.
+- VAAPI is tested on the first transcode; without a usable `/dev/dri/renderD128` the app uses CPU encoding automatically. Logs report self-test errors and per-render CPU fallbacks. Metadata probing, subtitle extraction, and stream-copy downloads do not use GPU video acceleration.
+
+### Slow previews on network storage
+
+Previews default to a small 640px-wide H.264 transcode. Downloads default to **Fast cut**,
+which copies the original video/audio without quality loss, but starts at a keyframe rather
+than an exact frame. **Precise** remains an explicit re-encoding option for exact timing.
+Changing transcode settings creates new cache identities; existing files expire via the LRU.
+
+Lowering preview resolution reduces scaling/encoding work and output size, not the source
+resolution that must be decoded or necessarily the bytes read over Samba. Embedded subtitle
+extraction can scan the full movie and compete with interactive requests. Try `EXTRACT_CONNS=1`
+on slower shares, and keep `CACHE_DIR` and `DATA_DIR` on local storage when possible.
+
+On the **deployment host**, while opening a preview, use these diagnostics (some tools may
+need installation or elevated access):
+
+```sh
+docker compose stats --no-stream
+docker compose top app
+vmstat 1 10
+iostat -xz 1 10
+sar -n DEV 1 10
+sudo intel_gpu_top
+docker compose logs --since 5m app
+```
+
+Look for CPU saturation, swap activity, device latency, and busy GPU Video engines.
+Docker CPU percentages may exceed 100% across cores; its I/O counters are cumulative.
+Host-mounted Samba traffic may not appear in container network counters or local disk stats;
+use host network rates and CIFS statistics for the mounted share rather than treating zero
+container network I/O as proof the app is idle. Low CPU alone does not prove an I/O bottleneck.
 
 ## Troubleshooting
 

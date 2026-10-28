@@ -67,6 +67,60 @@ func TestAudioMapArgs(t *testing.T) {
 	assert.Equal(t, []string{"-map", "0:a:2?"}, audioMapArgs(2))
 }
 
+func TestEncodingSettings(t *testing.T) {
+	defaults := New(nil, Config{}).Config()
+	assert.Equal(t, "640:-2", defaults.PreviewRes)
+	assert.Equal(t, "1280:-2", defaults.AccurateRes)
+	for _, value := range []string{"bad", "640:0", "641:480", "-2:-2", "640:480:evil", "999999:480", "640:NaN"} {
+		t.Run(value, func(t *testing.T) {
+			cfg := New(nil, Config{PreviewRes: value, AccurateRes: value, CPUPreset: "invalid"}).Config()
+			assert.Equal(t, defaults, cfg)
+		})
+	}
+	cfg := New(nil, Config{PreviewRes: "480:-2", AccurateRes: "854:480", CPUPreset: "superfast"}).Config()
+	assert.Equal(t, "480:-2", cfg.PreviewRes)
+	assert.Equal(t, "854:480", cfg.AccurateRes)
+	assert.Equal(t, "superfast", cfg.CPUPreset)
+	assert.Equal(t, "-2:480", normalizeResolution("-2:480", "640:-2"))
+}
+
+func TestEncodingArguments(t *testing.T) {
+	for _, preset := range []string{"", "superfast"} {
+		cfg := New(nil, Config{PreviewRes: "480:-2", AccurateRes: "854:480", CPUPreset: preset}).Config()
+		preview := previewArgs("source.mkv", 1, 12, 3, "preview.mp4", false, cfg)
+		accurate := accurateArgs("source.mkv", 1, 12, 3, "accurate.mp4", false, true, cfg)
+		assert.Contains(t, preview, "scale=480:-2")
+		assert.Contains(t, accurate, "scale=854:480")
+		assert.Contains(t, accurate, "pipe:1")
+		if preset == "" {
+			assert.Contains(t, preview, "ultrafast")
+			assert.Contains(t, accurate, "veryfast")
+		} else {
+			assert.Contains(t, preview, preset)
+			assert.Contains(t, accurate, preset)
+		}
+		assert.Contains(t, previewArgs("source.mkv", 0, 12, 3, "preview.mp4", true, cfg), "scale_vaapi=480:-2:format=nv12")
+		assert.Contains(t, accurateArgs("source.mkv", 0, 12, 3, "accurate.mp4", true, false, cfg), "scale_vaapi=854:480:format=nv12")
+	}
+}
+
+func TestProfileCacheKeys(t *testing.T) {
+	s := New(nil, Config{})
+	other := New(nil, Config{PreviewRes: "480:-2", AccurateRes: "854:480", CPUPreset: "superfast"})
+	for _, mode := range []string{"preview", "accurate"} {
+		r := Request{MediaID: 1, Start: 2, End: 4, Mode: mode}
+		assert.NotEqual(t, s.CacheKey(r), other.CacheKey(r))
+		assert.Equal(t, s.CacheKey(r), New(nil, Config{}).CacheKey(r))
+	}
+	r := Request{MediaID: 1, Start: 2, End: 4, Mode: "fast"}
+	assert.Equal(t, s.CacheKey(r), other.CacheKey(r))
+	assert.Equal(t, CacheKey(1, 2, 4, "fast", 0), s.CacheKey(r))
+	args := fastCopyArgs("source.mkv", 2, 2, 0, "download.mp4")
+	assert.Contains(t, args, "copy")
+	assert.NotContains(t, args, "-vf")
+	assert.NotContains(t, args, "libx264")
+}
+
 // TestValidateSkipsRangeCheckWithoutDuration covers the Validate branch that
 // skips start/end range checks when the media has no probed duration.
 func TestValidateSkipsRangeCheckWithoutDuration(t *testing.T) {
@@ -198,7 +252,7 @@ func TestRunWithProgressCached(t *testing.T) {
 	id := seedMedia(t, st, "/fake/source", 0)
 	realPath := filepath.Join(t.TempDir(), "cached.mp4")
 	require.NoError(t, os.WriteFile(realPath, []byte("x"), 0o600))
-	key := CacheKey(id, 10, 20, "accurate", 250)
+	key := s.CacheKey(Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250})
 	require.NoError(t, st.UpsertCacheEntry(key, realPath, "clip", 1))
 
 	path, ext, err := s.RunWithProgress(context.Background(),

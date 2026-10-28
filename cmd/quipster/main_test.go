@@ -86,7 +86,7 @@ func clearConfigEnv(t *testing.T) {
 		"ADDR", "ROLE", "DATA_DIR", "MEDIA_DIR", "CACHE_DIR", "MEILI_URL",
 		"MEILI_MASTER_KEY", "SCAN_INTERVAL", "SUBTITLE_WORKERS", "INDEX_WORKERS",
 		"CLIP_WORKERS", "API_TOKEN", "CLIP_PAD_MS", "MAX_CLIP_SEC", "CACHE_MAX_GB",
-		"LONG_CUT_SEC",
+		"LONG_CUT_SEC", "CLIP_PREVIEW_RES", "CLIP_ACCURATE_RES", "CLIP_CPU_PRESET",
 	} {
 		t.Setenv(key, "")
 	}
@@ -114,6 +114,16 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if got := loadConfig(); got != want {
 		t.Errorf("loadConfig = %+v, want %+v", got, want)
+	}
+}
+
+func TestClipTuningEnvironment(t *testing.T) {
+	t.Setenv("CLIP_PREVIEW_RES", "480:-2")
+	t.Setenv("CLIP_ACCURATE_RES", "854:480")
+	t.Setenv("CLIP_CPU_PRESET", "superfast")
+	cfg := loadConfig()
+	if cfg.previewRes != "480:-2" || cfg.accurateRes != "854:480" || cfg.cpuPreset != "superfast" {
+		t.Fatalf("clip tuning not loaded: %+v", cfg)
 	}
 }
 
