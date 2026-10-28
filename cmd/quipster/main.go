@@ -35,11 +35,11 @@ type config struct {
 	cacheDir     string
 	meiliURL     string
 	meiliKey     string
-	scanIntvl    time.Duration
+	apiToken     string
 	subWorkers   int
 	indexWorkers int
 	clipWorkers  int
-	apiToken     string
+	scanIntvl    time.Duration
 	padMs        int
 	maxClipSec   float64
 	cacheMaxGB   float64
@@ -106,6 +106,26 @@ func parseDuration(s string) time.Duration {
 	return 0
 }
 
+// registerJobHandlers wires the media-ingestion and clip handlers into the
+// job runner. Worker pools stay I/O-tuned: subtitle extraction is NFS-bound,
+// so its pool size is the throughput lever.
+func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *indexer.Indexer, clipSvc *clips.Service) {
+	onDeleted := func(ids []int64) {
+		if err := ix.DeleteMedia(ids); err != nil {
+			log.Printf("delete media docs %v: %v", ids, err)
+		}
+	}
+	runner.Register("scan", 1, scan.JobHandler(cfg.mediaDir, st, onDeleted))
+	pipeline := &probe.Pipeline{
+		St:           st,
+		SubsCacheDir: filepath.Join(cfg.cacheDir, "subs"),
+		ExtractConns: envInt("EXTRACT_CONNS", 4),
+	}
+	runner.Register("probe", cfg.subWorkers, pipeline.JobHandler())
+	runner.Register("index", cfg.indexWorkers, ix.JobHandler())
+	runner.Register("clip", cfg.clipWorkers, clipSvc.JobHandler())
+}
+
 func main() {
 	cfg := loadConfig()
 	log.Printf("quipster starting: role=%s addr=%s media=%s data=%s cache=%s meili=%s",
@@ -125,26 +145,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
-	defer st.Close()
+	defer func() {
+		if cerr := st.Close(); cerr != nil {
+			log.Printf("close store: %v", cerr)
+		}
+	}()
 	if err := st.Recover(); err != nil {
 		log.Printf("recover jobs: %v", err)
 	}
-	if _, ok, _ := st.GetSetting(store.SettingLibraryPaths); !ok {
-		if v := strings.TrimSpace(os.Getenv("LIBRARY_PATHS")); v != "" {
-			if roots, err := scan.CleanRoots(strings.Split(v, ",")); err == nil {
-				if err := st.SetLibraryPaths(roots); err != nil {
-					log.Printf("seed library paths: %v", err)
-				} else {
-					log.Printf("library folders from LIBRARY_PATHS: %v", roots)
-				}
-			} else {
-				log.Printf("invalid LIBRARY_PATHS: %v", err)
-			}
-		}
-	}
+	seedLibraryPaths(st)
 
 	ix := indexer.New(st, cfg.meiliURL, cfg.meiliKey)
-	go ensureSettingsLoop(ix)
+	go ensureSettingsLoop(ix, 15*time.Second)
 
 	lru := &cache.LRU{St: st, MaxBytes: int64(cfg.cacheMaxGB * 1024 * 1024 * 1024), Kinds: []string{"clip", "thumb", "sub"}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -164,16 +176,7 @@ func main() {
 	runner := jobs.NewRunner(st, "worker")
 	runner.SetJobTimeout(parseDuration(envStr("JOB_TIMEOUT", "3h")))
 	if cfg.role == "all" || cfg.role == "worker" {
-		onDeleted := func(ids []int64) { ix.DeleteMedia(ids) }
-		runner.Register("scan", 1, scan.JobHandler(cfg.mediaDir, st, onDeleted))
-		pipeline := &probe.Pipeline{
-			St:           st,
-			SubsCacheDir: filepath.Join(cfg.cacheDir, "subs"),
-			ExtractConns: envInt("EXTRACT_CONNS", 4),
-		}
-		runner.Register("probe", cfg.subWorkers, pipeline.JobHandler())
-		runner.Register("index", cfg.indexWorkers, ix.JobHandler())
-		runner.Register("clip", cfg.clipWorkers, clipSvc.JobHandler())
+		registerJobHandlers(cfg, st, runner, ix, clipSvc)
 	}
 
 	if cfg.scanIntvl > 0 && (cfg.role == "all" || cfg.role == "api") {
@@ -223,11 +226,40 @@ func main() {
 	runner.Stop()
 }
 
-func ensureSettingsLoop(ix *indexer.Indexer) {
+// seedLibraryPaths seeds the persisted library-folders setting from the
+// LIBRARY_PATHS env var on first run only: an already-persisted setting (even
+// an empty one chosen in the admin UI) always wins over the environment.
+func seedLibraryPaths(st *store.Store) {
+	if _, ok, err := st.GetSetting(store.SettingLibraryPaths); err != nil || ok {
+		if err != nil {
+			log.Printf("read library paths setting: %v", err)
+		}
+		return
+	}
+	v := strings.TrimSpace(os.Getenv("LIBRARY_PATHS"))
+	if v == "" {
+		return
+	}
+	roots, err := scan.CleanRoots(strings.Split(v, ","))
+	if err != nil {
+		log.Printf("invalid LIBRARY_PATHS: %v", err)
+		return
+	}
+	if err := st.SetLibraryPaths(roots); err != nil {
+		log.Printf("seed library paths: %v", err)
+		return
+	}
+	log.Printf("library folders seeded from LIBRARY_PATHS") //nolint:gosec // folder names are operator-supplied env, logged locally only
+}
+
+// ensureSettingsLoop blocks until the Meilisearch index exists with the
+// desired settings, retrying every retry interval so startup survives a
+// Meilisearch that is still booting (compose starts both at once).
+func ensureSettingsLoop(ix *indexer.Indexer, retry time.Duration) {
 	for {
 		if err := ix.EnsureSettings(); err != nil {
-			log.Printf("meilisearch settings: %v (retrying in 15s)", err)
-			time.Sleep(15 * time.Second)
+			log.Printf("meilisearch settings: %v (retrying in %s)", err, retry)
+			time.Sleep(retry)
 			continue
 		}
 		log.Printf("meilisearch index %q ready", indexer.IndexName)
@@ -244,12 +276,20 @@ func scanTicker(ctx context.Context, st *store.Store, interval time.Duration) {
 			return
 		case <-t.C:
 			if active, err := st.HasActiveScanJob(); err == nil && !active {
-				roots, _ := st.GetLibraryPaths()
-				payload, _ := json.Marshal(map[string]any{"roots": roots, "prune": true})
+				roots, rerr := st.GetLibraryPaths()
+				if rerr != nil {
+					log.Printf("scan ticker read roots: %v", rerr)
+					continue
+				}
+				payload, merr := json.Marshal(map[string]any{"roots": roots, "prune": true})
+				if merr != nil {
+					log.Printf("scan ticker marshal: %v", merr)
+					continue
+				}
 				if _, err := st.EnqueueJob("scan", string(payload), 3); err != nil {
 					log.Printf("scan ticker enqueue: %v", err)
 				} else {
-					log.Printf("scan ticker: scan enqueued (folders=%v)", roots)
+					log.Printf("scan ticker: scan enqueued (%d folders)", len(roots))
 				}
 			}
 		}
