@@ -9,6 +9,10 @@
         <v-icon icon="mdi-pulse" size="16" class="mr-1" />
         Diagnostics
       </RouterLink>
+      <RouterLink to="/admin/nodes" class="admin-tab" active-class="is-active">
+        <v-icon icon="mdi-server-network" size="16" class="mr-1" />
+        Nodes
+      </RouterLink>
     </nav>
     <RouterView />
   </div>

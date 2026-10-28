@@ -119,6 +119,24 @@ export interface Job {
   mediaChunks: number
 }
 
+export interface NodeInfo {
+  id: number
+  name: string
+  status: 'pending' | 'approved' | 'revoked'
+  version: string
+  lastSeen: number
+  jobsDone: number
+  jobsFailed: number
+  createdAt: number
+}
+
+/** A node row in the admin dashboard: identity plus live state. */
+export interface NodeView {
+  node: NodeInfo
+  online: boolean
+  currentJobs: Job[]
+}
+
 export interface LineStats {
   cues: number
   chunks: number
@@ -352,6 +370,31 @@ export const api = {
     `/api/admin/diagnostics/bundle${includePaths ? '?paths=1' : ''}`,
   logs: (limit = 500) =>
     getJSON<{ lines: string[]; count: number }>(`/api/admin/logs?limit=${limit}`),
+  nodes: () => getJSON<{ nodes: NodeView[] }>('/api/admin/nodes'),
+  approveNode: async (id: number) => {
+    const res = await fetch(`/api/admin/nodes/${id}/approve`, { method: 'POST' })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || 'failed to approve node')
+    }
+    return res.json() as Promise<{ approved: boolean }>
+  },
+  revokeNode: async (id: number) => {
+    const res = await fetch(`/api/admin/nodes/${id}/revoke`, { method: 'POST' })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || 'failed to revoke node')
+    }
+    return res.json() as Promise<{ revoked: boolean }>
+  },
+  deleteNode: async (id: number) => {
+    const res = await fetch(`/api/admin/nodes/${id}`, { method: 'DELETE' })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || 'failed to delete node')
+    }
+    return res.json() as Promise<{ deleted: boolean }>
+  },
 }
 
 export const diagnosticsStreamURL = '/api/admin/diagnostics/stream'

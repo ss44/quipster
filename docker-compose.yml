@@ -156,6 +156,28 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # Worker node: the same image in node mode. It registers with the main app
+  # and processes probe/clip jobs after you approve it under Admin → Nodes.
+  # Mount the library the same way the app does; if this node mounts only a
+  # subfolder, set NODE_MEDIA_MAP=serverPrefix=localPath to translate paths.
+  # Start with: docker compose --profile node up -d quipster-node
+  quipster-node:
+    image: ghcr.io/ss44/quipster:latest
+    command: ["node", "--server", "http://app:8080", "--media", "/media"]
+    environment:
+      NODE_NAME: ${NODE_NAME:-docker-node}
+      NODE_MEDIA_MAP: ${NODE_MEDIA_MAP:-}
+      EXTRACT_CONNS: ${EXTRACT_CONNS:-4}
+    volumes:
+      - type: bind
+        source: ${MEDIA_DIR:?set MEDIA_DIR in .env}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: unless-stopped
+    profiles: ["node"]
+
 volumes:
   app-data: {}
   meili-data: {}

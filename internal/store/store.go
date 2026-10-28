@@ -173,6 +173,20 @@ func (s *Store) migrate() error {
 			last_access INTEGER NOT NULL DEFAULT 0,
 			hits INTEGER NOT NULL DEFAULT 0
 		)`,
+		`CREATE TABLE IF NOT EXISTS nodes (
+			id INTEGER PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			fingerprint TEXT NOT NULL UNIQUE,
+			secret TEXT NOT NULL DEFAULT '',
+			token TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','revoked')),
+			version TEXT NOT NULL DEFAULT '',
+			last_seen INTEGER NOT NULL DEFAULT 0,
+			jobs_done INTEGER NOT NULL DEFAULT 0,
+			jobs_failed INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

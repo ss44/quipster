@@ -12,11 +12,12 @@ import (
 	"github.com/asticode/go-astisub"
 )
 
-// Cue is one normalized subtitle line span used for chunk building.
+// Cue is one normalized subtitle line span used for chunk building. The JSON
+// tags define the wire format worker nodes use to upload parsed cues.
 type Cue struct {
-	Text  string
-	Start float64
-	End   float64
+	Text  string  `json:"text"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
 }
 
 var sidecarExts = []string{".srt", ".vtt"}
