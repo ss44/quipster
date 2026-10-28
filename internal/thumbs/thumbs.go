@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"quipster/internal/hardware"
 	"quipster/internal/probe"
@@ -24,7 +25,7 @@ const bucketSec = 5.0
 type Service struct {
 	St       *store.Store
 	CacheDir string
-	Hw       hardware.Capabilities // detected hw backend; zero value = cpu only
+	Hw       *hardware.Monitor // detected hw backend; nil = cpu only
 }
 
 var widths = []int{320, 640}
@@ -104,21 +105,23 @@ func (s *Service) Get(ctx context.Context, mediaID int64, t float64, width int) 
 }
 
 func (s *Service) render(ctx context.Context, src string, t float64, width int, out string) error {
+	caps := s.Hw.Capabilities()
 	build := func(hw bool) []string {
 		args := []string{"-v", "error", "-y"}
 		if hw {
-			args = append(args, s.Hw.DecodeArgs()...)
+			args = append(args, caps.DecodeArgs()...)
 		}
 		return append(args, "-ss", fmt.Sprintf("%.3f", t), "-i", src, "-frames:v", "1",
 			"-vf", fmt.Sprintf("scale=%d:-2", width), "-q:v", "5", "-f", "image2", out)
 	}
-	hw := s.Hw.Available()
+	hw := caps.Available()
 	//nolint:gosec // the ffmpeg binary and media paths are operator supplied.
 	cmd := exec.CommandContext(ctx, probe.FfmpegBin(), build(hw)...)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		if !hw {
 			return fmt.Errorf("thumbnail failed: %w: %s", err, strings.TrimSpace(string(b)))
 		}
+		s.Hw.RecordFallback(err.Error(), time.Now().UnixMilli())
 		//nolint:errcheck,gosec // a failed partial render is retried below
 		os.Remove(out)
 		//nolint:gosec // the ffmpeg binary and media paths are operator supplied.
@@ -126,7 +129,13 @@ func (s *Service) render(ctx context.Context, src string, t float64, width int, 
 		if b2, err2 := cmd2.CombinedOutput(); err2 != nil {
 			return fmt.Errorf("thumbnail failed: %v / %v: %s", err, err2, strings.TrimSpace(string(b2)))
 		}
+		s.Hw.RecordCPU()
 		return nil
+	}
+	if hw {
+		s.Hw.RecordHW()
+	} else {
+		s.Hw.RecordCPU()
 	}
 	return nil
 }

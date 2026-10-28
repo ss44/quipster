@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"quipster/internal/clips"
+	"quipster/internal/diagnostics"
 	"quipster/internal/events"
 	"quipster/internal/indexer"
 	"quipster/internal/jobs"
@@ -30,19 +31,22 @@ import (
 // Deps bundles the collaborators and settings the HTTP router needs.
 // Handlers receive it by value; every field is a shared service or
 // read-only configuration.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
 type Deps struct {
-	WebFS      fs.FS
-	St         *store.Store
-	Search     *search.Service
-	Indexer    *indexer.Indexer
-	Clips      *clips.Service
-	Thumbs     *thumbs.Service
-	Events     *events.Collector
-	Runner     *jobs.Runner
-	ScanTicker func() // enqueues a scan job if none active; called for POST /scan
-	MediaDir   string
-	SubsDir    string
-	APIToken   string
+	WebFS       fs.FS
+	St          *store.Store
+	Search      *search.Service
+	Indexer     *indexer.Indexer
+	Clips       *clips.Service
+	Thumbs      *thumbs.Service
+	Events      *events.Collector
+	Runner      *jobs.Runner
+	ScanTicker  func() // enqueues a scan job if none active; called for POST /scan
+	MediaDir    string
+	SubsDir     string
+	APIToken    string
+	Diagnostics *diagnostics.Collector
 }
 
 // Router builds the application HTTP handler: standard middleware, public
@@ -94,6 +98,14 @@ func Router(d Deps) http.Handler {
 		r.Get("/api/admin/status", d.handleStatus)
 		r.Get("/api/admin/events", d.Events.Handler())
 		r.Get("/api/admin/jobs", d.handleJobs)
+		r.Get("/api/admin/diagnostics/system", d.handleDiagnosticsSystem)
+		r.Get("/api/admin/diagnostics/metrics", d.handleDiagnosticsMetrics)
+		r.Get("/api/admin/diagnostics/benchmarks", d.handleDiagnosticsBenchmarks)
+		r.Get("/api/admin/diagnostics/stream", d.handleDiagnosticsStream)
+		r.Post("/api/admin/diagnostics/probe", d.handleDiagnosticsProbe)
+		r.Get("/api/admin/diagnostics/bundle", d.handleDiagnosticsBundle)
+		r.Post("/api/admin/diagnostics/report", d.handleDiagnosticsReport)
+		r.Get("/api/admin/logs", d.handleLogs)
 	})
 
 	if d.WebFS != nil {
@@ -260,10 +272,6 @@ func (d Deps) handleQuotes(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(quotes))
 	for _, q := range quotes {
-		title := q.ShowTitle
-		if title == "" {
-			title = q.MediaTitle
-		}
 		out = append(out, map[string]any{
 			"chunkId":    indexer.DocID(q.MediaFileID, q.StartCueIdx, q.EndCueIdx),
 			"text":       q.Text,

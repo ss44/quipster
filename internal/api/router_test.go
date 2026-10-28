@@ -17,7 +17,9 @@ import (
 	"testing/fstest"
 
 	"quipster/internal/clips"
+	"quipster/internal/diagnostics"
 	"quipster/internal/events"
+	"quipster/internal/hardware"
 	"quipster/internal/indexer"
 	"quipster/internal/jobs"
 	"quipster/internal/search"
@@ -89,12 +91,14 @@ func buildDeps(t *testing.T, st *store.Store, meiliURL string) Deps {
 	runner := jobs.NewRunner(st, "test")
 	t.Cleanup(runner.Stop)
 	return Deps{
-		St:       st,
-		Search:   search.New(st, ix),
-		Indexer:  ix,
-		Clips:    clipSvc,
-		Thumbs:   thumbSvc,
-		Events:   &events.Collector{St: st, MeiliUp: ix.Healthy},
+		St:      st,
+		Search:  search.New(st, ix),
+		Indexer: ix,
+		Clips:   clipSvc,
+		Thumbs:  thumbSvc,
+		Events:  &events.Collector{St: st, MeiliUp: ix.Healthy},
+		Diagnostics: diagnostics.New(st, hardware.MonitorFor(hardware.Capabilities{}), nil, ix.Healthy,
+			"test", t.TempDir(), t.TempDir(), t.TempDir()),
 		Runner:   runner,
 		MediaDir: t.TempDir(),
 		WebFS: fstest.MapFS{

@@ -316,7 +316,7 @@ func runTranscodeTest(t *testing.T, hw hardware.Capabilities, failTimes int) (st
 	t.Setenv("MOCK_ARGS_DIR", argsDir)
 	t.Setenv("MOCK_FAIL_TIMES", fmt.Sprint(failTimes))
 
-	s := &Service{cfg: Config{Hw: hw, PreviewRes: "640:-2", AccurateRes: "1280:-2"}}
+	s := &Service{cfg: Config{Hw: hardware.MonitorFor(hw), PreviewRes: "640:-2", AccurateRes: "1280:-2"}}
 	out := filepath.Join(t.TempDir(), "out.mp4")
 	err := s.runTranscode(context.Background(), "in.mp4", out, 5, 10, 1, s.previewProfile(), nil)
 	if err != nil {

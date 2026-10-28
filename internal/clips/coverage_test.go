@@ -41,11 +41,11 @@ func mockSlowCreate(t *testing.T) {
 // forceHWOn/forceHWOff pin the hardware backend so tests are deterministic
 // regardless of the host's GPUs.
 func forceHWOn(s *Service) {
-	s.cfg.Hw = hardware.Capabilities{Backend: hardware.BackendVaapi, Device: "/dev/dri/renderD128"}
+	s.cfg.Hw = hardware.MonitorFor(hardware.Capabilities{Backend: hardware.BackendVaapi, Device: "/dev/dri/renderD128"})
 }
 
 func forceHWOff(s *Service) {
-	s.cfg.Hw = hardware.Capabilities{}
+	s.cfg.Hw = hardware.MonitorFor(hardware.Capabilities{})
 }
 
 func newTestService(t *testing.T) (*Service, *store.Store) {

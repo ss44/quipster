@@ -11,12 +11,19 @@
         </div>
 
         <nav class="d-flex align-center" style="gap: 4px">
-          <RouterLink to="/admin" class="nav-link d-none d-sm-inline-flex align-center">
+          <RouterLink to="/admin/library" class="nav-link d-none d-sm-inline-flex align-center">
             <v-icon icon="mdi-tune-variant" size="15" class="mr-1" />
             Library
           </RouterLink>
-          <RouterLink to="/admin" class="nav-link d-inline-flex d-sm-none" aria-label="Library">
+          <RouterLink to="/admin/library" class="nav-link d-inline-flex d-sm-none" aria-label="Library">
             <v-icon icon="mdi-tune-variant" size="18" />
+          </RouterLink>
+          <RouterLink to="/admin/diagnostics" class="nav-link d-none d-sm-inline-flex align-center">
+            <v-icon icon="mdi-pulse" size="15" class="mr-1" />
+            Diagnostics
+          </RouterLink>
+          <RouterLink to="/admin/diagnostics" class="nav-link d-inline-flex d-sm-none" aria-label="Diagnostics">
+            <v-icon icon="mdi-pulse" size="18" />
           </RouterLink>
         </nav>
       </div>

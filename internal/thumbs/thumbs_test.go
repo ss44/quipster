@@ -285,7 +285,7 @@ func TestGetMissingOutput(t *testing.T) {
 func TestGetWithHardwareSuccess(t *testing.T) {
 	t.Setenv("FFMPEG_BIN", writeScript(t, successScript))
 	st := openTestStore(t)
-	s := &Service{St: st, CacheDir: t.TempDir(), Hw: hardware.Capabilities{Backend: hardware.BackendVaapi}}
+	s := &Service{St: st, CacheDir: t.TempDir(), Hw: hardware.MonitorFor(hardware.Capabilities{Backend: hardware.BackendVaapi})}
 	id := addMedia(t, st, 0)
 	if _, err := s.Get(context.Background(), id, 0, 320); err != nil {
 		t.Fatalf("hardware get: %v", err)
@@ -295,7 +295,7 @@ func TestGetWithHardwareSuccess(t *testing.T) {
 func TestGetFallsBackFromHardware(t *testing.T) {
 	t.Setenv("FFMPEG_BIN", writeScript(t, hwFailScript))
 	st := openTestStore(t)
-	s := &Service{St: st, CacheDir: t.TempDir(), Hw: hardware.Capabilities{Backend: hardware.BackendVaapi}}
+	s := &Service{St: st, CacheDir: t.TempDir(), Hw: hardware.MonitorFor(hardware.Capabilities{Backend: hardware.BackendVaapi})}
 	id := addMedia(t, st, 0)
 	e, err := s.Get(context.Background(), id, 0, 320)
 	if err != nil {
@@ -309,7 +309,7 @@ func TestGetFallsBackFromHardware(t *testing.T) {
 func TestGetHardwareFallbackFailure(t *testing.T) {
 	t.Setenv("FFMPEG_BIN", writeScript(t, failScript))
 	st := openTestStore(t)
-	s := &Service{St: st, CacheDir: t.TempDir(), Hw: hardware.Capabilities{Backend: hardware.BackendVaapi}}
+	s := &Service{St: st, CacheDir: t.TempDir(), Hw: hardware.MonitorFor(hardware.Capabilities{Backend: hardware.BackendVaapi})}
 	id := addMedia(t, st, 0)
 	_, err := s.Get(context.Background(), id, 0, 320)
 	if err == nil || !strings.Contains(err.Error(), "thumbnail failed") {

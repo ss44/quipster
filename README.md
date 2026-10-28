@@ -66,6 +66,28 @@ docker compose --profile cpu up -d app-cpu      # force software encoding
 Startup logs report what was detected, e.g. `hardware acceleration: vaapi (device=/dev/dri/renderD128)`
 or `hardware acceleration: none, using cpu`.
 
+### Diagnostics & hardware stats
+
+Open **Admin → Diagnostics** (`/admin/diagnostics`) for a live view of the active encode pipeline,
+CPU/RAM/VRAM/GPU usage, storage, 1h/6h/24h/7d job benchmarks, and the detected environment
+(FFmpeg version, codecs, drivers, effective settings). It is designed to replace `docker compose
+logs` for first-line support:
+
+- **Hardware/software badge** distinguishes `HARDWARE · NVENC/QUICKSYNC/VAAPI/VIDEOTOOLBOX` from a
+  `SOFTWARE · CPU` fallback and explains a failed forced `HWACCEL` probe.
+- **Runtime counters** show hardware renders vs. CPU fallbacks, so driver hiccups are visible.
+- **Export bundle** downloads a ZIP (`system.json`, `metrics.json`, `benchmarks.json`, recent jobs
+  and logs). Secrets are always redacted; media paths are excluded unless explicitly included.
+- **Copy report** produces Markdown formatted for a bug report, and **Open logs** shows the API
+  process's recent log lines in-app.
+
+Telemetry endpoints are admin/token-guarded: `GET /api/admin/diagnostics/system`,
+`/metrics`, `/benchmarks`, `/stream` (SSE), `/bundle`, `POST /probe` and `/report`, plus
+`GET /api/admin/logs`. System probes are cached (five minutes) and gauge samples are shared and
+cached briefly, so opening several tabs does not multiply vendor tool invocations. In a split
+`ROLE=api`/`ROLE=worker` deployment the diagnostics page describes the API process; check each
+worker's logs separately.
+
 ## Configuration
 
 | Env | Default | Meaning |

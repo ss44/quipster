@@ -133,3 +133,84 @@ func TestDetectMissingFfmpeg(t *testing.T) {
 		t.Errorf("missing ffmpeg: got %q, want cpu-only", c.Backend)
 	}
 }
+
+func TestNormalizedRequested(t *testing.T) {
+	cases := map[string]string{
+		"": "auto", "auto": "auto", "NONE": "none", "off": "none",
+		"cpu": "none", "false": "none", "0": "none", "nvenc": "nvenc",
+		"VAAPI": "vaapi", " qsv ": "qsv",
+	}
+	for in, want := range cases {
+		if got := normalizedRequested(in); got != want {
+			t.Errorf("normalizedRequested(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSelectionForReasons(t *testing.T) {
+	hw := selectionFor(Capabilities{Backend: BackendNvenc, Device: "/dev/nvidia0"}, "auto")
+	if !hw.Available || hw.Encoder != "h264_nvenc" || hw.Decoder != "cuda" || hw.Backend != "nvenc" {
+		t.Errorf("hardware selection = %+v", hw)
+	}
+	disabled := selectionFor(Capabilities{}, "none")
+	if disabled.Available || disabled.Encoder != "libx264" || disabled.Reason == "" {
+		t.Errorf("disabled selection = %+v", disabled)
+	}
+	forced := selectionFor(Capabilities{}, "qsv")
+	if forced.Available || forced.Encoder != "libx264" || forced.Reason == "" {
+		t.Errorf("forced fallback selection = %+v", forced)
+	}
+	auto := selectionFor(Capabilities{}, "auto")
+	if auto.Reason != "no usable hardware backend detected" {
+		t.Errorf("auto reason = %q", auto.Reason)
+	}
+}
+
+func TestStatsAndMonitor(t *testing.T) {
+	m := MonitorFor(Capabilities{Backend: BackendQsv})
+	if !m.Capabilities().Available() {
+		t.Fatal("monitor must expose wrapped capabilities")
+	}
+	m.RecordHW()
+	m.RecordHW()
+	m.RecordCPU()
+	m.RecordFallback("driver hiccup", 1234)
+	st := m.Status()
+	if st.Stats.HWEncodes != 2 || st.Stats.CPURenders != 1 || st.Stats.Fallbacks != 1 {
+		t.Fatalf("stats = %+v", st.Stats)
+	}
+	if st.Stats.LastFallbackNote != "driver hiccup" || st.Stats.LastFallbackAt != 1234 {
+		t.Errorf("fallback details = %+v", st.Stats)
+	}
+
+	var nilMonitor *Monitor
+	if nilMonitor.Capabilities().Available() {
+		t.Error("nil monitor must report cpu")
+	}
+	nilMonitor.RecordHW()
+	nilMonitor.RecordCPU()
+	nilMonitor.RecordFallback("x", 1)
+	if nilMonitor.Refresh().Available {
+		t.Error("nil monitor refresh must be empty")
+	}
+	if nilMonitor.Status().Reason == "" {
+		t.Error("nil monitor status must explain unavailability")
+	}
+}
+
+func TestRefreshWithMissingBinary(t *testing.T) {
+	t.Setenv("HWACCEL", "auto")
+	m := NewMonitor("/nonexistent/ffmpeg")
+	status := m.Refresh()
+	if status.Available || status.Encoder != "libx264" {
+		t.Errorf("refresh status = %+v", status)
+	}
+}
+
+func TestDetectWithSelectionDisabled(t *testing.T) {
+	t.Setenv("HWACCEL", "none")
+	caps, sel := DetectWithSelection("/nonexistent/ffmpeg")
+	if caps.Available() || sel.Available || sel.Requested != "none" {
+		t.Errorf("disabled detect = %+v %+v", caps, sel)
+	}
+}

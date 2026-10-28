@@ -137,3 +137,37 @@ func TestJobs(t *testing.T) {
 	assert.Equal(t, int64(0), lstats.Chunks)
 	assert.Equal(t, int64(0), lstats.ChunksIndexed)
 }
+
+// TestFinishedJobsSinceAndMediaSizes covers the bounded diagnostics queries.
+func TestFinishedJobsSinceAndMediaSizes(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	mediaID, _, err := db.UpsertMedia("/media/a.mkv", "matroska", 4096, 1, "A", 2020, 0, 0, "")
+	require.NoError(t, err)
+
+	_, err = db.EnqueueJob("probe", `{"mediaId":1}`, 0)
+	require.NoError(t, err)
+	job, err := db.ClaimJob(ctx, "worker", []string{"probe"})
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.NoError(t, db.FinishJob(job.ID, "done", ""))
+
+	// A queued job must not appear in finished results.
+	_, err = db.EnqueueJob("probe", `{"mediaId":1}`, 0)
+	require.NoError(t, err)
+
+	jobs, err := db.FinishedJobsSince(0, 10)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "done", jobs[0].Status)
+
+	sizes, err := db.MediaSizes([]int64{mediaID, 999})
+	require.NoError(t, err)
+	assert.Equal(t, int64(4096), sizes[mediaID])
+	_, missing := sizes[999]
+	assert.False(t, missing)
+
+	empty, err := db.MediaSizes(nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}

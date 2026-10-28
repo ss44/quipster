@@ -37,8 +37,8 @@ type Config struct {
 	CPUPreset    string // optional x264 override; preview defaults to ultrafast, accurate to veryfast
 	MaxClipSec   float64
 	DefaultPadMs int
-	LongCutSec   float64               // accurate cuts longer than this run as async jobs
-	Hw           hardware.Capabilities // detected hw backend; zero value = cpu only
+	LongCutSec   float64           // accurate cuts longer than this run as async jobs
+	Hw           *hardware.Monitor // detected hw backend; nil = cpu only
 }
 
 // Service renders clips into a cache directory and records them as cache
@@ -438,7 +438,8 @@ func transcodeArgs(plan hardware.Pipeline, prof encProfile, src string, audioOrd
 func (s *Service) runTranscode(ctx context.Context, src, out string, start, dur float64,
 	audioOrdinal int, prof encProfile, report func(float64)) error {
 
-	hwPlan := s.cfg.Hw.Pipeline(prof.res)
+	hwCaps := s.cfg.Hw.Capabilities()
+	hwPlan := hwCaps.Pipeline(prof.res)
 	cpuPlan := hardware.Capabilities{}.Pipeline(prof.res)
 	progress := report != nil
 	run := func(args []string) error { return runFFmpeg(ctx, args) }
@@ -447,12 +448,15 @@ func (s *Service) runTranscode(ctx context.Context, src, out string, start, dur 
 	}
 	if hwPlan.IsHW {
 		if err := run(transcodeArgs(hwPlan, prof, src, audioOrdinal, start, dur, out, progress)); err != nil {
-			log.Printf("[clips] %s encode failed (%v), falling back to cpu", s.cfg.Hw.Backend, err)
+			log.Printf("[clips] %s encode failed (%v), falling back to cpu", hwCaps.Backend, err)
+			s.cfg.Hw.RecordFallback(err.Error(), time.Now().UnixMilli())
 			removePartial(out)
 		} else {
+			s.cfg.Hw.RecordHW()
 			return nil
 		}
 	}
+	s.cfg.Hw.RecordCPU()
 	return run(transcodeArgs(cpuPlan, prof, src, audioOrdinal, start, dur, out, progress))
 }
 

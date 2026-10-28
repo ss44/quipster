@@ -134,6 +134,139 @@ export interface AdminConfig {
   available: string[]
 }
 
+export interface Metric {
+  updatedAt: number
+  value: number
+  total?: number
+  unit?: string
+  reason?: string
+  available: boolean
+  stale?: boolean
+}
+
+export interface LoadMetric {
+  reason?: string
+  one: number
+  five: number
+  fifteen: number
+  available: boolean
+}
+
+export interface DiskMetric {
+  path: string
+  name: string
+  reason?: string
+  freeBytes: number
+  totalBytes: number
+  available: boolean
+}
+
+export interface HardwareStats {
+  lastFallbackNote: string
+  hwEncodes: number
+  cpuRenders: number
+  fallbacks: number
+  lastFallbackAt: number
+}
+
+export interface HardwareStatus {
+  requested: string
+  backend: string
+  device: string
+  encoder: string
+  decoder: string
+  available: boolean
+  reason: string
+  stats: HardwareStats
+}
+
+export interface GaugeSnapshot {
+  at: number
+  cacheParts: Record<string, number>
+  disks: Record<string, DiskMetric>
+  cpu: Metric
+  processCpu: Metric
+  ram: Metric
+  swap: Metric
+  load: LoadMetric
+  gpu: Metric
+  vram: Metric
+  hardware: HardwareStatus
+  cacheBytes: number
+  queue?: { queued: number; running: number; done: number; error: number; paused: boolean }
+}
+
+export interface VersionInfo {
+  version: string
+  reason?: string
+  available: boolean
+}
+
+export interface GPUSummary {
+  name: string
+  driverVersion: string
+  reason?: string
+  memoryTotalBytes: number
+  memoryUsedBytes: number
+  utilizationPct: number
+  available: boolean
+}
+
+export interface PathInfo {
+  name: string
+  path: string
+  reason?: string
+  freeBytes: number
+  totalBytes: number
+  available: boolean
+}
+
+export interface SystemInfo {
+  generatedAt: number
+  config: Record<string, string>
+  hardware: HardwareStatus
+  gpu: GPUSummary
+  osName: string
+  kernel: string
+  appVersion: string
+  goVersion: string
+  goarch: string
+  goos: string
+  cpuModel: string
+  ffmpeg: VersionInfo
+  ffprobe: VersionInfo
+  paths: PathInfo[]
+  hwaccels: string[]
+  encoders: string[]
+  decoders: string[]
+  cpuCores: number
+  appUptimeSec: number
+  dbBytes: number
+  meiliUp: boolean
+  container: boolean
+}
+
+export interface JobBench {
+  type: string
+  count: number
+  p50Ms: number
+  p95Ms: number
+  maxMs: number
+  avgWaitMs: number
+}
+
+export interface Benchmarks {
+  at: number
+  window: string
+  since: number
+  readReason?: string
+  jobs: JobBench[]
+  throughputPerMin: number
+  readMBps: number
+  readAvailable: boolean
+}
+
+
 async function getJSON<T>(url: string): Promise<T> {
   const res = await fetch(url)
   if (!res.ok) {
@@ -185,7 +318,27 @@ export const api = {
       cancelled: number
       cleared: number
     }>,
+  diagnosticsSystem: () => getJSON<SystemInfo>('/api/admin/diagnostics/system'),
+  diagnosticsMetrics: () => getJSON<GaugeSnapshot>('/api/admin/diagnostics/metrics'),
+  diagnosticsBenchmarks: (window = '1h') =>
+    getJSON<Benchmarks>(`/api/admin/diagnostics/benchmarks?window=${encodeURIComponent(window)}`),
+  diagnosticsProbe: () =>
+    fetch('/api/admin/diagnostics/probe', { method: 'POST' }).then(async (r) => {
+      if (!r.ok) throw new Error('hardware probe failed')
+      return r.json() as Promise<{ hardware: HardwareStatus }>
+    }),
+  diagnosticsReport: async (): Promise<string> => {
+    const res = await fetch('/api/admin/diagnostics/report', { method: 'POST' })
+    if (!res.ok) throw new Error('failed to build diagnostics report')
+    return res.text()
+  },
+  diagnosticsBundleURL: (includePaths = false) =>
+    `/api/admin/diagnostics/bundle${includePaths ? '?paths=1' : ''}`,
+  logs: (limit = 500) =>
+    getJSON<{ lines: string[]; count: number }>(`/api/admin/logs?limit=${limit}`),
 }
+
+export const diagnosticsStreamURL = '/api/admin/diagnostics/stream'
 
 export function clipStreamURL(hit: Hit, start: number, end: number, mode: string, download: boolean): string {
   const p = new URLSearchParams({

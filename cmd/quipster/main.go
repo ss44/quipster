@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -16,10 +17,12 @@ import (
 	"quipster/internal/api"
 	"quipster/internal/cache"
 	"quipster/internal/clips"
+	"quipster/internal/diagnostics"
 	"quipster/internal/events"
 	"quipster/internal/hardware"
 	"quipster/internal/indexer"
 	"quipster/internal/jobs"
+	"quipster/internal/logbuf"
 	"quipster/internal/probe"
 	"quipster/internal/scan"
 	"quipster/internal/search"
@@ -28,6 +31,7 @@ import (
 	"quipster/web"
 )
 
+//nolint:govet // field grouping favors readability over optimal alignment.
 type config struct {
 	addr         string
 	role         string
@@ -49,6 +53,7 @@ type config struct {
 	cacheMaxGB   float64
 	longCutSec   float64
 	probeTimeout time.Duration
+	logs         *logbuf.Buffer
 }
 
 func envStr(key, def string) string {
@@ -155,11 +160,12 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	lru := &cache.LRU{St: st, MaxBytes: int64(cfg.cacheMaxGB * 1024 * 1024 * 1024), Kinds: []string{"clip", "thumb", "sub"}}
 	cache.RunDaemon(ctx, lru, 5*time.Minute)
 
-	// Detect hardware acceleration capabilities once at startup so clip and
-	// thumbnail pipelines can use NVENC/QSV/VAAPI/VideoToolbox when available.
-	hw := hardware.Detect(probe.FfmpegBin())
-	if hw.Available() {
-		log.Printf("hardware acceleration: %s (device=%s)", hw.Backend, hw.Device)
+	// Probe hardware acceleration once at startup so clip and thumbnail
+	// pipelines can use NVENC/QSV/VAAPI/VideoToolbox when available. The
+	// monitor also records runtime fallbacks for the diagnostics view.
+	hw := hardware.NewMonitor(probe.FfmpegBin())
+	if caps := hw.Capabilities(); caps.Available() {
+		log.Printf("hardware acceleration: %s (device=%s)", caps.Backend, caps.Device)
 	} else {
 		log.Printf("hardware acceleration: none, using cpu")
 	}
@@ -177,6 +183,7 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	thumbSvc := &thumbs.Service{St: st, CacheDir: cfg.cacheDir, Hw: hw}
 	searchSvc := search.New(st, ix)
 	collector := &events.Collector{St: st, MeiliUp: ix.Healthy}
+	diag := diagnostics.New(st, hw, cfg.logs, ix.Healthy, version, cfg.dataDir, cfg.cacheDir, cfg.mediaDir)
 
 	runner := jobs.NewRunner(st, "worker")
 	runner.SetJobTimeout(parseDuration(envStr("JOB_TIMEOUT", "3h")))
@@ -189,16 +196,17 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	}
 
 	deps := api.Deps{
-		St:       st,
-		Search:   searchSvc,
-		Indexer:  ix,
-		Clips:    clipSvc,
-		Thumbs:   thumbSvc,
-		Events:   collector,
-		Runner:   runner,
-		MediaDir: cfg.mediaDir,
-		WebFS:    web.Dist,
-		APIToken: cfg.apiToken,
+		St:          st,
+		Search:      searchSvc,
+		Indexer:     ix,
+		Clips:       clipSvc,
+		Thumbs:      thumbSvc,
+		Events:      collector,
+		Runner:      runner,
+		MediaDir:    cfg.mediaDir,
+		WebFS:       web.Dist,
+		APIToken:    cfg.apiToken,
+		Diagnostics: diag,
 	}
 	return &app{Deps: deps, Runner: runner, Stop: func() {
 		cancel()
@@ -206,8 +214,13 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	}}
 }
 
+// version is overridable at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	cfg := loadConfig()
+	cfg.logs = logbuf.New(0)
+	log.SetOutput(io.MultiWriter(os.Stderr, cfg.logs))
 	log.Printf("quipster starting: role=%s addr=%s media=%s data=%s cache=%s meili=%s",
 		cfg.role, cfg.addr, cfg.mediaDir, cfg.dataDir, cfg.cacheDir, cfg.meiliURL)
 

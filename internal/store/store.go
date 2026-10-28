@@ -144,6 +144,7 @@ func (s *Store) migrate() error {
 			finished_at INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(status, priority DESC, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_jobs_type_status_finished ON jobs(type, status, finished_at)`,
 		`CREATE TABLE IF NOT EXISTS scans (
 			id INTEGER PRIMARY KEY,
 			root_path TEXT NOT NULL,

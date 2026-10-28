@@ -193,6 +193,49 @@ func (s *Store) RunningJobs(limit int) ([]Job, error) {
 	return s.enrichJobs(out), nil
 }
 
+// FinishedJobsSince lists completed jobs finished at or after since (unix
+// milliseconds), newest first. It is the bounded input for diagnostics
+// benchmark aggregation.
+func (s *Store) FinishedJobsSince(since int64, limit int) ([]Job, error) {
+	if limit <= 0 || limit > 20000 {
+		limit = 20000
+	}
+	rows, err := s.db.Query(`SELECT id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at
+		FROM jobs WHERE status='done' AND finished_at>=? ORDER BY finished_at DESC LIMIT ?`, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanJobs(rows)
+}
+
+// MediaSizes returns the size in bytes for each requested media id. Missing ids
+// are omitted from the result.
+func (s *Store) MediaSizes(ids []int64) (map[int64]int64, error) {
+	out := make(map[int64]int64, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length ids slice; values are parameterized.
+	rows, err := s.db.Query(`SELECT id, size_bytes FROM media_files WHERE id IN (`+ph+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer closeRows(rows)
+	for rows.Next() {
+		var id, size int64
+		if err := rows.Scan(&id, &size); err != nil {
+			return nil, err
+		}
+		out[id] = size
+	}
+	return out, rows.Err()
+}
+
 func scanJobs(rows *sql.Rows) ([]Job, error) {
 	defer closeRows(rows)
 	var out []Job
