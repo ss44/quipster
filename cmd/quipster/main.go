@@ -126,41 +126,23 @@ func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *i
 	runner.Register("clip", cfg.clipWorkers, clipSvc.JobHandler())
 }
 
-func main() {
-	cfg := loadConfig()
-	log.Printf("quipster starting: role=%s addr=%s media=%s data=%s cache=%s meili=%s",
-		cfg.role, cfg.addr, cfg.mediaDir, cfg.dataDir, cfg.cacheDir, cfg.meiliURL)
+// app bundles the wired services a running quipster process needs. Keeping
+// assembly separate from main() makes the whole wiring testable without
+// starting an HTTP server or waiting for a signal.
+type app struct {
+	Deps   api.Deps
+	Runner *jobs.Runner
+	Stop   func()
+}
 
-	if err := scan.EnsureDirs(
-		cfg.dataDir,
-		cfg.cacheDir,
-		filepath.Join(cfg.cacheDir, "clips"),
-		filepath.Join(cfg.cacheDir, "thumbs"),
-		filepath.Join(cfg.cacheDir, "subs"),
-	); err != nil {
-		log.Fatalf("dirs: %v", err)
-	}
-
-	st, err := store.Open(filepath.Join(cfg.dataDir, "quipster.db"))
-	if err != nil {
-		log.Fatalf("store: %v", err)
-	}
-	defer func() {
-		if cerr := st.Close(); cerr != nil {
-			log.Printf("close store: %v", cerr)
-		}
-	}()
-	if err := st.Recover(); err != nil {
-		log.Printf("recover jobs: %v", err)
-	}
-	seedLibraryPaths(st)
-
-	ix := indexer.New(st, cfg.meiliURL, cfg.meiliKey)
-	go ensureSettingsLoop(ix, 15*time.Second)
-
+// assembleApp wires every service around the shared store: clip/thumbnail
+// caches, the search stack, the job runner with role-based handlers, the LRU
+// eviction daemon, and the periodic scan ticker. It owns a cancellable child
+// of parent for background work; the returned Stop func cancels it and stops
+// the runner, and must be called on shutdown.
+func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexer.Indexer) *app {
+	ctx, cancel := context.WithCancel(parent)
 	lru := &cache.LRU{St: st, MaxBytes: int64(cfg.cacheMaxGB * 1024 * 1024 * 1024), Kinds: []string{"clip", "thumb", "sub"}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	cache.RunDaemon(ctx, lru, 5*time.Minute)
 
 	clipSvc := clips.New(st, clips.Config{
@@ -195,10 +177,49 @@ func main() {
 		WebFS:    web.Dist,
 		APIToken: cfg.apiToken,
 	}
+	return &app{Deps: deps, Runner: runner, Stop: func() {
+		cancel()
+		runner.Stop()
+	}}
+}
+
+func main() {
+	cfg := loadConfig()
+	log.Printf("quipster starting: role=%s addr=%s media=%s data=%s cache=%s meili=%s",
+		cfg.role, cfg.addr, cfg.mediaDir, cfg.dataDir, cfg.cacheDir, cfg.meiliURL)
+
+	if err := scan.EnsureDirs(
+		cfg.dataDir,
+		cfg.cacheDir,
+		filepath.Join(cfg.cacheDir, "clips"),
+		filepath.Join(cfg.cacheDir, "thumbs"),
+		filepath.Join(cfg.cacheDir, "subs"),
+	); err != nil {
+		log.Fatalf("dirs: %v", err)
+	}
+
+	st, err := store.Open(filepath.Join(cfg.dataDir, "quipster.db"))
+	if err != nil {
+		log.Fatalf("store: %v", err)
+	}
+	defer func() {
+		if cerr := st.Close(); cerr != nil {
+			log.Printf("close store: %v", cerr)
+		}
+	}()
+	if err := st.Recover(); err != nil {
+		log.Printf("recover jobs: %v", err)
+	}
+	seedLibraryPaths(st)
+
+	ix := indexer.New(st, cfg.meiliURL, cfg.meiliKey)
+	go ensureSettingsLoop(ix, 15*time.Second)
+
+	application := assembleApp(context.Background(), cfg, st, ix)
 
 	srv := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           api.Router(deps),
+		Handler:           api.Router(application.Deps),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -222,8 +243,7 @@ func main() {
 	if err := srv.Shutdown(shCtx); err != nil {
 		log.Printf("http shutdown: %v", err)
 	}
-	cancel()
-	runner.Stop()
+	application.Stop()
 }
 
 // seedLibraryPaths seeds the persisted library-folders setting from the
