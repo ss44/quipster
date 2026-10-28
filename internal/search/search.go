@@ -40,6 +40,7 @@ type Hit struct {
 	Year         int      `json:"year"`
 	StartSec     float64  `json:"startSec"`
 	EndSec       float64  `json:"endSec"`
+	Score        float64  `json:"score,omitempty"`
 }
 
 // TitleMatch is a filename/title-level match used when no subtitle chunk hits
@@ -57,14 +58,19 @@ type TitleMatch struct {
 }
 
 // Response is the full search API payload: chunk hits plus title fallbacks.
+// Mode is the mode actually executed (auto requests resolve here) and
+// SemanticAvailable tells clients whether the hybrid/semantic options exist
+// so the UI can show or hide the mode toggle.
 type Response struct {
-	Query        string       `json:"query"`
-	Hits         []Hit        `json:"hits"`
-	TitleMatches []TitleMatch `json:"titleMatches"`
-	Page         int          `json:"page"`
-	PerPage      int          `json:"perPage"`
-	TotalHits    int64        `json:"totalHits"`
-	TotalPages   int64        `json:"totalPages"`
+	Query             string       `json:"query"`
+	Mode              string       `json:"mode"`
+	Hits              []Hit        `json:"hits"`
+	TitleMatches      []TitleMatch `json:"titleMatches"`
+	Page              int          `json:"page"`
+	PerPage           int          `json:"perPage"`
+	TotalHits         int64        `json:"totalHits"`
+	TotalPages        int64        `json:"totalPages"`
+	SemanticAvailable bool         `json:"semanticAvailable"`
 }
 
 // Suggestion is one autocomplete candidate with optional highlight markup.
@@ -72,6 +78,15 @@ type Suggestion struct {
 	Text       string `json:"text"`
 	TextMarked string `json:"textMarked"`
 }
+
+// Search modes accepted by Service.Search. An empty (or unknown) mode means
+// "auto": hybrid search when the Meilisearch embedder is configured, plain
+// keyword search otherwise.
+const (
+	ModeKeyword  = "keyword"
+	ModeHybrid   = "hybrid"
+	ModeSemantic = "semantic"
+)
 
 // Service executes search and suggestion queries on behalf of the API layer.
 type Service struct {
@@ -105,14 +120,24 @@ func mediaTitleFor(m *store.MediaFile) string {
 
 // Search runs a Meili query, joins chunk docs back to SQLite cues, and adds a
 // title-match fallback so files without subtitles remain findable.
-func (s *Service) Search(q, show string, page, perPage int) (*Response, error) {
+//
+// The mode selects the retrieval strategy: keyword issues a plain full-text
+// query, hybrid blends keyword and vector results at the configured semantic
+// ratio, and semantic issues a pure vector query. Hybrid and semantic require
+// a configured embedder; when none exists the request degrades to keyword
+// search instead of failing, and the response reports what actually ran.
+func (s *Service) Search(q, show string, page, perPage int, mode string) (*Response, error) {
 	if perPage <= 0 || perPage > 50 {
 		perPage = 20
 	}
 	if page <= 0 {
 		page = 1
 	}
-	resp := &Response{Query: q, Page: page, PerPage: perPage, Hits: []Hit{}, TitleMatches: []TitleMatch{}}
+	resp := &Response{
+		Query: q, Page: page, PerPage: perPage,
+		Hits: []Hit{}, TitleMatches: []TitleMatch{},
+		SemanticAvailable: s.ix.EmbedderEnabled(),
+	}
 
 	req := meili.SearchRequest{
 		Query:                 q,
@@ -121,7 +146,15 @@ func (s *Service) Search(q, show string, page, perPage int) (*Response, error) {
 		HighlightPostTag:      "</mark>",
 		HitsPerPage:           i64(perPage),
 		Page:                  int64(page),
-		MatchingStrategy:      meili.All,
+	}
+	if ratio := s.resolveMode(resp, q, mode); ratio > 0 {
+		req.Hybrid = &meili.SearchRequestHybrid{Embedder: s.ix.EmbedderName(), SemanticRatio: ratio}
+		// With vectors in the mix, forcing every query word to match would
+		// starve the keyword side of conceptual matches; fall back to the
+		// Meili default (drop trailing words) instead of "all".
+		req.MatchingStrategy = meili.Last
+	} else {
+		req.MatchingStrategy = meili.All
 	}
 	if strings.TrimSpace(show) != "" {
 		req.Filter = fmt.Sprintf(`showTitle = "%s"`, escape(show))
@@ -143,6 +176,36 @@ func (s *Service) Search(q, show string, page, perPage int) (*Response, error) {
 		}
 	}
 	return resp, nil
+}
+
+// resolveMode determines the effective retrieval mode from the client's
+// requested mode and the configured embedder, records it on the response, and
+// returns the semantic ratio to apply (0 for pure keyword search).
+//
+// Auto mode resolves to hybrid only when the embedder exists and the query is
+// non-blank, since blank queries cannot drive vector search. Explicit
+// hybrid/semantic requests degrade to keyword when no embedder is configured,
+// so the endpoint never fails merely because semantic search is absent.
+func (s *Service) resolveMode(resp *Response, q, mode string) float64 {
+	name := normalizeMode(mode)
+	if name == "" {
+		if resp.SemanticAvailable && strings.TrimSpace(q) != "" {
+			name = ModeHybrid
+		} else {
+			name = ModeKeyword
+		}
+	} else if !resp.SemanticAvailable {
+		name = ModeKeyword
+	}
+	resp.Mode = name
+	switch name {
+	case ModeSemantic:
+		return 1
+	case ModeHybrid:
+		return s.ix.SemanticRatio()
+	default:
+		return 0
+	}
 }
 
 // appendHits materializes Meili hits into API hits by joining each document id
@@ -188,6 +251,7 @@ func (s *Service) appendHits(resp *Response, res *meili.SearchResponse) (map[int
 			Year:         m.Year,
 			StartSec:     ch.StartSec,
 			EndSec:       ch.EndSec,
+			Score:        rankingScore(h),
 			Cues:         CueDTOs(span),
 			Before:       CueDTOs(before),
 			After:        CueDTOs(after),
@@ -223,6 +287,35 @@ func (s *Service) appendTitleMatches(resp *Response, q string, seenMedia map[int
 		})
 	}
 	return nil
+}
+
+// normalizeMode maps a client-supplied mode to a known mode constant,
+// returning "" (auto) for blank or unrecognized values.
+func normalizeMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case ModeKeyword:
+		return ModeKeyword
+	case ModeHybrid:
+		return ModeHybrid
+	case ModeSemantic:
+		return ModeSemantic
+	default:
+		return ""
+	}
+}
+
+// rankingScore extracts Meili's _rankingScore (0..1) so clients can render a
+// match confidence, which matters for semantic hits that carry no highlights.
+func rankingScore(h meili.Hit) float64 {
+	raw, ok := h["_rankingScore"]
+	if !ok || len(raw) == 0 {
+		return 0
+	}
+	var score float64
+	if err := json.Unmarshal(raw, &score); err != nil {
+		return 0
+	}
+	return score
 }
 
 // formattedText extracts the highlighted text of a hit, falling back to the

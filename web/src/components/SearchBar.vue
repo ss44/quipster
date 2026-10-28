@@ -134,7 +134,10 @@ function submit() {
 }
 
 async function go(value: string) {
-  await router.push({ name: 'search', query: { q: value } })
+  // Carry the current search mode along so switching queries does not reset it.
+  const query: Record<string, string> = { q: value }
+  if (typeof route.query.mode === 'string' && route.query.mode) query.mode = route.query.mode
+  await router.push({ name: 'search', query })
   query.value = value
   menuOpen.value = false
   blur()
