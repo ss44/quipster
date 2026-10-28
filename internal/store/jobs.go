@@ -5,32 +5,35 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 )
 
+// Job is one row of the processing queue, optionally enriched with media
+// metadata for display.
 type Job struct {
-	ID         int64   `json:"id"`
-	Type       string  `json:"type"`
-	Payload    string  `json:"payload"`
-	Status     string  `json:"status"`
-	Priority   int     `json:"priority"`
-	Attempts   int     `json:"attempts"`
-	WorkerID   string  `json:"workerId"`
-	Error      string  `json:"error"`
-	Progress   float64 `json:"progress"`
-	CreatedAt  int64   `json:"createdAt"`
-	StartedAt  int64   `json:"startedAt"`
-	FinishedAt int64   `json:"finishedAt"`
-
-	MediaID     int64  `json:"mediaId"`
-	MediaTitle  string `json:"mediaTitle"`
-	MediaPath   string `json:"mediaPath"`
-	MediaStatus string `json:"mediaStatus"`
-	MediaCues   int64  `json:"mediaCues"`
-	MediaChunks int64  `json:"mediaChunks"`
+	MediaTitle  string  `json:"mediaTitle"`
+	Type        string  `json:"type"`
+	Payload     string  `json:"payload"`
+	Status      string  `json:"status"`
+	MediaStatus string  `json:"mediaStatus"`
+	MediaPath   string  `json:"mediaPath"`
+	WorkerID    string  `json:"workerId"`
+	Error       string  `json:"error"`
+	Progress    float64 `json:"progress"`
+	CreatedAt   int64   `json:"createdAt"`
+	StartedAt   int64   `json:"startedAt"`
+	FinishedAt  int64   `json:"finishedAt"`
+	MediaID     int64   `json:"mediaId"`
+	ID          int64   `json:"id"`
+	Attempts    int     `json:"attempts"`
+	Priority    int     `json:"priority"`
+	MediaCues   int64   `json:"mediaCues"`
+	MediaChunks int64   `json:"mediaChunks"`
 }
 
+// EnqueueJob inserts a new queued job and returns its id.
 func (s *Store) EnqueueJob(jobType, payload string, priority int) (int64, error) {
 	res, err := s.db.Exec(`INSERT INTO jobs (type, payload, priority, status, created_at) VALUES (?,?,?,'queued',?)`,
 		jobType, payload, priority, nowMillis())
@@ -47,16 +50,25 @@ func (s *Store) ClaimJob(ctx context.Context, workerID string, types []string) (
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() {
+		if cerr := conn.Close(); cerr != nil {
+			log.Printf("store: close job conn: %v", cerr)
+		}
+	}()
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return nil, err
 	}
-	rollback := func() { conn.ExecContext(ctx, "ROLLBACK") }
+	rollback := func() {
+		if _, rbErr := conn.ExecContext(ctx, "ROLLBACK"); rbErr != nil {
+			log.Printf("store: job rollback: %v", rbErr)
+		}
+	}
 	ph := strings.TrimSuffix(strings.Repeat("?,", len(types)), ",")
 	args := []any{workerID, nowMillis()}
 	for _, t := range types {
 		args = append(args, t)
 	}
+	//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length types slice; values are parameterized.
 	row := conn.QueryRowContext(ctx,
 		`UPDATE jobs SET status='running', worker_id=?, started_at=?, attempts=attempts+1
 		 WHERE id = (SELECT id FROM jobs WHERE status='queued' AND type IN (`+ph+`) ORDER BY priority DESC, id LIMIT 1)
@@ -76,23 +88,26 @@ func (s *Store) ClaimJob(ctx context.Context, workerID string, types []string) (
 	return &j, nil
 }
 
+// FinishJob marks a job done or errored, latching full progress on success.
 func (s *Store) FinishJob(id int64, status, errMsg string) error {
 	_, err := s.db.Exec(`UPDATE jobs SET status=?, error=?, progress=CASE WHEN ?='done' THEN 1 ELSE progress END, finished_at=? WHERE id=?`,
 		status, errMsg, status, nowMillis(), id)
 	return err
 }
 
+// SetJobProgress updates the progress fraction for a running job.
 func (s *Store) SetJobProgress(id int64, progress float64) error {
 	_, err := s.db.Exec(`UPDATE jobs SET progress=? WHERE id=?`, progress, id)
 	return err
 }
 
+// RequeueJob returns a failed job to the queue for another attempt.
 func (s *Store) RequeueJob(id int64, errMsg string) error {
 	_, err := s.db.Exec(`UPDATE jobs SET status='queued', worker_id='', error=? WHERE id=?`, errMsg, id)
 	return err
 }
 
-// RequeueJobSoft returns a paused/cancelled job to the queue without counting
+// RequeueJobSoft returns a paused/canceled job to the queue without counting
 // the interrupted attempt against its retry budget.
 func (s *Store) RequeueJobSoft(id int64, note string) error {
 	_, err := s.db.Exec(`UPDATE jobs SET status='queued', worker_id='', error=?,
@@ -109,6 +124,8 @@ func (s *Store) ClearQueuedJobs() (int64, error) {
 	return res.RowsAffected()
 }
 
+// JobStats summarizes the queue state: per-status counts plus whether the
+// queue is paused.
 type JobStats struct {
 	Queued  int64 `json:"queued"`
 	Running int64 `json:"running"`
@@ -117,6 +134,7 @@ type JobStats struct {
 	Paused  bool  `json:"paused"`
 }
 
+// JobStats returns per-status job counts and whether the queue is paused.
 func (s *Store) JobStats() (*JobStats, error) {
 	st := &JobStats{}
 	if paused, err := s.GetQueuePaused(); err == nil {
@@ -126,7 +144,7 @@ func (s *Store) JobStats() (*JobStats, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	for rows.Next() {
 		var status string
 		var n int64
@@ -147,6 +165,7 @@ func (s *Store) JobStats() (*JobStats, error) {
 	return st, rows.Err()
 }
 
+// ListJobs lists the most recent jobs with media metadata attached.
 func (s *Store) ListJobs(limit int) ([]Job, error) {
 	rows, err := s.db.Query(`SELECT id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at
 		FROM jobs ORDER BY id DESC LIMIT ?`, limit)
@@ -175,7 +194,7 @@ func (s *Store) RunningJobs(limit int) ([]Job, error) {
 }
 
 func scanJobs(rows *sql.Rows) ([]Job, error) {
-	defer rows.Close()
+	defer closeRows(rows)
 	var out []Job
 	for rows.Next() {
 		var j Job
@@ -187,11 +206,15 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 	return out, rows.Err()
 }
 
+// mediaIDFromPayload extracts the media id from a job payload; invalid or
+// missing payloads yield 0 (best-effort enrichment only).
 func mediaIDFromPayload(payload string) int64 {
 	var p struct {
 		MediaID int64 `json:"mediaId"`
 	}
-	_ = json.Unmarshal([]byte(payload), &p)
+	if err := json.Unmarshal([]byte(payload), &p); err != nil {
+		return 0
+	}
 	return p.MediaID
 }
 
@@ -214,43 +237,15 @@ func (s *Store) enrichJobs(jobs []Job) []Job {
 	for id := range idSet {
 		ids = append(ids, id)
 	}
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	ph := strings.Join(placeholders, ",")
-
-	media := map[int64]MediaFile{}
-	rows, err := s.db.Query(`SELECT `+mediaCols+` FROM media_files WHERE id IN (`+ph+`)`, args...)
-	if err == nil {
-		for rows.Next() {
-			if m, err := scanMedia(rows); err == nil && m != nil {
-				media[m.ID] = *m
-			}
-		}
-		rows.Close()
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
 	}
 
-	type count struct{ mediaID, n int64 }
-	loadCounts := func(table string) map[int64]int64 {
-		out := map[int64]int64{}
-		rows, err := s.db.Query(`SELECT media_file_id, COUNT(*) FROM `+table+` WHERE media_file_id IN (`+ph+`) GROUP BY media_file_id`, args...)
-		if err != nil {
-			return out
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var c count
-			if err := rows.Scan(&c.mediaID, &c.n); err == nil {
-				out[c.mediaID] = c.n
-			}
-		}
-		return out
-	}
-	cues := loadCounts("cues")
-	chunks := loadCounts("chunks")
+	media := s.loadMediaMeta(ph, args)
+	cues := s.loadCountsByMedia("cues", ph, args)
+	chunks := s.loadCountsByMedia("chunks", ph, args)
 
 	for i := range jobs {
 		if m, ok := media[jobs[i].MediaID]; ok {
@@ -262,6 +257,46 @@ func (s *Store) enrichJobs(jobs []Job) []Job {
 		jobs[i].MediaChunks = chunks[jobs[i].MediaID]
 	}
 	return jobs
+}
+
+// loadMediaMeta loads media rows for the given ids, keyed by id. Failures are
+// swallowed: enrichment is best-effort and must never fail listing.
+func (s *Store) loadMediaMeta(ph string, args []any) map[int64]MediaFile {
+	media := map[int64]MediaFile{}
+	//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length ids slice; values are parameterized.
+	rows, err := s.db.Query(`SELECT `+mediaCols+` FROM media_files WHERE id IN (`+ph+`)`, args...)
+	if err != nil {
+		return media
+	}
+	defer closeRows(rows)
+	for rows.Next() {
+		m, err := scanMedia(rows)
+		if err != nil || m == nil {
+			continue
+		}
+		media[m.ID] = *m
+	}
+	return media
+}
+
+// loadCountsByMedia counts rows per media_file_id in the given table for the
+// given ids. Failures are swallowed: enrichment is best-effort.
+func (s *Store) loadCountsByMedia(table, ph string, args []any) map[int64]int64 {
+	out := map[int64]int64{}
+	//nolint:gosec // the concatenated table name comes from the fixed internal allowlist ("cues"/"chunks") and the rest is a "?" placeholder list; values are parameterized.
+	rows, err := s.db.Query(`SELECT media_file_id, COUNT(*) FROM `+table+` WHERE media_file_id IN (`+ph+`) GROUP BY media_file_id`, args...)
+	if err != nil {
+		return out
+	}
+	defer closeRows(rows)
+	for rows.Next() {
+		var mediaID, n int64
+		if err := rows.Scan(&mediaID, &n); err != nil {
+			continue
+		}
+		out[mediaID] = n
+	}
+	return out
 }
 
 func displayName(m *MediaFile) string {
@@ -280,13 +315,14 @@ func displayName(m *MediaFile) string {
 	return filepath.Base(m.Path)
 }
 
-// LineStats summarises how much dialogue has been digested and indexed.
+// LineStats summarizes how much dialog has been digested and indexed.
 type LineStats struct {
 	Cues          int64 `json:"cues"`
 	Chunks        int64 `json:"chunks"`
 	ChunksIndexed int64 `json:"chunksIndexed"`
 }
 
+// LineStats returns total cue/chunk counts plus how many chunks are indexed.
 func (s *Store) LineStats() (*LineStats, error) {
 	st := &LineStats{}
 	err := s.db.QueryRow(`SELECT

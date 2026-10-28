@@ -35,7 +35,7 @@ func TestCache(t *testing.T) {
 	// Touch cache
 	err = db.TouchCache("key1")
 	require.NoError(t, err)
-	
+
 	entry, err = db.GetCacheEntry("key1")
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), entry.Hits)
@@ -57,11 +57,11 @@ func TestCache(t *testing.T) {
 	// Actually, last_access might be identical if they ran fast enough.
 	// Wait, UpsertCacheEntry uses nowMillis(). So they might have the same time.
 	// order is `last_access ASC, rowid ASC`.
-	
+
 	// Delete
 	err = db.DeleteCacheEntry("key1")
 	require.NoError(t, err)
-	
+
 	entry, err = db.GetCacheEntry("key1")
 	require.NoError(t, err)
 	assert.Nil(t, entry)

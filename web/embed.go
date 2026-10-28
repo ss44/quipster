@@ -1,3 +1,5 @@
+// Package web embeds the built SPA distribution so the binary can serve it
+// without external assets.
 package web
 
 import (

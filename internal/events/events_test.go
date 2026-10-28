@@ -21,8 +21,15 @@ func (m *mockFlusher) Flush() {
 }
 
 func TestCollector(t *testing.T) {
-	st, _ := store.Open(":memory:")
-	defer st.Close()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("st.Close: %v", err)
+		}
+	})
 
 	c := &events.Collector{
 		St:      st,
@@ -39,8 +46,15 @@ func TestCollector(t *testing.T) {
 }
 
 func TestHandler(t *testing.T) {
-	st, _ := store.Open(":memory:")
-	defer st.Close()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("st.Close: %v", err)
+		}
+	})
 
 	c := &events.Collector{
 		St:      st,

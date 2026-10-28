@@ -4,15 +4,19 @@ import (
 	"database/sql"
 )
 
+// SubtitleTrack describes one subtitle track (sidecar or embedded) attached
+// to a media file.
 type SubtitleTrack struct {
+	Source        string `json:"source"`
+	Lang          string `json:"lang"`
+	ExtractedPath string `json:"extractedPath"`
 	ID            int64  `json:"id"`
 	MediaFileID   int64  `json:"mediaFileId"`
-	Source        string `json:"source"` // sidecar | embedded
-	Lang          string `json:"lang"`
 	StreamIndex   int    `json:"streamIndex"`
-	ExtractedPath string `json:"extractedPath"`
 }
 
+// ReplaceTrack swaps the subtitle track row for a media file and returns the
+// new track id.
 func (s *Store) ReplaceTrack(mediaFileID int64, t *SubtitleTrack) (int64, error) {
 	if _, err := s.db.Exec(`DELETE FROM subtitle_tracks WHERE media_file_id=?`, mediaFileID); err != nil {
 		return 0, err
@@ -25,12 +29,13 @@ func (s *Store) ReplaceTrack(mediaFileID int64, t *SubtitleTrack) (int64, error)
 	return res.LastInsertId()
 }
 
+// TracksForMedia lists subtitle tracks attached to a media file.
 func (s *Store) TracksForMedia(mediaFileID int64) ([]SubtitleTrack, error) {
 	rows, err := s.db.Query(`SELECT id, media_file_id, source, lang, stream_index, extracted_path FROM subtitle_tracks WHERE media_file_id=?`, mediaFileID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	var out []SubtitleTrack
 	for rows.Next() {
 		var t SubtitleTrack
@@ -42,14 +47,15 @@ func (s *Store) TracksForMedia(mediaFileID int64) ([]SubtitleTrack, error) {
 	return out, rows.Err()
 }
 
+// Cue is a single timed subtitle line for a media file.
 type Cue struct {
+	Text        string  `json:"text"`
 	ID          int64   `json:"id"`
 	MediaFileID int64   `json:"mediaFileId"`
 	TrackID     int64   `json:"trackId"`
 	Idx         int     `json:"idx"`
 	StartSec    float64 `json:"startSec"`
 	EndSec      float64 `json:"endSec"`
-	Text        string  `json:"text"`
 	ChunkID     int64   `json:"chunkId"`
 }
 
@@ -59,7 +65,7 @@ func (s *Store) ReplaceCues(mediaFileID, trackID int64, cues []Cue) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackTx(tx)
 	if _, err := tx.Exec(`DELETE FROM cues WHERE media_file_id=?`, mediaFileID); err != nil {
 		return err
 	}
@@ -72,6 +78,7 @@ func (s *Store) ReplaceCues(mediaFileID, trackID int64, cues []Cue) error {
 	return tx.Commit()
 }
 
+// CueCount returns the number of cues stored for a media file.
 func (s *Store) CueCount(mediaFileID int64) (int64, error) {
 	var n int64
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM cues WHERE media_file_id=?`, mediaFileID).Scan(&n)
@@ -84,7 +91,7 @@ func (s *Store) CleanSubtitles(mediaFileID int64) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackTx(tx)
 	if _, err := tx.Exec(`DELETE FROM cues WHERE media_file_id=?`, mediaFileID); err != nil {
 		return err
 	}
@@ -98,23 +105,23 @@ func (s *Store) CleanSubtitles(mediaFileID int64) error {
 }
 
 // CuesInRange returns cues with idx between start and end inclusive, plus one
-// neighbouring cue on each side for display context.
+// neighboring cue on each side for display context.
 func (s *Store) CuesInRange(mediaFileID int64, startIdx, endIdx int) (span, before, after []Cue, err error) {
 	rows, err := s.db.Query(`SELECT id, media_file_id, track_id, idx, start_sec, end_sec, text, COALESCE(chunk_id,0) FROM cues
 		WHERE media_file_id=? AND idx BETWEEN ? AND ? ORDER BY idx`, mediaFileID, startIdx, endIdx)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	for rows.Next() {
 		var c Cue
-		if err := rows.Scan(&c.ID, &c.MediaFileID, &c.TrackID, &c.Idx, &c.StartSec, &c.EndSec, &c.Text, &c.ChunkID); err != nil {
-			return nil, nil, nil, err
+		if scanErr := rows.Scan(&c.ID, &c.MediaFileID, &c.TrackID, &c.Idx, &c.StartSec, &c.EndSec, &c.Text, &c.ChunkID); scanErr != nil {
+			return nil, nil, nil, scanErr
 		}
 		span = append(span, c)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, nil, err
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, nil, nil, rowsErr
 	}
 	before, err = s.cueAtIdx(mediaFileID, startIdx-1)
 	if err != nil {

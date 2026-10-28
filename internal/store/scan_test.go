@@ -34,7 +34,7 @@ func TestScan(t *testing.T) {
 	// Update without status
 	err = db.UpdateScan(id, 100, 50, "")
 	require.NoError(t, err)
-	
+
 	scan, err = db.RunningScan()
 	require.NoError(t, err)
 	require.NotNil(t, scan)

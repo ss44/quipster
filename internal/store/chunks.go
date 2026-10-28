@@ -5,12 +5,13 @@ import (
 	"strings"
 )
 
+// Chunk is one indexed dialog chunk spanning a range of subtitle cues.
 type Chunk struct {
+	Text        string `json:"text"`
 	ID          int64  `json:"id"`
 	MediaFileID int64  `json:"mediaFileId"`
 	StartCueIdx int    `json:"startCueIdx"`
 	EndCueIdx   int    `json:"endCueIdx"`
-	Text        string `json:"text"`
 	IndexedAt   int64  `json:"indexedAt"`
 }
 
@@ -20,7 +21,7 @@ func (s *Store) ReplaceChunks(mediaFileID int64, chunks []Chunk) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackTx(tx)
 	if _, err := tx.Exec(`DELETE FROM chunks WHERE media_file_id=?`, mediaFileID); err != nil {
 		return err
 	}
@@ -42,12 +43,13 @@ func (s *Store) ReplaceChunks(mediaFileID int64, chunks []Chunk) error {
 	return tx.Commit()
 }
 
+// ChunksForMedia lists chunks for a media file ordered by cue index.
 func (s *Store) ChunksForMedia(mediaFileID int64) ([]Chunk, error) {
 	rows, err := s.db.Query(`SELECT id, media_file_id, start_cue_idx, end_cue_idx, text, indexed_at FROM chunks WHERE media_file_id=? ORDER BY start_cue_idx`, mediaFileID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	var out []Chunk
 	for rows.Next() {
 		var c Chunk
@@ -59,15 +61,16 @@ func (s *Store) ChunksForMedia(mediaFileID int64) ([]Chunk, error) {
 	return out, rows.Err()
 }
 
+// ChunkWithMedia is a chunk joined with its media file metadata.
 type ChunkWithMedia struct {
+	MediaTitle string `json:"mediaTitle"`
+	ShowTitle  string `json:"showTitle"`
+	FilePath   string `json:"filePath"`
 	Chunk
-	MediaTitle  string  `json:"mediaTitle"`
-	ShowTitle   string  `json:"showTitle"`
 	Year        int     `json:"year"`
 	Season      int     `json:"season"`
 	Episode     int     `json:"episode"`
 	DurationSec float64 `json:"durationSec"`
-	FilePath    string  `json:"filePath"`
 	StartSec    float64 `json:"startSec"`
 	EndSec      float64 `json:"endSec"`
 }
@@ -79,21 +82,24 @@ const chunkJoinCols = `c.id, c.media_file_id, c.start_cue_idx, c.end_cue_idx, c.
 
 // PendingIndexChunks returns chunks not yet indexed, optionally scoped to one media file.
 func (s *Store) PendingIndexChunks(mediaFileID int64, limit int) ([]ChunkWithMedia, error) {
+	const filter = ` AND c.media_file_id = ?`
+	const orderLimit = ` ORDER BY c.media_file_id, c.start_cue_idx LIMIT ?`
+	args := []any{}
 	q := `SELECT ` + chunkJoinCols + `
 		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
-		WHERE c.indexed_at = 0`
-	args := []any{}
+		WHERE c.indexed_at = 0` + orderLimit
 	if mediaFileID > 0 {
-		q += ` AND c.media_file_id = ?`
+		q = `SELECT ` + chunkJoinCols + `
+			FROM chunks c JOIN media_files m ON m.id = c.media_file_id
+			WHERE c.indexed_at = 0` + filter + orderLimit
 		args = append(args, mediaFileID)
 	}
-	q += ` ORDER BY c.media_file_id, c.start_cue_idx LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	var out []ChunkWithMedia
 	for rows.Next() {
 		var c ChunkWithMedia
@@ -107,21 +113,23 @@ func (s *Store) PendingIndexChunks(mediaFileID int64, limit int) ([]ChunkWithMed
 	return out, rows.Err()
 }
 
+// MarkChunksIndexed stamps the given chunk ids as indexed at the given time.
 func (s *Store) MarkChunksIndexed(ids []int64, at int64) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	ph := strings.Repeat("?,", len(ids))
-	ph = ph[:len(ph)-1]
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	args := make([]any, 0, len(ids)+1)
 	args = append(args, at)
 	for _, id := range ids {
 		args = append(args, id)
 	}
+	//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length ids slice; values are parameterized.
 	_, err := s.db.Exec(`UPDATE chunks SET indexed_at=? WHERE id IN (`+ph+`)`, args...)
 	return err
 }
 
+// ClearChunkIndexFlags resets indexed_at for all chunks of a media file.
 func (s *Store) ClearChunkIndexFlags(mediaFileID int64) error {
 	_, err := s.db.Exec(`UPDATE chunks SET indexed_at=0 WHERE media_file_id=?`, mediaFileID)
 	return err
@@ -133,6 +141,7 @@ func (s *Store) EnsureAllChunksStale() error {
 	return err
 }
 
+// MediaIDsNeedingIndex lists media files with unindexed chunks, excluding error rows.
 func (s *Store) MediaIDsNeedingIndex(limit int) ([]int64, error) {
 	rows, err := s.db.Query(`SELECT DISTINCT c.media_file_id FROM chunks c
 		JOIN media_files m ON m.id = c.media_file_id
@@ -140,7 +149,7 @@ func (s *Store) MediaIDsNeedingIndex(limit int) ([]int64, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	var out []int64
 	for rows.Next() {
 		var id int64
@@ -152,6 +161,7 @@ func (s *Store) MediaIDsNeedingIndex(limit int) ([]int64, error) {
 	return out, rows.Err()
 }
 
+// GetChunkByKey resolves a chunk identity "mediaId:startIdx-endIdx".
 func (s *Store) GetChunkByKey(mediaID int64, startIdx, endIdx int) (*ChunkWithMedia, error) {
 	row := s.db.QueryRow(`SELECT `+chunkJoinCols+`
 		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
@@ -168,5 +178,3 @@ func (s *Store) GetChunkByKey(mediaID int64, startIdx, endIdx int) (*ChunkWithMe
 	}
 	return &c, nil
 }
-
-// TitleMatches provides the LIKE-based fallback used for files without subtitles.

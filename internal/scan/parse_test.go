@@ -39,6 +39,13 @@ func TestParseTV(t *testing.T) {
 			episode: 3,
 		},
 		{
+			rel:     "tv/Severance/Season 2/Pilot.mkv",
+			show:    "Severance",
+			title:   "Pilot",
+			season:  2,
+			episode: 0,
+		},
+		{
 			// Add a test case for missing tv-folder regexes, bare titles, etc.
 			rel:     "tv/Unknown Show/1x01.mkv",
 			show:    "Unknown Show",
@@ -84,11 +91,11 @@ func TestParseMovies(t *testing.T) {
 		{"movies/846 (2020)/846 (2020) {imdb-tt12498618} [WEBRip-720p][AAC 2.0][x264]-LAMA.mp4", "846", 2020},
 		{"movies/The Tank (2025)/The Tank (2025) {imdb-tt31495504} [WEBDL-2160p][EAC3 5.1][h265]-BiVerseADWeb.mkv", "The Tank", 2025},
 		{"movies/It's a Wonderful Knife (2023)/It's a Wonderful Knife (2023) {imdb-tt27619382} [WEBDL-1080p][EAC3 5.1][h264]-FLUX.mkv", "It's a Wonderful Knife", 2023},
-		
+
 		// Bare year test case to cover bareYearTitle
 		{"movies/1984.mkv", "1984", 1984},
 		{"movies/1984 (1984).mkv", "1984", 1984},
-		
+
 		// Test cases for coverage
 		{"movies/Title_Without_Year.mkv", "Title Without Year", 0},
 	}

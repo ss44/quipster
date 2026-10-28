@@ -5,29 +5,29 @@ import (
 	"strings"
 )
 
+// MediaFile is one media row with its probe metadata and lifecycle status.
 type MediaFile struct {
-	ID          int64   `json:"id"`
-	Path        string  `json:"path"`
-	Container   string  `json:"container"`
-	SizeBytes   int64   `json:"sizeBytes"`
-	DurationSec float64 `json:"durationSec"`
-	Width       int     `json:"width"`
-	Height      int     `json:"height"`
-	VideoCodec  string  `json:"videoCodec"`
-	AudioCodec  string  `json:"audioCodec"`
-	Title       string  `json:"title"`
-	Year        int     `json:"year"`
-	ShowTitle   string  `json:"showTitle"`
-	Season      int     `json:"season"`
-	Episode     int     `json:"episode"`
-	Mtime       int64   `json:"mtime"`
-	Status      string  `json:"status"`
-	Error       string  `json:"error"`
-	AddedAt     int64   `json:"addedAt"`
-	StartTime   float64 `json:"startTime"`
-
-	AudioStreamIndex int    `json:"audioStreamIndex"`
-	AudioLang        string `json:"audioLang"`
+	Title            string  `json:"title"`
+	Path             string  `json:"path"`
+	Container        string  `json:"container"`
+	AudioLang        string  `json:"audioLang"`
+	Error            string  `json:"error"`
+	Status           string  `json:"status"`
+	ShowTitle        string  `json:"showTitle"`
+	VideoCodec       string  `json:"videoCodec"`
+	AudioCodec       string  `json:"audioCodec"`
+	Width            int     `json:"width"`
+	Year             int     `json:"year"`
+	Height           int     `json:"height"`
+	Season           int     `json:"season"`
+	Episode          int     `json:"episode"`
+	Mtime            int64   `json:"mtime"`
+	ID               int64   `json:"id"`
+	DurationSec      float64 `json:"durationSec"`
+	AddedAt          int64   `json:"addedAt"`
+	StartTime        float64 `json:"startTime"`
+	AudioStreamIndex int     `json:"audioStreamIndex"`
+	SizeBytes        int64   `json:"sizeBytes"`
 }
 
 const mediaCols = `id, path, container, size_bytes, duration_sec, width, height, video_codec, audio_codec,
@@ -62,9 +62,16 @@ func (s *Store) UpsertMedia(path, container string, size int64, mtime int64, tit
 	if err != nil {
 		return 0, false, err
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		id, _ := res.LastInsertId()
-		return id, true, nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, false, err
+	}
+	if n > 0 {
+		newID, err := res.LastInsertId()
+		if err != nil {
+			return 0, false, err
+		}
+		return newID, true, nil
 	}
 	// No rows changed: fetch existing id.
 	row := s.db.QueryRow(`SELECT id FROM media_files WHERE path=?`, path)
@@ -74,6 +81,7 @@ func (s *Store) UpsertMedia(path, container string, size int64, mtime int64, tit
 	return id, false, nil
 }
 
+// GetMedia returns a media row by id, or nil when not found.
 func (s *Store) GetMedia(id int64) (*MediaFile, error) {
 	row := s.db.QueryRow(`SELECT `+mediaCols+` FROM media_files WHERE id=?`, id)
 	m, err := scanMedia(row)
@@ -83,6 +91,7 @@ func (s *Store) GetMedia(id int64) (*MediaFile, error) {
 	return m, err
 }
 
+// GetMediaByPath returns a media row by path, or nil when not found.
 func (s *Store) GetMediaByPath(path string) (*MediaFile, error) {
 	row := s.db.QueryRow(`SELECT `+mediaCols+` FROM media_files WHERE path=?`, path)
 	m, err := scanMedia(row)
@@ -92,12 +101,14 @@ func (s *Store) GetMediaByPath(path string) (*MediaFile, error) {
 	return m, err
 }
 
+// UpdateMediaProbe persists probe results for a media file.
 func (s *Store) UpdateMediaProbe(id int64, duration float64, width, height int, vcodec, acodec, container string, startTime float64, audioStream int, audioLang string) error {
 	_, err := s.db.Exec(`UPDATE media_files SET duration_sec=?, width=?, height=?, video_codec=?, audio_codec=?, container=?, start_time=?, audio_stream_index=?, audio_lang=? WHERE id=?`,
 		duration, width, height, vcodec, acodec, container, startTime, audioStream, audioLang, id)
 	return err
 }
 
+// SetMediaStatus updates a media row's processing status (and error text).
 func (s *Store) SetMediaStatus(id int64, status, errMsg string) error {
 	_, err := s.db.Exec(`UPDATE media_files SET status=?, error=? WHERE id=?`, status, errMsg, id)
 	return err
@@ -110,34 +121,40 @@ func (s *Store) MarkIndexed(id int64) error {
 	return err
 }
 
+// EverIndexed reports whether the media file has ever been indexed.
 func (s *Store) EverIndexed(id int64) (bool, error) {
 	var n int64
 	err := s.db.QueryRow(`SELECT ever_indexed FROM media_files WHERE id=?`, id).Scan(&n)
 	return n > 0, err
 }
 
+// MediaListPage is a page of media rows with the total matching count.
 type MediaListPage struct {
 	Items []MediaFile `json:"items"`
 	Total int64       `json:"total"`
 }
 
+// ListMedia lists media rows newest-title first, optionally filtered by a
+// LIKE search on title, show title, and path.
 func (s *Store) ListMedia(limit, offset int, q string) (*MediaListPage, error) {
-	where := "1=1"
+	countQ := `SELECT COUNT(*) FROM media_files`
+	listQ := `SELECT ` + mediaCols + ` FROM media_files ORDER BY title, show_title, season, episode LIMIT ? OFFSET ?`
 	args := []any{}
 	if q != "" {
-		where = `(title LIKE ? OR show_title LIKE ? OR path LIKE ?)`
 		like := "%" + q + "%"
+		countQ = `SELECT COUNT(*) FROM media_files WHERE (title LIKE ? OR show_title LIKE ? OR path LIKE ?)`
+		listQ = `SELECT ` + mediaCols + ` FROM media_files WHERE (title LIKE ? OR show_title LIKE ? OR path LIKE ?) ORDER BY title, show_title, season, episode LIMIT ? OFFSET ?`
 		args = append(args, like, like, like)
 	}
 	var total int64
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM media_files WHERE `+where, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow(countQ, args...).Scan(&total); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`SELECT `+mediaCols+` FROM media_files WHERE `+where+` ORDER BY title, show_title, season, episode LIMIT ? OFFSET ?`, append(args, limit, offset)...)
+	rows, err := s.db.Query(listQ, append(args, limit, offset)...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	page := &MediaListPage{Total: total}
 	for rows.Next() {
 		m, err := scanMedia(rows)
@@ -161,14 +178,14 @@ func (s *Store) DeleteMissingUnder(base string, keep map[string]bool) ([]int64, 
 		var id int64
 		var p string
 		if err := rows.Scan(&id, &p); err != nil {
-			rows.Close()
+			closeRows(rows)
 			return nil, err
 		}
 		if !keep[p] {
 			remove = append(remove, id)
 		}
 	}
-	rows.Close()
+	closeRows(rows)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -180,12 +197,13 @@ func (s *Store) DeleteMissingUnder(base string, keep map[string]bool) ([]int64, 
 	return remove, nil
 }
 
+// MediaStatusCounts returns the number of media rows per status.
 func (s *Store) MediaStatusCounts() (map[string]int64, error) {
 	rows, err := s.db.Query(`SELECT status, COUNT(*) FROM media_files GROUP BY status`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	out := map[string]int64{}
 	for rows.Next() {
 		var st string
@@ -205,11 +223,12 @@ func (s *Store) MediaIDsByStatus(statuses ...string) ([]int64, error) {
 	for _, st := range statuses {
 		args = append(args, st)
 	}
+	//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length statuses slice; values are parameterized.
 	rows, err := s.db.Query(`SELECT id FROM media_files WHERE status IN (`+ph+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	var out []int64
 	for rows.Next() {
 		var id int64
@@ -221,14 +240,17 @@ func (s *Store) MediaIDsByStatus(statuses ...string) ([]int64, error) {
 	return out, rows.Err()
 }
 
+// TitleMatches lists indexed media whose title or show title contains the
+// query substring (LIKE-based fallback for files without subtitles).
 func (s *Store) TitleMatches(q string, limit int) ([]MediaFile, error) {
 	like := "%" + q + "%"
+	//nolint:gosec // mediaCols is a fixed constant column list; all query values are parameterized.
 	rows, err := s.db.Query(`SELECT `+mediaCols+` FROM media_files
 		WHERE (title LIKE ? OR show_title LIKE ?) AND status IN ('indexed','no_subs') ORDER BY title LIMIT ?`, like, like, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	var out []MediaFile
 	for rows.Next() {
 		m, err := scanMedia(rows)

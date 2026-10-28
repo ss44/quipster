@@ -70,10 +70,14 @@ func TestRunAndJobHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open failed: %v", err)
 	}
-	defer st.Close()
+	t.Cleanup(func() {
+		if cerr := st.Close(); cerr != nil {
+			t.Errorf("store.Close failed: %v", cerr)
+		}
+	})
 
 	mediaRoot := t.TempDir()
-	
+
 	files := []string{
 		"movies/The Matrix (1999).mkv",
 		"tv/Severance/Season 1/S01E01.mkv",
@@ -83,13 +87,17 @@ func TestRunAndJobHandler(t *testing.T) {
 	}
 	for _, f := range files {
 		full := filepath.Join(mediaRoot, filepath.FromSlash(f))
-		os.MkdirAll(filepath.Dir(full), 0755)
-		os.WriteFile(full, []byte("fake video data"), 0644)
+		if merr := os.MkdirAll(filepath.Dir(full), 0o750); merr != nil {
+			t.Fatal(merr)
+		}
+		if werr := os.WriteFile(full, []byte("fake video data"), 0o600); werr != nil {
+			t.Fatal(werr)
+		}
 	}
 
-	deletedIds := []int64{}
+	deletedIDs := []int64{}
 	onDeleted := func(ids []int64) {
-		deletedIds = append(deletedIds, ids...)
+		deletedIDs = append(deletedIDs, ids...)
 	}
 
 	// 1. Run full scan
@@ -105,7 +113,9 @@ func TestRunAndJobHandler(t *testing.T) {
 	}
 
 	// 2. Remove file to trigger prune logic
-	os.Remove(filepath.Join(mediaRoot, filepath.FromSlash("movies/The Matrix (1999).mkv")))
+	if rerr := os.Remove(filepath.Join(mediaRoot, filepath.FromSlash("movies/The Matrix (1999).mkv"))); rerr != nil {
+		t.Fatal(rerr)
+	}
 
 	// Prune=true via JobHandler
 	handler := JobHandler(mediaRoot, st, onDeleted)
@@ -117,7 +127,7 @@ func TestRunAndJobHandler(t *testing.T) {
 		t.Fatalf("JobHandler failed: %v", err)
 	}
 
-	if len(deletedIds) == 0 {
+	if len(deletedIDs) == 0 {
 		t.Errorf("Expected some deleted IDs after pruning, got none")
 	}
 
@@ -129,12 +139,26 @@ func TestRunAndJobHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JobHandler prune=false failed: %v", err)
 	}
+}
 
-	// 4. Test error cases in JobHandler
-	jobBadJson := &store.Job{
+func TestJobHandlerErrors(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := st.Close(); cerr != nil {
+			t.Errorf("store.Close failed: %v", cerr)
+		}
+	})
+
+	handler := JobHandler(t.TempDir(), st, nil)
+
+	jobBadJSON := &store.Job{
 		Payload: `{"roots": [`,
 	}
-	if err := handler(context.Background(), jobBadJson, nil); err == nil {
+	if err := handler(context.Background(), jobBadJSON, nil); err == nil {
 		t.Errorf("Expected error for bad json, got nil")
 	}
 

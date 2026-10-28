@@ -4,16 +4,18 @@ import (
 	"database/sql"
 )
 
+// Scan tracks the progress of a media library scan run.
 type Scan struct {
-	ID         int64  `json:"id"`
 	RootPath   string `json:"rootPath"`
 	Status     string `json:"status"`
+	ID         int64  `json:"id"`
 	FilesSeen  int64  `json:"filesSeen"`
 	FilesDone  int64  `json:"filesDone"`
 	StartedAt  int64  `json:"startedAt"`
 	FinishedAt int64  `json:"finishedAt"`
 }
 
+// StartScan inserts a new running scan row and returns its id.
 func (s *Store) StartScan(root string) (int64, error) {
 	res, err := s.db.Exec(`INSERT INTO scans (root_path, status, started_at) VALUES (?,'running',?)`, root, nowMillis())
 	if err != nil {
@@ -22,6 +24,8 @@ func (s *Store) StartScan(root string) (int64, error) {
 	return res.LastInsertId()
 }
 
+// UpdateScan records scan progress and, when a status is given, finishes the
+// scan row with that status and a finished timestamp.
 func (s *Store) UpdateScan(id int64, seen, done int64, status string) error {
 	if status == "" {
 		_, err := s.db.Exec(`UPDATE scans SET files_seen=?, files_done=? WHERE id=?`, seen, done, id)
@@ -45,6 +49,7 @@ func (s *Store) RunningScan() (*Scan, error) {
 	return &sc, nil
 }
 
+// HasActiveScanJob reports whether a scan job is queued or running.
 func (s *Store) HasActiveScanJob() (bool, error) {
 	var n int64
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE type='scan' AND status IN ('queued','running')`).Scan(&n)

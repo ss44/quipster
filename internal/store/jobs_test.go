@@ -61,7 +61,8 @@ func TestJobs(t *testing.T) {
 	err = db.FinishJob(job.ID, "done", "")
 	require.NoError(t, err)
 
-	jobs, _ = db.ListJobs(10)
+	jobs, err = db.ListJobs(10)
+	require.NoError(t, err)
 	var finishedJob Job
 	for _, j := range jobs {
 		if j.ID == job.ID {
@@ -82,7 +83,8 @@ func TestJobs(t *testing.T) {
 	err = db.RequeueJob(job2.ID, "error occurred")
 	require.NoError(t, err)
 
-	jobs, _ = db.ListJobs(10)
+	jobs, err = db.ListJobs(10)
+	require.NoError(t, err)
 	var requeuedJob Job
 	for _, j := range jobs {
 		if j.ID == job2.ID {
@@ -101,7 +103,8 @@ func TestJobs(t *testing.T) {
 	err = db.RequeueJobSoft(job2b.ID, "interrupted")
 	require.NoError(t, err)
 
-	jobs, _ = db.ListJobs(10)
+	jobs, err = db.ListJobs(10)
+	require.NoError(t, err)
 	for _, j := range jobs {
 		if j.ID == job2b.ID {
 			assert.Equal(t, "queued", j.Status)
@@ -123,7 +126,8 @@ func TestJobs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), n)
 
-	stats, _ = db.JobStats()
+	stats, err = db.JobStats()
+	require.NoError(t, err)
 	assert.Equal(t, int64(0), stats.Queued)
 
 	// LineStats (just basic test to run it)

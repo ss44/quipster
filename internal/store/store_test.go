@@ -14,7 +14,11 @@ func openTest(t *testing.T) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Logf("close test store: %v", err)
+		}
+	})
 	return s
 }
 
@@ -32,15 +36,23 @@ func TestUpsertMediaChangeDetection(t *testing.T) {
 	if err != nil || !changed || id2 != id {
 		t.Fatalf("size change should mark changed: id=%d changed=%v err=%v", id2, changed, err)
 	}
-	m, _ := s.GetMedia(id)
+	m, err := s.GetMedia(id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if m == nil || m.Status != "pending" {
 		t.Fatalf("changed media should reset to pending: %+v", m)
 	}
 }
 
-func TestReplaceChunksRelinksCues(t *testing.T) {
-	s := openTest(t)
-	id, _, _ := s.UpsertMedia("/media/b.mkv", "mkv", 1, 1, "B", 0, 0, 0, "")
+// setupChunkRelink seeds a store with a media row, a track, six cues, and two
+// chunks covering cues 0-5. It returns the media id and fails the test on error.
+func setupChunkRelink(t *testing.T, s *Store) (int64, int64) {
+	t.Helper()
+	id, _, err := s.UpsertMedia("/media/b.mkv", "mkv", 1, 1, "B", 0, 0, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	trackID, err := s.ReplaceTrack(id, &SubtitleTrack{Source: "sidecar", Lang: "en"})
 	if err != nil {
 		t.Fatal(err)
@@ -49,16 +61,22 @@ func TestReplaceChunksRelinksCues(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		cues = append(cues, Cue{MediaFileID: id, TrackID: trackID, Idx: i, StartSec: float64(i), EndSec: float64(i) + 1, Text: "line"})
 	}
-	if err := s.ReplaceCues(id, trackID, cues); err != nil {
-		t.Fatal(err)
+	if cerr := s.ReplaceCues(id, trackID, cues); cerr != nil {
+		t.Fatal(cerr)
 	}
 	chunks := []Chunk{
 		{MediaFileID: id, StartCueIdx: 0, EndCueIdx: 2, Text: "a b c"},
 		{MediaFileID: id, StartCueIdx: 3, EndCueIdx: 5, Text: "d e f"},
 	}
-	if err := s.ReplaceChunks(id, chunks); err != nil {
-		t.Fatal(err)
+	if cerr := s.ReplaceChunks(id, chunks); cerr != nil {
+		t.Fatal(cerr)
 	}
+	return id, trackID
+}
+
+func TestReplaceChunksRelinksCues(t *testing.T) {
+	s := openTest(t)
+	id, _ := setupChunkRelink(t, s)
 	pending, err := s.PendingIndexChunks(id, 10)
 	if err != nil || len(pending) != 2 {
 		t.Fatalf("pending chunks = %d err=%v", len(pending), err)
@@ -74,10 +92,13 @@ func TestReplaceChunksRelinksCues(t *testing.T) {
 	if span[0].ChunkID == 0 {
 		t.Errorf("cue 0 has no chunk link")
 	}
-	if err := s.MarkChunksIndexed([]int64{pending[0].ID, pending[1].ID}, 42); err != nil {
+	if cerr := s.MarkChunksIndexed([]int64{pending[0].ID, pending[1].ID}, 42); cerr != nil {
+		t.Fatal(cerr)
+	}
+	pending, err = s.PendingIndexChunks(id, 10)
+	if err != nil {
 		t.Fatal(err)
 	}
-	pending, _ = s.PendingIndexChunks(id, 10)
 	if len(pending) != 0 {
 		t.Errorf("chunks still pending after mark")
 	}
@@ -96,7 +117,7 @@ func TestClaimJobExclusive(t *testing.T) {
 	var wg sync.WaitGroup
 	for w := 0; w < 5; w++ {
 		wg.Add(1)
-		go func(n int) {
+		go func(_ int) {
 			defer wg.Done()
 			j, err := s.ClaimJob(context.Background(), "w", []string{"probe"})
 			if err != nil || j == nil {
@@ -115,18 +136,28 @@ func TestClaimJobExclusive(t *testing.T) {
 	if claimed != 5 {
 		t.Errorf("claimed %d jobs, want 5", claimed)
 	}
-	if j, _ := s.ClaimJob(context.Background(), "w", []string{"probe"}); j != nil {
+	j, err := s.ClaimJob(context.Background(), "w", []string{"probe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j != nil {
 		t.Errorf("queue should be empty")
 	}
 }
 
 func TestCacheEntriesLRU(t *testing.T) {
 	s := openTest(t)
-	s.UpsertCacheEntry("k1", "/c/1.mp4", "clip", 100)
+	if err := s.UpsertCacheEntry("k1", "/c/1.mp4", "clip", 100); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(3 * time.Millisecond)
-	s.UpsertCacheEntry("k2", "/c/2.mp4", "clip", 200)
+	if err := s.UpsertCacheEntry("k2", "/c/2.mp4", "clip", 200); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(3 * time.Millisecond)
-	s.TouchCache("k1")
+	if err := s.TouchCache("k1"); err != nil {
+		t.Fatal(err)
+	}
 	entries, err := s.OldestCacheEntries("clip")
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("entries=%d err=%v", len(entries), err)
@@ -134,7 +165,11 @@ func TestCacheEntriesLRU(t *testing.T) {
 	if entries[0].CacheKey != "k2" {
 		t.Errorf("k2 must be oldest after touching k1")
 	}
-	if n, _ := s.CacheBytes("clip"); n != 300 {
+	n, err := s.CacheBytes("clip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 300 {
 		t.Errorf("total bytes = %d", n)
 	}
 }

@@ -45,14 +45,14 @@ func TestCueDTOs(t *testing.T) {
 
 func TestMediaTitleFor(t *testing.T) {
 	cases := []struct {
-		m    store.MediaFile
 		want string
+		m    store.MediaFile
 	}{
-		{store.MediaFile{ShowTitle: "Lost", Season: 1, Episode: 1}, "Lost S01E01"},
-		{store.MediaFile{ShowTitle: "Lost", Season: 0, Episode: 0}, "Lost"},
-		{store.MediaFile{ShowTitle: "Lost", Season: 1, Episode: 0}, "Lost"},
-		{store.MediaFile{Title: "The Matrix"}, "The Matrix"},
-		{store.MediaFile{}, ""},
+		{want: "Lost S01E01", m: store.MediaFile{ShowTitle: "Lost", Season: 1, Episode: 1}},
+		{want: "Lost", m: store.MediaFile{ShowTitle: "Lost", Season: 0, Episode: 0}},
+		{want: "Lost", m: store.MediaFile{ShowTitle: "Lost", Season: 1, Episode: 0}},
+		{want: "The Matrix", m: store.MediaFile{Title: "The Matrix"}},
+		{want: "", m: store.MediaFile{}},
 	}
 	for _, c := range cases {
 		if got := mediaTitleFor(&c.m); got != c.want {

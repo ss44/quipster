@@ -1,17 +1,28 @@
+// Package store provides the SQLite-backed persistence layer for Quipster:
+// media files, subtitle tracks and cues, dialog chunks, scan progress, the
+// byte-bounded cache, queue jobs, and key/value settings.
 package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 	"time"
 
+	// blank import: register the pure-Go SQLite driver.
 	_ "modernc.org/sqlite"
 )
 
+// Store wraps the SQLite database and provides all persistence operations for
+// media files, jobs, subtitles, chunks, cache entries, and settings.
 type Store struct {
 	db *sql.DB
 }
 
+// Open opens (and migrates) the SQLite database at the given path. The DSN
+// enables WAL journaling, foreign keys, a busy timeout, and immediate
+// transactions so concurrent readers work alongside serialized writers.
 func Open(path string) (*Store, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate", path)
 	db, err := sql.Open("sqlite", dsn)
@@ -23,20 +34,45 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(16)
 	db.SetMaxIdleConns(16)
 	if err := db.Ping(); err != nil {
-		db.Close()
+		// The connection never worked; surface the ping error and log the
+		// close failure since the original error is the one that matters.
+		if cerr := db.Close(); cerr != nil {
+			log.Printf("store: close after ping failure: %v", cerr)
+		}
 		return nil, err
 	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
-		db.Close()
+		if cerr := db.Close(); cerr != nil {
+			log.Printf("store: close after migration failure: %v", cerr)
+		}
 		return nil, err
 	}
 	return s, nil
 }
 
+// Close closes the underlying database connection pool.
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB exposes the underlying connection pool for callers that need raw access.
 func (s *Store) DB() *sql.DB { return s.db }
+
+// closeRows closes query rows after iteration, logging a non-nil close error
+// since row data has already been consumed and the caller reports its own
+// iteration/scan errors.
+func closeRows(rows *sql.Rows) {
+	if err := rows.Close(); err != nil {
+		log.Printf("store: close rows: %v", err)
+	}
+}
+
+// rollbackTx rolls back a transaction, tolerating the expected ErrTxDone
+// sentinel that follows a successful Commit and logging any other failure.
+func rollbackTx(tx *sql.Tx) {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		log.Printf("store: tx rollback: %v", err)
+	}
+}
 
 func (s *Store) migrate() error {
 	stmts := []string{

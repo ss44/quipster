@@ -40,8 +40,9 @@ func TestMedia(t *testing.T) {
 	// UpdateMediaProbe(id int64, duration float64, width, height int, vcodec, acodec, container string, startTime float64, audioStream int, audioLang string)
 	err = db.UpdateMediaProbe(id1, 3600.0, 1920, 1080, "h264", "aac", "mp4", 0.0, 1, "en")
 	require.NoError(t, err)
-	
-	m, _ = db.GetMedia(id1)
+
+	m, err = db.GetMedia(id1)
+	require.NoError(t, err)
 	assert.Equal(t, 3600.0, m.DurationSec)
 	assert.Equal(t, "Title", m.Title)
 	assert.Equal(t, "Show", m.ShowTitle)
@@ -52,7 +53,8 @@ func TestMedia(t *testing.T) {
 	// SetMediaStatus(id int64, status, errMsg string)
 	err = db.SetMediaStatus(id1, "no_subs", "")
 	require.NoError(t, err)
-	m, _ = db.GetMedia(id1)
+	m, err = db.GetMedia(id1)
+	require.NoError(t, err)
 	assert.Equal(t, "no_subs", m.Status)
 
 	// MarkIndexed & EverIndexed
@@ -86,18 +88,21 @@ func TestMedia(t *testing.T) {
 	assert.Equal(t, []int64{id1}, ids)
 
 	// DeleteMissingUnder(base string, keep map[string]bool) ([]int64, error)
-	id3, _, _ := db.UpsertMedia("/foo/baz.mp4", "mp4", 2048, 2000, "Title2", 2021, 0, 0, "")
-	
+	id3, _, err := db.UpsertMedia("/foo/baz.mp4", "mp4", 2048, 2000, "Title2", 2021, 0, 0, "")
+	require.NoError(t, err)
+
 	// keep bar.mp4, drop baz.mp4
 	keep := map[string]bool{"/foo/bar.mp4": true}
 	removed, err := db.DeleteMissingUnder("/foo", keep)
 	require.NoError(t, err)
 	assert.Equal(t, []int64{id3}, removed)
 
-	m, _ = db.GetMedia(id3)
+	m, err = db.GetMedia(id3)
+	require.NoError(t, err)
 	assert.Nil(t, m) // baz.mp4 should be deleted
 
-	m, _ = db.GetMedia(id1)
+	m, err = db.GetMedia(id1)
+	require.NoError(t, err)
 	require.NotNil(t, m) // bar.mp4 should still exist
 
 	// TitleMatches(q string, limit int)

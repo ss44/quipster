@@ -133,9 +133,9 @@ func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *i
 // assembly separate from main() makes the whole wiring testable without
 // starting an HTTP server or waiting for a signal.
 type app struct {
-	Deps   api.Deps
 	Runner *jobs.Runner
 	Stop   func()
+	Deps   api.Deps
 }
 
 // assembleApp wires every service around the shared store: clip/thumbnail
