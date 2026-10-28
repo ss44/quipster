@@ -45,6 +45,20 @@ export interface SearchResponse {
   titleMatches: TitleMatch[]
 }
 
+export interface Quote {
+  chunkId: string
+  text: string
+  mediaId: number
+  mediaTitle: string
+  showTitle: string
+  season: number
+  episode: number
+  year: number
+  startSec: number
+  endSec: number
+  thumbUrl: string
+}
+
 export interface Suggestion {
   text: string
   textMarked: string
@@ -137,6 +151,7 @@ async function getJSON<T>(url: string): Promise<T> {
 
 export const api = {
   examples: () => getJSON<{ examples: string[] }>('/api/examples'),
+  quotes: (limit = 4) => getJSON<{ quotes: Quote[] }>(`/api/quotes?limit=${limit}`),
   suggest: (q: string) =>
     getJSON<{ suggestions: Suggestion[] }>(`/api/suggest?q=${encodeURIComponent(q)}`),
   search: (q: string, show: string, page: number) =>

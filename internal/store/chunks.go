@@ -161,6 +161,35 @@ func (s *Store) MediaIDsNeedingIndex(limit int) ([]int64, error) {
 	return out, rows.Err()
 }
 
+// RandomQuotes returns random indexed chunks for the landing page so the home
+// screen always shows dialogue that actually exists in the library.
+func (s *Store) RandomQuotes(limit int) ([]ChunkWithMedia, error) {
+	if limit <= 0 || limit > 12 {
+		limit = 6
+	}
+	rows, err := s.db.Query(`SELECT `+chunkJoinCols+`
+		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
+		WHERE c.indexed_at > 0 AND m.status = 'indexed'
+		  AND length(c.text) BETWEEN 12 AND 220 AND TRIM(c.text) != ''
+		  AND substr(TRIM(c.text), 1, 1) != '['
+		ORDER BY RANDOM() LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer closeRows(rows)
+	var out []ChunkWithMedia
+	for rows.Next() {
+		var c ChunkWithMedia
+		if err := rows.Scan(&c.ID, &c.MediaFileID, &c.StartCueIdx, &c.EndCueIdx, &c.Text, &c.IndexedAt,
+			&c.MediaTitle, &c.ShowTitle, &c.Year, &c.Season, &c.Episode, &c.DurationSec, &c.FilePath,
+			&c.StartSec, &c.EndSec); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // GetChunkByKey resolves a chunk identity "mediaId:startIdx-endIdx".
 func (s *Store) GetChunkByKey(mediaID int64, startIdx, endIdx int) (*ChunkWithMedia, error) {
 	row := s.db.QueryRow(`SELECT `+chunkJoinCols+`

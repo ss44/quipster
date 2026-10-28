@@ -9,7 +9,26 @@
         and download or share the clip.
       </p>
 
-      <div class="examples" v-if="examples.length > 0">
+      <section v-if="quotes.length" class="quotes">
+        <p class="quotes-label">From your library</p>
+        <div class="quote-grid">
+          <button
+            v-for="quote in quotes"
+            :key="quote.chunkId"
+            type="button"
+            class="quote-card"
+            @click="openQuote(quote)"
+          >
+            <span class="quote-text">“{{ quote.text }}”</span>
+            <span class="quote-foot">
+              <span class="quote-title">{{ quoteTitle(quote) }}</span>
+              <span class="quote-time mono">{{ timecode(quote.startSec) }}</span>
+            </span>
+          </button>
+        </div>
+      </section>
+
+      <div class="examples" v-if="!quotes.length && examples.length > 0">
         <button
           v-for="example in examples"
           :key="example"
@@ -25,6 +44,11 @@
           <span class="example-go">Search ↵</span>
         </button>
       </div>
+
+      <p v-if="!quotes.length && !examples.length" class="landing-empty">
+        No indexed dialogue yet. Choose your library folders in
+        <RouterLink to="/admin">Library</RouterLink> and run a scan — real lines will appear here.
+      </p>
 
       <p class="landing-hint">
         Press <kbd class="kbd">/</kbd> to focus search. Wrap words in “quotes” for an exact phrase.
@@ -142,20 +166,37 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, clipStreamURL, type Hit, type SearchResponse } from '../api'
+import { api, clipStreamURL, type Hit, type Quote, type SearchResponse } from '../api'
 
 const route = useRoute()
 const router = useRouter()
 
 const examples = ref<string[]>([])
+const quotes = ref<Quote[]>([])
 
 onMounted(async () => {
+  try {
+    quotes.value = (await api.quotes(4)).quotes ?? []
+  } catch {
+    quotes.value = []
+  }
   try {
     examples.value = (await api.examples()).examples
   } catch {
     examples.value = []
   }
 })
+
+function quoteTitle(quote: Quote): string {
+  const parts = [quote.showTitle || quote.mediaTitle]
+  if (quote.showTitle && quote.season) parts.push(`S${pad(quote.season)}E${pad(quote.episode)}`)
+  else if (quote.year) parts.push(String(quote.year))
+  return parts.join(' · ')
+}
+
+function openQuote(quote: Quote) {
+  window.dispatchEvent(new CustomEvent('open-clip', { detail: quote }))
+}
 
 const results = ref<SearchResponse | null>(null)
 const loading = ref(false)
@@ -240,6 +281,78 @@ function pad(n: number): string {
 }
 
 /* landing */
+.quotes {
+  margin-top: 26px;
+}
+.quotes-label {
+  margin: 0 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.quote-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+.quote-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+  padding: 14px 16px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.quote-card:hover {
+  border-color: var(--accent-line);
+  background: var(--surface-2);
+}
+.quote-text {
+  font-size: 14px;
+  line-height: 1.5;
+  color: #e6e8eb;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.quote-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: auto;
+}
+.quote-title {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.quote-time {
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.landing-empty {
+  margin-top: 22px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.landing-empty a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.landing-empty a:hover {
+  text-decoration: underline;
+}
 .landing {
   max-width: 660px;
   margin: 9vh auto 0;

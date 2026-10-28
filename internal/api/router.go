@@ -74,6 +74,7 @@ func Router(d Deps) http.Handler {
 	r.Get("/api/media/{id}", d.handleMedia)
 	r.Get("/api/thumb/{mediaId}", d.handleThumb)
 	r.Get("/api/chunks/{id}", d.handleChunk)
+	r.Get("/api/quotes", d.handleQuotes)
 	r.Get("/api/clips/stream", d.handleClipStream)
 
 	// Admin (token-guarded when configured)
@@ -246,6 +247,38 @@ func (d Deps) handleThumb(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeFile(w, r, e.Path)
+}
+
+// handleQuotes serves real dialogue lines from the indexed library for the
+// landing page.
+func (d Deps) handleQuotes(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	quotes, err := d.St.RandomQuotes(limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]map[string]any, 0, len(quotes))
+	for _, q := range quotes {
+		title := q.ShowTitle
+		if title == "" {
+			title = q.MediaTitle
+		}
+		out = append(out, map[string]any{
+			"chunkId":    indexer.DocID(q.MediaFileID, q.StartCueIdx, q.EndCueIdx),
+			"text":       q.Text,
+			"mediaId":    q.MediaFileID,
+			"mediaTitle": q.MediaTitle,
+			"showTitle":  q.ShowTitle,
+			"season":     q.Season,
+			"episode":    q.Episode,
+			"year":       q.Year,
+			"startSec":   q.StartSec,
+			"endSec":     q.EndSec,
+			"thumbUrl":   fmt.Sprintf("/api/thumb/%d?t=%.1f&w=320", q.MediaFileID, q.StartSec),
+		})
+	}
+	writeJSON(w, map[string]any{"quotes": out})
 }
 
 func (d Deps) handleChunk(w http.ResponseWriter, r *http.Request) {
