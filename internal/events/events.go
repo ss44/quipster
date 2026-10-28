@@ -1,15 +1,17 @@
 package events
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"quipster/internal/store"
 )
 
-// Snapshot is the admin progress payload streamed over SSE each tick.
+// Snapshot is the admin progress payload streamed over SSE.
 type Snapshot struct {
 	Scan        *store.Scan      `json:"scan"`
 	Queue       *store.JobStats  `json:"queue"`
@@ -24,6 +26,12 @@ type Snapshot struct {
 type Collector struct {
 	St      *store.Store
 	MeiliUp func() bool
+
+	mu       sync.Mutex
+	users    int
+	state    []byte
+	notifyCh chan struct{}
+	once     sync.Once
 }
 
 func (c *Collector) Collect() *Snapshot {
@@ -43,7 +51,7 @@ func (c *Collector) Collect() *Snapshot {
 	if ls, err := c.St.LineStats(); err == nil {
 		snap.Lines = ls
 	}
-	if jobs, err := c.St.ListJobs(8); err == nil {
+	if jobs, err := c.St.ListJobs(50); err == nil {
 		snap.Recent = jobs
 	}
 	if running, err := c.St.RunningJobs(12); err == nil {
@@ -55,7 +63,36 @@ func (c *Collector) Collect() *Snapshot {
 	return snap
 }
 
-// Handler streams snapshots as SSE with a 1s tick.
+func (c *Collector) run() {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for range tick.C {
+		c.mu.Lock()
+		if c.users == 0 {
+			c.mu.Unlock()
+			continue
+		}
+		c.mu.Unlock()
+
+		snap := c.Collect()
+		b, err := json.Marshal(snap)
+		if err != nil {
+			continue
+		}
+
+		c.mu.Lock()
+		if !bytes.Equal(c.state, b) {
+			c.state = b
+			if c.notifyCh != nil {
+				close(c.notifyCh)
+			}
+			c.notifyCh = make(chan struct{})
+		}
+		c.mu.Unlock()
+	}
+}
+
+// Handler streams snapshots as SSE.
 func (c *Collector) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fl, ok := w.(http.Flusher)
@@ -63,29 +100,66 @@ func (c *Collector) Handler() http.HandlerFunc {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
+
+		c.once.Do(func() {
+			c.notifyCh = make(chan struct{})
+			go c.run()
+		})
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
-		ctx := r.Context()
-		tick := time.NewTicker(time.Second)
-		defer tick.Stop()
-		send := func() {
+
+		c.mu.Lock()
+		c.users++
+		if c.state == nil {
+			// Fast path to avoid DB block while holding lock
+			c.mu.Unlock()
 			snap := c.Collect()
-			b, err := json.Marshal(snap)
-			if err != nil {
-				return
+			if b, err := json.Marshal(snap); err == nil {
+				c.mu.Lock()
+				if c.state == nil {
+					c.state = b
+				}
+				c.mu.Unlock()
 			}
-			fmt.Fprintf(w, "event: tick\ndata: %s\n\n", b)
+			c.mu.Lock()
+		}
+		state := c.state
+		notifyCh := c.notifyCh
+		c.mu.Unlock()
+
+		defer func() {
+			c.mu.Lock()
+			c.users--
+			c.mu.Unlock()
+		}()
+
+		if state != nil {
+			fmt.Fprintf(w, "event: tick\ndata: %s\n\n", state)
 			fl.Flush()
 		}
-		send()
+
+		ctx := r.Context()
+		keepAlive := time.NewTicker(15 * time.Second)
+		defer keepAlive.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-tick.C:
-				send()
+			case <-notifyCh:
+				c.mu.Lock()
+				state = c.state
+				notifyCh = c.notifyCh
+				c.mu.Unlock()
+
+				fmt.Fprintf(w, "event: tick\ndata: %s\n\n", state)
+				fl.Flush()
+			case <-keepAlive.C:
+				fmt.Fprintf(w, "event: ping\ndata: \n\n")
+				fl.Flush()
 			}
 		}
 	}
