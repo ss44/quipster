@@ -5,11 +5,28 @@ package probe
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
+)
+
+// Probing must read container headers, not crawl the media payload. Without
+// caps, files with a trailing or missing index (MP4 with moov at the end, MKV
+// without cues) can make ffprobe scan an entire 20GB+ file. These bounds keep
+// probe time independent of file size (issue #1).
+const (
+	// defaultAnalyzeDuration caps ffprobe's per-stream analysis window
+	// (flag value is microseconds).
+	defaultAnalyzeDuration = 10 * time.Second
+	// defaultProbeSize caps how many input bytes ffprobe inspects.
+	defaultProbeSize = 50 << 20 // 50 MiB
+	// defaultProbeTimeout bounds one ffprobe run before it is killed and the
+	// file skipped.
+	defaultProbeTimeout = 60 * time.Second
 )
 
 // SubtitleStream describes one embedded subtitle stream reported by ffprobe.
@@ -97,12 +114,46 @@ func fileDuration(o *ffprobeOut) float64 {
 	return 0
 }
 
-// Probe runs ffprobe and summarizes streams of interest.
-func Probe(path string) (*Result, error) {
-	out, err := exec.Command(FfprobeBin(), "-v", "error", "-print_format", "json", //nolint:gosec // probing user-supplied media paths is the package's purpose
-		"-show_format", "-show_streams", "--", path).Output()
+// probeArgs builds the ffprobe invocation: capped analysis (-analyzeduration,
+// -probesize) so large files are probed from headers instead of scanned whole.
+func probeArgs(path string) []string {
+	return []string{
+		"-v", "error",
+		"-analyzeduration", strconv.FormatInt(int64(defaultAnalyzeDuration/time.Microsecond), 10),
+		"-probesize", strconv.FormatInt(int64(defaultProbeSize), 10),
+		"-print_format", "json",
+		"-show_format", "-show_streams",
+		"--", path,
+	}
+}
+
+// stderrDetail surfaces ffprobe's stderr (-v error output) for diagnosis,
+// capped since it is stored in the media error column shown in the UI.
+func stderrDetail(err error) string {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || len(ee.Stderr) == 0 {
+		return ""
+	}
+	s := strings.TrimSpace(string(ee.Stderr))
+	if s == "" {
+		return ""
+	}
+	if r := []rune(s); len(r) > 200 {
+		s = string(r[:200]) + "..."
+	}
+	return ": " + s
+}
+
+// Probe runs ffprobe and summarizes streams of interest. ctx must be non-nil
+// and bounds the run: expiry kills ffprobe and returns a context error the
+// caller can detect with errors.Is.
+func Probe(ctx context.Context, path string) (*Result, error) {
+	out, err := exec.CommandContext(ctx, FfprobeBin(), probeArgs(path)...).Output() //nolint:gosec // probing user-supplied media paths is the package's purpose
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe %s: %w", path, err)
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, fmt.Errorf("ffprobe %s: %w", path, cerr)
+		}
+		return nil, fmt.Errorf("ffprobe %s: %w%s", path, err, stderrDetail(err))
 	}
 	var o ffprobeOut
 	if err := json.Unmarshal(out, &o); err != nil {

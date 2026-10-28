@@ -44,6 +44,7 @@ type config struct {
 	maxClipSec   float64
 	cacheMaxGB   float64
 	longCutSec   float64
+	probeTimeout time.Duration
 }
 
 func envStr(key, def string) string {
@@ -89,6 +90,7 @@ func loadConfig() config {
 		maxClipSec:   envFloat("MAX_CLIP_SEC", 120),
 		cacheMaxGB:   envFloat("CACHE_MAX_GB", 10),
 		longCutSec:   envFloat("LONG_CUT_SEC", 20),
+		probeTimeout: parseDuration(envStr("PROBE_TIMEOUT", "")),
 	}
 }
 
@@ -120,6 +122,7 @@ func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *i
 		St:           st,
 		SubsCacheDir: filepath.Join(cfg.cacheDir, "subs"),
 		ExtractConns: envInt("EXTRACT_CONNS", 4),
+		ProbeTimeout: cfg.probeTimeout,
 	}
 	runner.Register("probe", cfg.subWorkers, pipeline.JobHandler())
 	runner.Register("index", cfg.indexWorkers, ix.JobHandler())

@@ -3,12 +3,14 @@ package probe
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"quipster/internal/chunks"
 	"quipster/internal/store"
@@ -24,7 +26,18 @@ type Pipeline struct {
 	// ExtractConns bounds parallel embedded-subtitle extractions; each one
 	// scans the entire media file, so unbounded parallelism thrashes storage.
 	ExtractConns int
+	// ProbeTimeout bounds each ffprobe run; <=0 uses defaultProbeTimeout. A
+	// timed-out probe is killed and the file skipped instead of stalling the
+	// queue (issue #1).
+	ProbeTimeout time.Duration
 	once         sync.Once
+}
+
+func (p *Pipeline) probeTimeout() time.Duration {
+	if p.ProbeTimeout > 0 {
+		return p.ProbeTimeout
+	}
+	return defaultProbeTimeout
 }
 
 func (p *Pipeline) sem() chan struct{} {
@@ -59,7 +72,8 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 		if m == nil {
 			return nil
 		}
-		if _, serr := os.Stat(m.Path); serr != nil {
+		fi, serr := os.Stat(m.Path)
+		if serr != nil {
 			// The job itself is handled: record the media as errored and
 			// let the queue move on instead of spinning on retries.
 			p.recordStatus(m.ID, "error", "media file missing on disk")
@@ -67,11 +81,29 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 		}
 		progress(0.05)
 
-		res, err := Probe(m.Path)
-		if err != nil {
-			p.recordStatus(m.ID, "error", err.Error())
-			return nil
+		start := time.Now()
+		log.Printf("[probe] media %d %s: probing (size=%d)", m.ID, m.Path, fi.Size())
+		pctx, cancel := context.WithTimeout(ctx, p.probeTimeout())
+		res, perr := Probe(pctx, m.Path)
+		cancel()
+		elapsed := time.Since(start).Round(time.Millisecond)
+		if perr != nil {
+			if ctx.Err() != nil {
+				// Job context gone (queue pause/stop or shutdown): surface it
+				// so the runner requeues instead of marking the media errored.
+				return ctx.Err()
+			}
+			note := perr.Error()
+			if errors.Is(perr, context.DeadlineExceeded) {
+				// Fallback for stalled probes (issue #1): the killed ffprobe
+				// must not block the queue; skip the file and log it.
+				note = fmt.Sprintf("probe timed out after %s; file skipped", p.probeTimeout())
+			}
+			log.Printf("[probe] media %d %s: probe failed after %s: %s", m.ID, m.Path, elapsed, note)
+			p.recordStatus(m.ID, "error", note)
+			return nil //nolint:nilerr // intentional: media-level failure, not job failure
 		}
+		log.Printf("[probe] media %d %s: probe ok in %s", m.ID, m.Path, elapsed)
 		audioOrdinal, audioLang := 0, ""
 		if chosen := PickEnglishAudio(res.Audio); chosen != nil {
 			audioOrdinal, audioLang = chosen.Ordinal, chosen.Lang

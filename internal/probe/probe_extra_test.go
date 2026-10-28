@@ -169,7 +169,7 @@ const probeMockJSON = `{
 func TestProbeSuccess(t *testing.T) {
 	writeFFprobeScript(t, fmt.Sprintf("cat << 'EOF'\n%s\nEOF\n", probeMockJSON))
 
-	res, err := Probe("dummy.mkv")
+	res, err := Probe(context.Background(), "dummy.mkv")
 	if err != nil {
 		t.Fatalf("Probe failed: %v", err)
 	}
@@ -220,7 +220,7 @@ func assertSubsSummary(t *testing.T, res *Result) {
 func TestProbeExecError(t *testing.T) {
 	writeFFprobeScript(t, "exit 1\n")
 
-	if _, err := Probe("dummy.mkv"); err == nil {
+	if _, err := Probe(context.Background(), "dummy.mkv"); err == nil {
 		t.Fatal("expected error, got nil")
 	}
 }
@@ -228,7 +228,7 @@ func TestProbeExecError(t *testing.T) {
 func TestProbeInvalidJSON(t *testing.T) {
 	writeFFprobeScript(t, "echo '{invalid'\n")
 
-	if _, err := Probe("dummy.mkv"); err == nil {
+	if _, err := Probe(context.Background(), "dummy.mkv"); err == nil {
 		t.Fatal("expected error, got nil")
 	}
 }
