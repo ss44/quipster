@@ -246,3 +246,36 @@ func TestJobHandlerActiveExtractionCancellation(t *testing.T) {
 	}
 	assertProbeLogs(t, logs, "stage=extraction failed elapsed=", "stage=complete outcome=failed total_elapsed=")
 }
+
+func TestJobHandlerExtractionTimeout(t *testing.T) {
+	logs := captureProbeLogs(t)
+	st := newTestStore(t)
+	dir, binDir := t.TempDir(), t.TempDir()
+	m := addMedia(t, st, filepath.Join(dir, "movie.mkv"), true)
+	writeFFprobeMock(t, binDir, ffprobeJSON(videoStreamJSON, subStreamJSON(2, "subrip", "eng")))
+	// exec replaces the shell so CommandContext kills the sleeping process
+	// outright rather than leaving a child holding the pipe open.
+	ffmpeg := writeMockBin(t, binDir, "ffmpeg", "exec sleep 5\n")
+	t.Setenv("FFMPEG_BIN", ffmpeg)
+
+	p := &Pipeline{
+		St:             st,
+		SubsCacheDir:   t.TempDir(),
+		ExtractConns:   1,
+		ExtractTimeout: 50 * time.Millisecond,
+	}
+	if err := p.JobHandler()(context.Background(), probeJob(t, m.ID), func(float64) {}); err != nil {
+		t.Fatalf("probe job must handle a media-level timeout: %v", err)
+	}
+	assertProbeLogs(t, logs, "stage=extraction timed out")
+	got, err := st.GetMedia(m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != "no_subs" {
+		t.Fatalf("timed-out extraction status = %+v, want no_subs", got)
+	}
+	if !strings.Contains(got.Error, "timed out") {
+		t.Fatalf("media error = %q, want timeout note", got.Error)
+	}
+}

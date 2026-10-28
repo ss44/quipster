@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -33,14 +34,57 @@ type Job struct {
 	MediaChunks int64   `json:"mediaChunks"`
 }
 
+// JobSpec describes one queued job for EnqueueJobs.
+type JobSpec struct {
+	Type     string
+	Payload  string
+	Priority int
+}
+
 // EnqueueJob inserts a new queued job and returns its id.
 func (s *Store) EnqueueJob(jobType, payload string, priority int) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO jobs (type, payload, priority, status, created_at) VALUES (?,?,?,'queued',?)`,
-		jobType, payload, priority, nowMillis())
+	ids, err := s.EnqueueJobs([]JobSpec{{Type: jobType, Payload: payload, Priority: priority}})
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	if len(ids) != 1 {
+		return 0, errors.New("store: enqueue returned no job id")
+	}
+	return ids[0], nil
+}
+
+// EnqueueJobs inserts many queued jobs in one transaction. The scanner uses
+// this to hand off thousands of probes after a walk without paying one commit
+// (and one fsync) per file.
+func (s *Store) EnqueueJobs(specs []JobSpec) ([]int64, error) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer rollbackTx(tx)
+	stmt, err := tx.Prepare(`INSERT INTO jobs (type, payload, priority, status, created_at) VALUES (?,?,?,'queued',?)`)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, len(specs))
+	for i, spec := range specs {
+		res, err := stmt.Exec(spec.Type, spec.Payload, spec.Priority, nowMillis())
+		if err != nil {
+			return nil, err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		ids[i] = id
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // ClaimJob atomically claims the next queued job of the given types using a

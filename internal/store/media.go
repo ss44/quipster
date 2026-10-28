@@ -47,38 +47,100 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaFile, error) {
 	return &m, nil
 }
 
+// MediaUpsert is the scanner's metadata snapshot for one media file. It exists
+// so many file-system entries can be persisted in a single transaction instead
+// of paying one SQLite commit per file.
+type MediaUpsert struct {
+	Path      string
+	Container string
+	Title     string
+	ShowTitle string
+	Size      int64
+	Mtime     int64
+	Year      int
+	Season    int
+	Episode   int
+}
+
+// upsertMediaSQL updates only when size or mtime changed. The WHERE clause is
+// what makes scan idempotent: unchanged files return no row and therefore do
+// not enqueue another probe. Error rows are intentionally not special-cased;
+// retrying permanent failures on every scan creates an endless probe backlog.
+// Explicit reprobes still exist for operator-driven retries.
+const upsertMediaSQL = `INSERT INTO media_files (path, container, size_bytes, mtime, title, year, show_title, season, episode, status, added_at)
+	VALUES (?,?,?,?,?,?,?,?,?, 'pending', ?)
+	ON CONFLICT(path) DO UPDATE SET
+		container=excluded.container, size_bytes=excluded.size_bytes, mtime=excluded.mtime,
+		title=excluded.title, year=excluded.year, show_title=excluded.show_title,
+		season=excluded.season, episode=excluded.episode,
+		status = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN 'pending' ELSE media_files.status END,
+		error = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN '' ELSE media_files.error END,
+		optimization_flags = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN '' ELSE media_files.optimization_flags END,
+		optimization_checked = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN 0 ELSE media_files.optimization_checked END
+	WHERE excluded.size_bytes != media_files.size_bytes OR excluded.mtime != media_files.mtime
+	RETURNING id`
+
 // UpsertMedia inserts or refreshes a media file keyed on path. Returns the id,
 // and whether the row was newly created or changed (size/mtime delta).
 func (s *Store) UpsertMedia(path, container string, size int64, mtime int64, title string, year, season, episode int, showTitle string) (id int64, changed bool, err error) {
-	// RETURNING reports the id of both the inserted row and the conflicting row
-	// we updated. LastInsertId cannot be used here: an ON CONFLICT DO UPDATE is
-	// an update, so the connection's last-insert rowid stays pointing at an
-	// unrelated (or nonexistent) row and would enqueue jobs for the wrong media.
-	row := s.db.QueryRow(`INSERT INTO media_files (path, container, size_bytes, mtime, title, year, show_title, season, episode, status, added_at)
-		VALUES (?,?,?,?,?,?,?,?,?, 'pending', ?)
-		ON CONFLICT(path) DO UPDATE SET
-			container=excluded.container, size_bytes=excluded.size_bytes, mtime=excluded.mtime,
-			title=excluded.title, year=excluded.year, show_title=excluded.show_title,
-			season=excluded.season, episode=excluded.episode,
-			status = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN 'pending' ELSE media_files.status END,
-			error = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN '' ELSE media_files.error END,
-			optimization_flags = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN '' ELSE media_files.optimization_flags END,
-			optimization_checked = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN 0 ELSE media_files.optimization_checked END
-		WHERE excluded.size_bytes != media_files.size_bytes OR excluded.mtime != media_files.mtime OR media_files.status IN ('error')
-		RETURNING id`,
-		path, container, size, mtime, title, year, showTitle, season, episode, nowMillis())
-	if err := row.Scan(&id); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return 0, false, err
-		}
-		// The WHERE clause suppressed the update because the file is unchanged;
-		// resolve the existing row id explicitly.
-		if err := s.db.QueryRow(`SELECT id FROM media_files WHERE path=?`, path).Scan(&id); err != nil {
-			return 0, false, err
-		}
-		return id, false, nil
+	ids, changedRows, err := s.UpsertMediaBatch([]MediaUpsert{{
+		Path: path, Container: container, Size: size, Mtime: mtime,
+		Title: title, Year: year, Season: season, Episode: episode, ShowTitle: showTitle,
+	}})
+	if err != nil {
+		return 0, false, err
 	}
-	return id, true, nil
+	if len(ids) != 1 || len(changedRows) != 1 {
+		return 0, false, errors.New("store: media upsert returned no row")
+	}
+	return ids[0], changedRows[0], nil
+}
+
+// UpsertMediaBatch inserts or refreshes many media rows in one transaction.
+// It returns parallel slices of ids and change flags, in the same order as
+// entries. A suppressed update (unchanged file) resolves its id with a SELECT
+// inside the transaction so callers still receive a usable media id.
+func (s *Store) UpsertMediaBatch(entries []MediaUpsert) ([]int64, []bool, error) {
+	if len(entries) == 0 {
+		return nil, nil, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rollbackTx(tx)
+	// Prepared statements are owned by the transaction and are closed by
+	// Commit/Rollback, so there is no separate Close here.
+	stmt, err := tx.Prepare(upsertMediaSQL)
+	if err != nil {
+		return nil, nil, err
+	}
+	ids := make([]int64, len(entries))
+	changed := make([]bool, len(entries))
+	for i, e := range entries {
+		var id int64
+		err := stmt.QueryRow(e.Path, e.Container, e.Size, e.Mtime, e.Title, e.Year, e.ShowTitle,
+			e.Season, e.Episode, nowMillis()).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			// No row was updated because the file is unchanged. Resolve the
+			// existing row id in the same transaction so callers can still
+			// correlate it without a second round trip.
+			if serr := tx.QueryRow(`SELECT id FROM media_files WHERE path=?`, e.Path).Scan(&id); serr != nil {
+				return nil, nil, serr
+			}
+			ids[i] = id
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		ids[i] = id
+		changed[i] = true
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	return ids, changed, nil
 }
 
 // GetMedia returns a media row by id, or nil when not found.
@@ -223,12 +285,32 @@ func (s *Store) DeleteMissingUnder(base string, keep map[string]bool) ([]int64, 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for _, id := range remove {
-		if _, err := s.db.Exec(`DELETE FROM media_files WHERE id=?`, id); err != nil {
-			return remove, err
-		}
+	if err := s.DeleteMediaIDs(remove); err != nil {
+		return remove, err
 	}
 	return remove, nil
+}
+
+// DeleteMediaIDs removes media rows in bounded batches. A single DELETE per id
+// is unnecessarily slow during a large prune; IN chunks keep the statement
+// below SQLite's variable limit while still collapsing thousands of rows into
+// a handful of transactions.
+func (s *Store) DeleteMediaIDs(ids []int64) error {
+	const deleteBatch = 400 // stay well inside SQLITE_MAX_VARIABLE_NUMBER
+	for start := 0; start < len(ids); start += deleteBatch {
+		end := min(start+deleteBatch, len(ids))
+		chunk := ids[start:end]
+		ph := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		//nolint:gosec // only a parameter placeholder list is concatenated; ids are bound values.
+		if _, err := s.db.Exec(`DELETE FROM media_files WHERE id IN (`+ph+`)`, args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // MediaStatusCounts returns the number of media rows per status.

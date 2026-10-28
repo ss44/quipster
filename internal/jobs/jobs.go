@@ -3,8 +3,10 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -29,9 +31,16 @@ type Runner struct {
 	wg       sync.WaitGroup
 
 	activeMu sync.Mutex
-	active   map[int64]context.CancelFunc
+	active   map[int64]activeJob
 	stop     chan struct{}
 	stopOnce sync.Once
+}
+
+// activeJob tracks the cancel function and type of an in-flight job so the
+// scan gate can cancel only probes without disturbing a scan or clip job.
+type activeJob struct {
+	cancel  context.CancelFunc
+	jobType string
 }
 
 // NewRunner creates a Runner and starts its pause watcher.
@@ -43,7 +52,7 @@ func NewRunner(st *store.Store, workerName string) *Runner {
 		jobTimeout:  3 * time.Hour,
 		handlers:    map[string]Handler{},
 		quits:       map[string][]chan struct{}{},
-		active:      map[int64]context.CancelFunc{},
+		active:      map[int64]activeJob{},
 		stop:        make(chan struct{}),
 	}
 	go r.pauseWatcher()
@@ -137,7 +146,7 @@ func (r *Runner) run(jobType string, j *store.Job) {
 	ctx, cancel := context.WithTimeout(context.Background(), r.jobTimeout)
 	defer cancel()
 	r.activeMu.Lock()
-	r.active[j.ID] = cancel
+	r.active[j.ID] = activeJob{cancel: cancel, jobType: jobType}
 	r.activeMu.Unlock()
 	defer func() {
 		r.activeMu.Lock()
@@ -145,19 +154,38 @@ func (r *Runner) run(jobType string, j *store.Job) {
 		r.activeMu.Unlock()
 	}()
 
-	err := h(ctx, j, progress)
+	err := runRecover(ctx, h, j, progress)
 	if err == nil {
 		if ferr := r.st.FinishJob(j.ID, "done", ""); ferr != nil {
 			log.Printf("[jobs] finish error job %d: %v", j.ID, ferr)
 		}
 		return
 	}
+	r.handleRunError(j, err)
+}
+
+// handleRunError applies the retry policy: queue pauses and scan suspensions
+// requeue softly, ordinary failures consume an attempt, and exhausted jobs are
+// finished as errors.
+func (r *Runner) handleRunError(j *store.Job, err error) {
 	if paused, perr := r.st.GetQueuePaused(); perr == nil && paused {
 		log.Printf("[jobs] job %d (%s) interrupted by queue pause, requeueing", j.ID, j.Type)
 		if rerr := r.st.RequeueJobSoft(j.ID, "paused"); rerr != nil {
 			log.Printf("[jobs] soft requeue error job %d: %v", j.ID, rerr)
 		}
 		return
+	}
+	// The scan gate cancels in-flight probes to free storage I/O. Those are
+	// suspensions, not failures: requeue them without spending an attempt so
+	// repeated manual scans cannot exhaust a probe's retry budget.
+	if j.Type == "probe" && errors.Is(err, context.Canceled) {
+		if active, serr := r.st.HasActiveScanJob(); serr == nil && active {
+			log.Printf("[jobs] job %d (probe) suspended by active scan, requeueing without an attempt", j.ID)
+			if rerr := r.st.RequeueJobSoft(j.ID, "scan-active"); rerr != nil {
+				log.Printf("[jobs] soft requeue error job %d: %v", j.ID, rerr)
+			}
+			return
+		}
 	}
 	if j.Attempts < r.maxAttempts {
 		log.Printf("[jobs] job %d (%s) attempt %d failed, requeueing: %v", j.ID, j.Type, j.Attempts, err)
@@ -172,29 +200,62 @@ func (r *Runner) run(jobType string, j *store.Job) {
 	}
 }
 
+// runRecover executes a handler and converts a panic into a job error. A
+// panic in one media handler must not take down the whole process and leave
+// its scan row (and every other worker) stuck until a restart.
+func runRecover(ctx context.Context, h Handler, j *store.Job, progress func(float64)) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[jobs] job %d (%s) panic: %v\n%s", j.ID, j.Type, rec, debug.Stack())
+			err = fmt.Errorf("panic: %v", rec)
+		}
+	}()
+	return h(ctx, j, progress)
+}
+
 // Stop signals all workers and waits for the current job of each to wind down.
+// In-flight handlers are canceled first; otherwise a handler blocked on slow
+// media I/O would hold shutdown open indefinitely.
 func (r *Runner) Stop() {
-	r.mu.Lock()
-	quits := make([]chan struct{}, 0, 8)
-	for _, qs := range r.quits {
-		quits = append(quits, qs...)
-	}
-	r.mu.Unlock()
-	r.stopOnce.Do(func() { close(r.stop) })
-	for _, q := range quits {
-		close(q)
-	}
-	r.wg.Wait()
+	r.stopOnce.Do(func() {
+		r.mu.Lock()
+		quits := make([]chan struct{}, 0, 8)
+		for _, qs := range r.quits {
+			quits = append(quits, qs...)
+		}
+		r.mu.Unlock()
+		close(r.stop)
+		for _, q := range quits {
+			close(q)
+		}
+		r.CancelActive()
+		r.wg.Wait()
+	})
 }
 
 // CancelActive interrupts all in-flight jobs (used by queue pause/stop).
 func (r *Runner) CancelActive() int {
 	r.activeMu.Lock()
 	defer r.activeMu.Unlock()
-	for _, cancel := range r.active {
-		cancel()
+	for _, job := range r.active {
+		job.cancel()
 	}
 	return len(r.active)
+}
+
+// CancelActiveType interrupts only jobs of the given type and returns how many
+// were canceled. The scan gate uses it to make room on the media share.
+func (r *Runner) CancelActiveType(jobType string) int {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
+	n := 0
+	for _, job := range r.active {
+		if job.jobType == jobType {
+			job.cancel()
+			n++
+		}
+	}
+	return n
 }
 
 // pauseWatcher reacts to the persisted pause flag: workers in any role stop

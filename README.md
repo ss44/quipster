@@ -235,8 +235,10 @@ switching models or dimensions to be safe.
 | `MEILI_URL` | `http://localhost:7700` | Meilisearch endpoint |
 | `MEILI_MASTER_KEY` | — | Meilisearch key |
 | `SCAN_INTERVAL` | off | e.g. `12h` periodic rescan |
+| `SCAN_TIMEOUT` | `2h` | hard per-scan cap; `0` disables it and leaves `JOB_TIMEOUT` as the only bound |
 | `SUBTITLE_WORKERS` | `4` | probe/extract/chunk worker pool |
 | `EXTRACT_CONNS` | `4` | parallel embedded-subtitle extractions (each scans the whole file; tune to storage throughput) |
+| `EXTRACT_TIMEOUT` | `10m` | per-embedded-subtitle extraction cap; a stalled ffmpeg is killed and the media marked `no_subs` with a note |
 | `PROBE_TIMEOUT` | `60s` | per-file ffprobe cap; a stalled probe is killed and the file marked errored instead of blocking the queue |
 | `JOB_TIMEOUT` | `3h` | hard per-job timeout |
 | `INDEX_WORKERS` | `1` | Meili indexer pool |
@@ -430,6 +432,12 @@ silently creating host directories.
 - Probing is bounded so file size cannot stall ingestion: ffprobe runs with a 10-second analysis
   window and a 50 MiB probe budget, and is killed after `PROBE_TIMEOUT` (default 60s); pathological
   files (e.g. missing `moov`/cues index) are marked errored and skipped instead of blocking the queue.
+- Scans are metadata-only and exclusive: while a scan walks the library, in-flight probes are
+  canceled/requeued and new probes wait, so full-file subtitle extraction cannot starve the scan on
+  Samba/NFS. Media upserts, probe enqueueing, and prune deletes are batched, and the scanner logs
+  heartbeat progress plus the current path every couple of seconds.
+- A scan never prunes when any directory or file stat failed; a transient network error leaves the
+  existing rows in place and is reported in the log instead of deleting a chunk of the library.
 - Subtitle indexing is English-only for now; see [Roadmap](#roadmap) for what is next.
 - mp4 stream-copy falls back to Matroska output when codecs are not mp4-compatible.
 - The Meili index is derived state — `POST /api/admin/reindex` rebuilds it from SQLite.

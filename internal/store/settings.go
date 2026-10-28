@@ -76,6 +76,12 @@ func (s *Store) SetLibraryPaths(paths []string) error {
 
 // Recover resets jobs that were mid-flight when the process died so they can be retried.
 func (s *Store) Recover() error {
-	_, err := s.db.Exec(`UPDATE jobs SET status='queued', worker_id='' WHERE status='running'`)
+	// A process restart cannot preserve the goroutine that owned a running
+	// scan. Leaving the scans row "running" would pin the admin UI forever and
+	// make RunningScan report a phantom scan, so close it out as failed.
+	if _, err := s.db.Exec(`UPDATE jobs SET status='queued', worker_id='' WHERE status='running'`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`UPDATE scans SET status='error', finished_at=? WHERE status='running'`, nowMillis())
 	return err
 }

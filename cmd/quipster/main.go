@@ -33,27 +33,29 @@ import (
 
 //nolint:govet // field grouping favors readability over optimal alignment.
 type config struct {
-	addr         string
-	role         string
-	dataDir      string
-	mediaDir     string
-	cacheDir     string
-	meiliURL     string
-	meiliKey     string
-	apiToken     string
-	previewRes   string
-	accurateRes  string
-	cpuPreset    string
-	subWorkers   int
-	indexWorkers int
-	clipWorkers  int
-	scanIntvl    time.Duration
-	padMs        int
-	maxClipSec   float64
-	cacheMaxGB   float64
-	longCutSec   float64
-	probeTimeout time.Duration
-	logs         *logbuf.Buffer
+	addr           string
+	role           string
+	dataDir        string
+	mediaDir       string
+	cacheDir       string
+	meiliURL       string
+	meiliKey       string
+	apiToken       string
+	previewRes     string
+	accurateRes    string
+	cpuPreset      string
+	subWorkers     int
+	indexWorkers   int
+	clipWorkers    int
+	scanIntvl      time.Duration
+	padMs          int
+	maxClipSec     float64
+	cacheMaxGB     float64
+	longCutSec     float64
+	probeTimeout   time.Duration
+	scanTimeout    time.Duration
+	extractTimeout time.Duration
+	logs           *logbuf.Buffer
 }
 
 func envStr(key, def string) string {
@@ -83,26 +85,28 @@ func envFloat(key string, def float64) float64 {
 
 func loadConfig() config {
 	return config{
-		addr:         envStr("ADDR", ":8080"),
-		role:         strings.ToLower(envStr("ROLE", "all")),
-		dataDir:      envStr("DATA_DIR", "./data"),
-		mediaDir:     envStr("MEDIA_DIR", "./media"),
-		cacheDir:     envStr("CACHE_DIR", "./cache"),
-		meiliURL:     envStr("MEILI_URL", "http://localhost:7700"),
-		meiliKey:     envStr("MEILI_MASTER_KEY", ""),
-		scanIntvl:    parseDuration(envStr("SCAN_INTERVAL", "")),
-		subWorkers:   envInt("SUBTITLE_WORKERS", 4),
-		indexWorkers: envInt("INDEX_WORKERS", 4),
-		clipWorkers:  envInt("CLIP_WORKERS", 2),
-		apiToken:     os.Getenv("API_TOKEN"),
-		padMs:        envInt("CLIP_PAD_MS", 250),
-		maxClipSec:   envFloat("MAX_CLIP_SEC", 120),
-		cacheMaxGB:   envFloat("CACHE_MAX_GB", 10),
-		longCutSec:   envFloat("LONG_CUT_SEC", 20),
-		probeTimeout: parseDuration(envStr("PROBE_TIMEOUT", "")),
-		previewRes:   envStr("CLIP_PREVIEW_RES", ""),
-		accurateRes:  envStr("CLIP_ACCURATE_RES", ""),
-		cpuPreset:    envStr("CLIP_CPU_PRESET", ""),
+		addr:           envStr("ADDR", ":8080"),
+		role:           strings.ToLower(envStr("ROLE", "all")),
+		dataDir:        envStr("DATA_DIR", "./data"),
+		mediaDir:       envStr("MEDIA_DIR", "./media"),
+		cacheDir:       envStr("CACHE_DIR", "./cache"),
+		meiliURL:       envStr("MEILI_URL", "http://localhost:7700"),
+		meiliKey:       envStr("MEILI_MASTER_KEY", ""),
+		scanIntvl:      parseDuration(envStr("SCAN_INTERVAL", "")),
+		subWorkers:     envInt("SUBTITLE_WORKERS", 4),
+		indexWorkers:   envInt("INDEX_WORKERS", 4),
+		clipWorkers:    envInt("CLIP_WORKERS", 2),
+		apiToken:       os.Getenv("API_TOKEN"),
+		padMs:          envInt("CLIP_PAD_MS", 250),
+		maxClipSec:     envFloat("MAX_CLIP_SEC", 120),
+		cacheMaxGB:     envFloat("CACHE_MAX_GB", 10),
+		longCutSec:     envFloat("LONG_CUT_SEC", 20),
+		probeTimeout:   parseDuration(envStr("PROBE_TIMEOUT", "")),
+		scanTimeout:    parseDuration(envStr("SCAN_TIMEOUT", "2h")),
+		extractTimeout: parseDuration(envStr("EXTRACT_TIMEOUT", "10m")),
+		previewRes:     envStr("CLIP_PREVIEW_RES", ""),
+		accurateRes:    envStr("CLIP_ACCURATE_RES", ""),
+		cpuPreset:      envStr("CLIP_CPU_PRESET", ""),
 	}
 }
 
@@ -129,14 +133,19 @@ func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *i
 			log.Printf("delete media docs %v: %v", ids, err)
 		}
 	}
-	runner.Register("scan", 1, scan.JobHandler(cfg.mediaDir, st, onDeleted))
+	// A scan is metadata-only and must not compete with full-file subtitle
+	// extraction on a network share. The gate makes scans exclusive: in-flight
+	// probes are canceled and requeued, and new probes wait for the walk.
+	gate := jobs.NewGate(runner)
+	runner.Register("scan", 1, gate.Scan(scan.JobHandler(cfg.mediaDir, st, onDeleted, scan.WithTimeout(cfg.scanTimeout))))
 	pipeline := &probe.Pipeline{
-		St:           st,
-		SubsCacheDir: filepath.Join(cfg.cacheDir, "subs"),
-		ExtractConns: envInt("EXTRACT_CONNS", 4),
-		ProbeTimeout: cfg.probeTimeout,
+		St:             st,
+		SubsCacheDir:   filepath.Join(cfg.cacheDir, "subs"),
+		ExtractConns:   envInt("EXTRACT_CONNS", 4),
+		ProbeTimeout:   cfg.probeTimeout,
+		ExtractTimeout: cfg.extractTimeout,
 	}
-	runner.Register("probe", cfg.subWorkers, pipeline.JobHandler())
+	runner.Register("probe", cfg.subWorkers, gate.Probe(pipeline.JobHandler()))
 	runner.Register("index", cfg.indexWorkers, ix.JobHandler())
 	runner.Register("clip", cfg.clipWorkers, clipSvc.JobHandler())
 }
