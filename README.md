@@ -95,6 +95,16 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
 
 ## Development
 
+The easiest way to run the full stack locally with hot-reloading is using the included dev script. It will automatically spin up an ephemeral Meilisearch container, generate dummy media test data, run the Go backend, and launch the Vite frontend server.
+
+```sh
+./dev.sh
+```
+
+When you stop the script (`Ctrl+C`), it cleans up the background processes and containers automatically.
+
+Manual commands:
+
 ```sh
 (cd web && npm install && npm run dev)      # Vite dev server proxies /api → :8080
 go run ./cmd/quipster                        # API + workers in one process

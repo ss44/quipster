@@ -1,3 +1,5 @@
+// Package probe wraps ffprobe/ffmpeg to inspect media files, pick the best
+// audio and text-subtitle tracks, and extract embedded subtitles to SRT.
 package probe
 
 import (
@@ -27,58 +29,66 @@ const (
 	defaultProbeTimeout = 60 * time.Second
 )
 
+// SubtitleStream describes one embedded subtitle stream reported by ffprobe.
 type SubtitleStream struct {
-	Index   int    // absolute ffprobe stream index
-	Ordinal int    // index among subtitle streams only
 	Codec   string // subrip, mov_text, ass, ...
 	Lang    string
+	Index   int // absolute ffprobe stream index
+	Ordinal int // index among subtitle streams only
 }
 
+// AudioStream describes one audio track reported by ffprobe.
 type AudioStream struct {
-	Index    int // absolute ffprobe stream index
-	Ordinal  int // index among audio streams only
 	Codec    string
 	Lang     string
 	Title    string // track title, e.g. "Commentary"
-	Default  bool
+	Index    int    // absolute ffprobe stream index
+	Ordinal  int    // index among audio streams only
 	Channels int
+	Default  bool
 }
 
+// Result is the probe summary of a media file: format metadata plus the
+// audio and subtitle streams relevant for clip building.
 type Result struct {
-	Duration   float64
-	Width      int
-	Height     int
 	VideoCodec string
 	AudioCodec string
 	Container  string
-	StartTime  float64
 	Subs       []SubtitleStream
 	Audio      []AudioStream
+	Duration   float64
+	Width      int
+	Height     int
+	StartTime  float64
 }
 
+// ffprobeOut mirrors the subset of ffprobe JSON output the pipeline consumes.
+// Fields are ordered for compact layout; JSON decoding is name-based.
 type ffprobeOut struct {
-	Streams []struct {
-		Index       int    `json:"index"`
-		CodecName   string `json:"codec_name"`
-		CodecType   string `json:"codec_type"`
-		Width       int    `json:"width"`
-		Height      int    `json:"height"`
-		Channels    int    `json:"channels"`
-		Duration    string `json:"duration"`
-		Disposition struct {
-			Default int `json:"default"`
-		} `json:"disposition"`
-		Tags map[string]string `json:"tags"`
-	} `json:"streams"`
 	Format struct {
 		FormatName string `json:"format_name"`
 		Duration   string `json:"duration"`
 		StartTime  string `json:"start_time"`
 	} `json:"format"`
+	Streams []struct {
+		Tags        map[string]string `json:"tags"`
+		CodecName   string            `json:"codec_name"`
+		CodecType   string            `json:"codec_type"`
+		Duration    string            `json:"duration"`
+		Index       int               `json:"index"`
+		Width       int               `json:"width"`
+		Height      int               `json:"height"`
+		Channels    int               `json:"channels"`
+		Disposition struct {
+			Default int `json:"default"`
+		} `json:"disposition"`
+	} `json:"streams"`
 }
 
+// FfprobeBin resolves the ffprobe binary, overridable via FFPROBE_BIN.
 func FfprobeBin() string { return envOr("FFPROBE_BIN", "ffprobe") }
 
+// FfmpegBin resolves the ffmpeg binary, overridable via FFMPEG_BIN.
 func FfmpegBin() string { return envOr("FFMPEG_BIN", "ffmpeg") }
 
 func envOr(k, d string) string {
@@ -134,11 +144,11 @@ func stderrDetail(err error) string {
 	return ": " + s
 }
 
-// Probe runs ffprobe and summarises streams of interest. ctx must be non-nil
+// Probe runs ffprobe and summarizes streams of interest. ctx must be non-nil
 // and bounds the run: expiry kills ffprobe and returns a context error the
 // caller can detect with errors.Is.
 func Probe(ctx context.Context, path string) (*Result, error) {
-	out, err := exec.CommandContext(ctx, FfprobeBin(), probeArgs(path)...).Output()
+	out, err := exec.CommandContext(ctx, FfprobeBin(), probeArgs(path)...).Output() //nolint:gosec // probing user-supplied media paths is the package's purpose
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, fmt.Errorf("ffprobe %s: %w", path, cerr)
@@ -153,8 +163,10 @@ func Probe(ctx context.Context, path string) (*Result, error) {
 		Duration:  fileDuration(&o),
 		Container: o.Format.FormatName,
 	}
-	if o.Format.StartTime != "" {
-		r.StartTime, _ = strconv.ParseFloat(o.Format.StartTime, 64)
+	// start_time is best-effort metadata; a missing or unparsable value
+	// simply means no drift correction later.
+	if st, err := strconv.ParseFloat(o.Format.StartTime, 64); err == nil {
+		r.StartTime = st
 	}
 	ord := 0
 	audioOrd := 0
@@ -251,7 +263,7 @@ func IsTextSubtitle(codec string) bool { return textSubCodecs[strings.ToLower(co
 // ExtractSubtitle dumps one subtitle stream to SRT. Extraction requires
 // scanning the whole container, so callers should bound ctx.
 func ExtractSubtitle(ctx context.Context, path string, ordinal int, outPath string) error {
-	cmd := exec.CommandContext(ctx, FfmpegBin(), "-v", "error", "-y", "-i", path,
+	cmd := exec.CommandContext(ctx, FfmpegBin(), "-v", "error", "-y", "-i", path, //nolint:gosec // extracting from user-supplied media paths is the package's purpose
 		"-map", fmt.Sprintf("0:s:%d", ordinal), "-vn", "-an", "-c:s", "srt", outPath)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("extract subtitle stream %d: %w: %s", ordinal, err, strings.TrimSpace(string(b)))

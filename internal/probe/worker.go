@@ -21,6 +21,7 @@ import (
 // cue store → chunk build → enqueue index job.
 type Pipeline struct {
 	St           *store.Store
+	extractSem   chan struct{}
 	SubsCacheDir string
 	// ExtractConns bounds parallel embedded-subtitle extractions; each one
 	// scans the entire media file, so unbounded parallelism thrashes storage.
@@ -29,7 +30,6 @@ type Pipeline struct {
 	// timed-out probe is killed and the file skipped instead of stalling the
 	// queue (issue #1).
 	ProbeTimeout time.Duration
-	extractSem   chan struct{}
 	once         sync.Once
 }
 
@@ -52,6 +52,11 @@ func (p *Pipeline) sem() chan struct{} {
 }
 
 // JobHandler adapts Pipeline to the job runner.
+//
+// The flow is deliberately kept linear: splitting it across helpers would
+// scatter the media status transitions it must keep coherent.
+//
+//nolint:gocyclo // sequential store pipeline
 func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64)) error {
 	return func(ctx context.Context, j *store.Job, progress func(float64)) error {
 		var payload struct {
@@ -67,10 +72,12 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 		if m == nil {
 			return nil
 		}
-		fi, err := os.Stat(m.Path)
-		if err != nil {
-			p.St.SetMediaStatus(m.ID, "error", "media file missing on disk")
-			return nil
+		fi, serr := os.Stat(m.Path)
+		if serr != nil {
+			// The job itself is handled: record the media as errored and
+			// let the queue move on instead of spinning on retries.
+			p.recordStatus(m.ID, "error", "media file missing on disk")
+			return nil //nolint:nilerr // intentional: media-level failure, not job failure
 		}
 		progress(0.05)
 
@@ -93,8 +100,8 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 				note = fmt.Sprintf("probe timed out after %s; file skipped", p.probeTimeout())
 			}
 			log.Printf("[probe] media %d %s: probe failed after %s: %s", m.ID, m.Path, elapsed, note)
-			p.St.SetMediaStatus(m.ID, "error", note)
-			return nil
+			p.recordStatus(m.ID, "error", note)
+			return nil //nolint:nilerr // intentional: media-level failure, not job failure
 		}
 		log.Printf("[probe] media %d %s: probe ok in %s", m.ID, m.Path, elapsed)
 		audioOrdinal, audioLang := 0, ""
@@ -103,8 +110,8 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 		} else {
 			audioOrdinal = -1
 		}
-		if err := p.St.UpdateMediaProbe(m.ID, res.Duration, res.Width, res.Height, res.VideoCodec, res.AudioCodec, res.Container, res.StartTime, audioOrdinal, audioLang); err != nil {
-			return err
+		if uerr := p.St.UpdateMediaProbe(m.ID, res.Duration, res.Width, res.Height, res.VideoCodec, res.AudioCodec, res.Container, res.StartTime, audioOrdinal, audioLang); uerr != nil {
+			return uerr
 		}
 		progress(0.3)
 
@@ -174,11 +181,11 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 		}
 
 		if len(cues) == 0 {
-			if err := p.St.CleanSubtitles(m.ID); err != nil {
-				return err
+			if cerr := p.St.CleanSubtitles(m.ID); cerr != nil {
+				return cerr
 			}
-			if err := p.St.SetMediaStatus(m.ID, "no_subs", note); err != nil {
-				return err
+			if serr := p.St.SetMediaStatus(m.ID, "no_subs", note); serr != nil {
+				return serr
 			}
 			log.Printf("[probe] media %d %s: no English subtitles (%s)", m.ID, m.Path, note)
 			return nil
@@ -219,18 +226,30 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 		}
 		progress(0.85)
 
-		payloadB, _ := json.Marshal(map[string]any{"mediaId": m.ID})
+		payloadB, merr := json.Marshal(map[string]any{"mediaId": m.ID})
+		if merr != nil {
+			return fmt.Errorf("marshal index payload: %w", merr)
+		}
 		if _, err := p.St.EnqueueJob("index", string(payloadB), 1); err != nil {
 			return err
 		}
 		if note != "" {
-			p.St.SetMediaStatus(m.ID, "pending", note)
+			p.recordStatus(m.ID, "pending", note)
 		}
 		return nil
 	}
 }
 
-func detectSidecarLang(path string) string {
+// recordStatus persists a media status change; failures are logged rather
+// than returned because the caller has usually already committed the primary
+// outcome (cues, chunks, job) and must not fail the job over a status write.
+func (p *Pipeline) recordStatus(mediaID int64, status, msg string) {
+	if err := p.St.SetMediaStatus(mediaID, status, msg); err != nil {
+		log.Printf("[probe] media %d: set status %q failed: %v", mediaID, status, err)
+	}
+}
+
+func detectSidecarLang(_ string) string {
 	return "en"
 }
 

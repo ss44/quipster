@@ -99,7 +99,7 @@ func TestProbeArgs(t *testing.T) {
 func writeFakeFfprobe(t *testing.T, body string) {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "ffprobe.sh")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil { //nolint:gosec // mock binary must stay executable
 		t.Fatalf("write fake ffprobe: %v", err)
 	}
 	t.Setenv("FFPROBE_BIN", bin)
@@ -163,5 +163,16 @@ func TestProbeSurfacesStderr(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "moov atom not found") {
 		t.Fatalf("expected stderr in error, got %v", err)
+	}
+}
+
+func TestPickEnglishAudioAllUnusable(t *testing.T) {
+	tracks := []AudioStream{
+		{Ordinal: 0, Codec: "aac", Lang: "en", Title: "Commentary"},
+		{Ordinal: 1, Codec: "ac3", Lang: "en", Title: "Audio Description"},
+	}
+	got := PickEnglishAudio(tracks)
+	if got == nil || got.Ordinal != 0 {
+		t.Fatalf("expected raw first track when every track is commentary/description, got %+v", got)
 	}
 }

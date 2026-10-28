@@ -8,3 +8,6 @@ web/dist/
 .env
 web/dist/*
 !web/dist/.gitkeep
+coverage.out
+coverage.html
+/quipster

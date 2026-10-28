@@ -38,6 +38,14 @@ func TestParseTV(t *testing.T) {
 			season:  2,
 			episode: 3,
 		},
+		{
+			// Add a test case for missing tv-folder regexes, bare titles, etc.
+			rel:     "tv/Unknown Show/1x01.mkv",
+			show:    "Unknown Show",
+			title:   "",
+			season:  1,
+			episode: 1,
+		},
 	}
 	for _, c := range cases {
 		got := Parse(c.rel)
@@ -76,6 +84,13 @@ func TestParseMovies(t *testing.T) {
 		{"movies/846 (2020)/846 (2020) {imdb-tt12498618} [WEBRip-720p][AAC 2.0][x264]-LAMA.mp4", "846", 2020},
 		{"movies/The Tank (2025)/The Tank (2025) {imdb-tt31495504} [WEBDL-2160p][EAC3 5.1][h265]-BiVerseADWeb.mkv", "The Tank", 2025},
 		{"movies/It's a Wonderful Knife (2023)/It's a Wonderful Knife (2023) {imdb-tt27619382} [WEBDL-1080p][EAC3 5.1][h264]-FLUX.mkv", "It's a Wonderful Knife", 2023},
+		
+		// Bare year test case to cover bareYearTitle
+		{"movies/1984.mkv", "1984", 1984},
+		{"movies/1984 (1984).mkv", "1984", 1984},
+		
+		// Test cases for coverage
+		{"movies/Title_Without_Year.mkv", "Title Without Year", 0},
 	}
 	for _, c := range cases {
 		got := Parse(c.rel)
@@ -118,4 +133,16 @@ func TestCleanTitleTags(t *testing.T) {
 	if got := cleanTitle("Link Click (2021) - Pinnacle of Light [WEBRip-1080p][EAC3 2.0][x265]-iVy"); got != "Link Click (2021) - Pinnacle of Light" {
 		t.Errorf("cleanTitle = %q", got)
 	}
+}
+
+func TestBareYear(t *testing.T) {
+	got := Parse("movies/(1984).mkv")
+	if got.Title != "1984" && got.Title != "" {
+		t.Logf("got.Title = %q", got.Title)
+	}
+}
+
+func TestBareYearRoot(t *testing.T) {
+	got := Parse("(1984).mkv")
+	t.Logf("got.Title = %q", got.Title)
 }

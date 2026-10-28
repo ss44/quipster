@@ -19,7 +19,11 @@ func openWorkerTestStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() {
+		if cerr := st.Close(); cerr != nil {
+			t.Errorf("close store: %v", cerr)
+		}
+	})
 	return st
 }
 
@@ -36,8 +40,12 @@ func upsertTestMedia(t *testing.T, st *store.Store) int64 {
 	return id
 }
 
-func probeJob(id int64) *store.Job {
-	payload, _ := json.Marshal(map[string]any{"mediaId": id})
+func probeJob(t *testing.T, id int64) *store.Job {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{"mediaId": id})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &store.Job{ID: id, Type: "probe", Payload: string(payload)}
 }
 
@@ -49,7 +57,7 @@ func TestJobHandlerSkipsTimedOutProbe(t *testing.T) {
 	writeFakeFfprobe(t, "while :; do :; done")
 
 	p := &Pipeline{St: st, SubsCacheDir: t.TempDir(), ProbeTimeout: 100 * time.Millisecond}
-	if err := p.JobHandler()(context.Background(), probeJob(id), func(float64) {}); err != nil {
+	if err := p.JobHandler()(context.Background(), probeJob(t, id), func(float64) {}); err != nil {
 		t.Fatalf("timed-out probe must finish the job, got %v", err)
 	}
 	m, err := st.GetMedia(id)
@@ -71,7 +79,7 @@ func TestJobHandlerRequeuesOnCanceledContext(t *testing.T) {
 	p := &Pipeline{St: st, SubsCacheDir: t.TempDir(), ProbeTimeout: time.Minute}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := p.JobHandler()(ctx, probeJob(id), func(float64) {}); !errors.Is(err, context.Canceled) {
+	if err := p.JobHandler()(ctx, probeJob(t, id), func(float64) {}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled job context must surface for requeue, got %v", err)
 	}
 	m, err := st.GetMedia(id)
@@ -80,5 +88,35 @@ func TestJobHandlerRequeuesOnCanceledContext(t *testing.T) {
 	}
 	if m.Status != "pending" {
 		t.Fatalf("canceled job must not mark media errored, got %q", m.Status)
+	}
+}
+
+func TestClampMin(t *testing.T) {
+	if got := clampMin(5.0); got != 5.0 {
+		t.Errorf("clampMin(5.0) = %v, want 5.0", got)
+	}
+	if got := clampMin(-1.2); got != 0 {
+		t.Errorf("clampMin(-1.2) = %v, want 0", got)
+	}
+}
+
+func TestDetectSidecarLang(t *testing.T) {
+	if got := detectSidecarLang("some_file.srt"); got != "en" {
+		t.Errorf("detectSidecarLang() = %v, want en", got)
+	}
+}
+
+func TestPipelineSem(t *testing.T) {
+	p := &Pipeline{ExtractConns: 3}
+	s := p.sem()
+	if cap(s) != 3 {
+		t.Errorf("expected cap 3, got %d", cap(s))
+	}
+
+	// Default
+	p2 := &Pipeline{}
+	s2 := p2.sem()
+	if cap(s2) != 2 {
+		t.Errorf("expected default cap 2, got %d", cap(s2))
 	}
 }
