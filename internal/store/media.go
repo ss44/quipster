@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 )
 
@@ -49,7 +50,11 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaFile, error) {
 // UpsertMedia inserts or refreshes a media file keyed on path. Returns the id,
 // and whether the row was newly created or changed (size/mtime delta).
 func (s *Store) UpsertMedia(path, container string, size int64, mtime int64, title string, year, season, episode int, showTitle string) (id int64, changed bool, err error) {
-	res, err := s.db.Exec(`INSERT INTO media_files (path, container, size_bytes, mtime, title, year, show_title, season, episode, status, added_at)
+	// RETURNING reports the id of both the inserted row and the conflicting row
+	// we updated. LastInsertId cannot be used here: an ON CONFLICT DO UPDATE is
+	// an update, so the connection's last-insert rowid stays pointing at an
+	// unrelated (or nonexistent) row and would enqueue jobs for the wrong media.
+	row := s.db.QueryRow(`INSERT INTO media_files (path, container, size_bytes, mtime, title, year, show_title, season, episode, status, added_at)
 		VALUES (?,?,?,?,?,?,?,?,?, 'pending', ?)
 		ON CONFLICT(path) DO UPDATE SET
 			container=excluded.container, size_bytes=excluded.size_bytes, mtime=excluded.mtime,
@@ -57,28 +62,21 @@ func (s *Store) UpsertMedia(path, container string, size int64, mtime int64, tit
 			season=excluded.season, episode=excluded.episode,
 			status = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN 'pending' ELSE media_files.status END,
 			error = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN '' ELSE media_files.error END
-		WHERE excluded.size_bytes != media_files.size_bytes OR excluded.mtime != media_files.mtime OR media_files.status IN ('error')`,
+		WHERE excluded.size_bytes != media_files.size_bytes OR excluded.mtime != media_files.mtime OR media_files.status IN ('error')
+		RETURNING id`,
 		path, container, size, mtime, title, year, showTitle, season, episode, nowMillis())
-	if err != nil {
-		return 0, false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, false, err
-	}
-	if n > 0 {
-		newID, err := res.LastInsertId()
-		if err != nil {
+	if err := row.Scan(&id); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
 			return 0, false, err
 		}
-		return newID, true, nil
+		// The WHERE clause suppressed the update because the file is unchanged;
+		// resolve the existing row id explicitly.
+		if err := s.db.QueryRow(`SELECT id FROM media_files WHERE path=?`, path).Scan(&id); err != nil {
+			return 0, false, err
+		}
+		return id, false, nil
 	}
-	// No rows changed: fetch existing id.
-	row := s.db.QueryRow(`SELECT id FROM media_files WHERE path=?`, path)
-	if err := row.Scan(&id); err != nil {
-		return 0, false, err
-	}
-	return id, false, nil
+	return id, true, nil
 }
 
 // GetMedia returns a media row by id, or nil when not found.
