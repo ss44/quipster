@@ -7,6 +7,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMediaOptimizationStats(t *testing.T) {
+	db := openTest(t)
+	first, _, err := db.UpsertMedia("/foo/a.mkv", "matroska", 1, 1, "A", 0, 0, 0, "")
+	require.NoError(t, err)
+	second, _, err := db.UpsertMedia("/foo/b.mkv", "matroska", 1, 1, "B", 0, 0, 0, "")
+	require.NoError(t, err)
+	require.NoError(t, db.UpdateMediaOptimizationFlags(first, []string{"high_video_bitrate", "audio_codec_compatibility"}))
+	require.NoError(t, db.UpdateMediaOptimizationFlags(second, []string{"high_video_bitrate"}))
+
+	scanned, recommended, codes, err := db.MediaOptimizationStats()
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), scanned)
+	assert.Equal(t, int64(2), recommended)
+	assert.Equal(t, map[string]int64{"high_video_bitrate": 2, "audio_codec_compatibility": 1}, codes)
+
+	_, changed, err := db.UpsertMedia("/foo/a.mkv", "matroska", 2, 2, "A", 0, 0, 0, "")
+	require.NoError(t, err)
+	assert.True(t, changed)
+	scanned, recommended, codes, err = db.MediaOptimizationStats()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), scanned)
+	assert.Equal(t, int64(1), recommended)
+	assert.Equal(t, map[string]int64{"high_video_bitrate": 1}, codes)
+}
+
 func TestMedia(t *testing.T) {
 	db := openTest(t)
 

@@ -101,6 +101,7 @@ func Router(d Deps) http.Handler {
 		r.Get("/api/admin/diagnostics/system", d.handleDiagnosticsSystem)
 		r.Get("/api/admin/diagnostics/metrics", d.handleDiagnosticsMetrics)
 		r.Get("/api/admin/diagnostics/benchmarks", d.handleDiagnosticsBenchmarks)
+		r.Get("/api/admin/diagnostics/media-optimization", d.handleDiagnosticsMediaOptimization)
 		r.Get("/api/admin/diagnostics/stream", d.handleDiagnosticsStream)
 		r.Post("/api/admin/diagnostics/probe", d.handleDiagnosticsProbe)
 		r.Get("/api/admin/diagnostics/bundle", d.handleDiagnosticsBundle)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,6 +48,8 @@ func (c *Collector) Report(ctx context.Context) string {
 			fmt.Fprintf(&b, "Library: %d files · %d indexed · %d errors\n", total, counts["indexed"], counts["error"])
 		}
 	}
+	mediaOptimization := c.MediaOptimizationStats()
+	fmt.Fprintf(&b, "Media optimization: %d of %d probed files flagged · %s\n", mediaOptimization.Recommended, mediaOptimization.Scanned, optimizationCodeSummary(mediaOptimization.Codes))
 	fmt.Fprintf(&b, "Search: %s\n", online(sys.MeiliUp))
 	fmt.Fprintf(&b, "Cache: %s\n", fmtBytes(gauge.CacheBytes))
 
@@ -94,6 +97,7 @@ func (c *Collector) Bundle(ctx context.Context, opts BundleOptions) ([]byte, err
 		{"system.json", sys},
 		{"metrics.json", gauge},
 		{"benchmarks.json", bench},
+		{"media-optimization.json", c.MediaOptimizationStats()},
 		{"jobs.json", jobs},
 	}
 	for _, f := range files {
@@ -112,6 +116,7 @@ func (c *Collector) Bundle(ctx context.Context, opts BundleOptions) ([]byte, err
 		"system.json: environment, hardware selection and effective settings\n" +
 		"metrics.json: latest resource snapshot\n" +
 		"benchmarks.json: 24h job performance aggregates\n" +
+		"media-optimization.json: persisted metadata-based media recommendations\n" +
 		"jobs.json: most recent 200 jobs\n" +
 		"logs.txt: most recent application log lines\n\n" +
 		"Secrets are redacted. Media paths are " + boolWord(opts.IncludePaths, "included", "redacted") + ".\n"
@@ -189,6 +194,24 @@ func hardwareLine(s hardware.Status) string {
 		return fmt.Sprintf("HARDWARE · %s · %s · device %s · %s", strings.ToUpper(s.Backend), s.Encoder, fallback(s.Device, "default"), strings.ToUpper(s.Requested))
 	}
 	return fmt.Sprintf("SOFTWARE · CPU · libx264 · %s", s.Reason)
+}
+
+func optimizationCodeSummary(codes map[string]int64) string {
+	keys := make([]string, 0, len(codes))
+	for code, count := range codes {
+		if count > 0 {
+			keys = append(keys, code)
+		}
+	}
+	if len(keys) == 0 {
+		return "none"
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, code := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", code, codes[code]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // deployment describes the runtime environment.

@@ -61,7 +61,9 @@ func (s *Store) UpsertMedia(path, container string, size int64, mtime int64, tit
 			title=excluded.title, year=excluded.year, show_title=excluded.show_title,
 			season=excluded.season, episode=excluded.episode,
 			status = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN 'pending' ELSE media_files.status END,
-			error = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN '' ELSE media_files.error END
+			error = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN '' ELSE media_files.error END,
+			optimization_flags = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN '' ELSE media_files.optimization_flags END,
+			optimization_checked = CASE WHEN media_files.size_bytes != excluded.size_bytes OR media_files.mtime != excluded.mtime THEN 0 ELSE media_files.optimization_checked END
 		WHERE excluded.size_bytes != media_files.size_bytes OR excluded.mtime != media_files.mtime OR media_files.status IN ('error')
 		RETURNING id`,
 		path, container, size, mtime, title, year, showTitle, season, episode, nowMillis())
@@ -104,6 +106,40 @@ func (s *Store) UpdateMediaProbe(id int64, duration float64, width, height int, 
 	_, err := s.db.Exec(`UPDATE media_files SET duration_sec=?, width=?, height=?, video_codec=?, audio_codec=?, container=?, start_time=?, audio_stream_index=?, audio_lang=? WHERE id=?`,
 		duration, width, height, vcodec, acodec, container, startTime, audioStream, audioLang, id)
 	return err
+}
+
+// UpdateMediaOptimizationFlags stores the deterministic optimization codes from a probe.
+func (s *Store) UpdateMediaOptimizationFlags(id int64, flags []string) error {
+	_, err := s.db.Exec(`UPDATE media_files SET optimization_flags=?, optimization_checked=1 WHERE id=?`, strings.Join(flags, ","), id)
+	return err
+}
+
+// MediaOptimizationStats returns probed-file counts and per-code recommendation counts.
+func (s *Store) MediaOptimizationStats() (int64, int64, map[string]int64, error) {
+	rows, err := s.db.Query(`SELECT optimization_flags FROM media_files WHERE optimization_checked=1`)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	defer closeRows(rows)
+	counts := map[string]int64{}
+	var scanned, recommended int64
+	for rows.Next() {
+		var encoded string
+		if err := rows.Scan(&encoded); err != nil {
+			return 0, 0, nil, err
+		}
+		scanned++
+		if encoded == "" {
+			continue
+		}
+		recommended++
+		for _, flag := range strings.Split(encoded, ",") {
+			if flag != "" {
+				counts[flag]++
+			}
+		}
+	}
+	return scanned, recommended, counts, rows.Err()
 }
 
 // SetMediaStatus updates a media row's processing status (and error text).

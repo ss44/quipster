@@ -136,6 +136,25 @@
       </section>
     </div>
 
+    <section class="panel optimization-panel">
+      <header class="panel-header">
+        <span>Media optimization checks</span>
+        <span class="panel-hint">{{ optimization?.recommended ?? 0 }} of {{ optimization?.scanned ?? 0 }} probed files flagged</span>
+      </header>
+      <div class="panel-body">
+        <p class="optimization-note">Metadata-only heuristics; Quipster never modifies source media. Counts refresh with this view after media is reprobed.</p>
+        <div v-if="optimizationFindings.length" class="optimization-list">
+          <div v-for="finding in optimizationFindings" :key="finding.code" class="optimization-item">
+            <div class="optimization-top"><strong>{{ finding.title }}</strong><span class="mini-chip mono">{{ finding.count }} files</span></div>
+            <p>{{ finding.detail }}</p>
+            <code>{{ finding.guidance }}</code>
+          </div>
+        </div>
+        <p v-else class="idle">{{ optimization?.scanned ? 'No optimization recommendations recorded.' : 'No probed media findings yet.' }}</p>
+        <p class="optimization-note">GOP/keyframe spacing and MP4 moov placement require packet/atom inspection and are not inferred from these bounded probes. See the media diagnostics reference for targeted FFprobe commands.</p>
+      </div>
+    </section>
+
     <section class="panel env-panel">
       <header class="panel-header">
         <span>Environment</span>
@@ -216,6 +235,7 @@ import {
   type GPUSummary,
   type HardwareStatus,
   type Metric,
+  type MediaOptimizationStats,
   type SystemInfo,
 } from '../api'
 import HardwareBadge from './diagnostics/HardwareBadge.vue'
@@ -224,6 +244,7 @@ import MetricGauge from './diagnostics/MetricGauge.vue'
 const system = ref<SystemInfo | null>(null)
 const gauge = ref<GaugeSnapshot | null>(null)
 const bench = ref<Benchmarks | null>(null)
+const optimization = ref<MediaOptimizationStats | null>(null)
 const loading = ref(true)
 const error = ref('')
 const stale = ref(true)
@@ -256,6 +277,36 @@ const codecs = computed(() => {
   const all = [...(system.value?.encoders ?? []), ...(system.value?.decoders ?? [])]
   return [...new Set(all)].sort().slice(0, 18)
 })
+const optimizationRules: Record<string, { title: string; detail: string; guidance: string }> = {
+  video_codec_compatibility: {
+    title: 'Video codec compatibility',
+    detail: 'The video codec is not H.264. This is informational: transcode only when target clients cannot decode the source.',
+    guidance: 'For broad compatibility, create an H.264 derivative; expect a full decode/encode and validate quality.',
+  },
+  audio_codec_compatibility: {
+    title: 'Audio codec compatibility',
+    detail: 'The selected audio codec is not AAC. Some browsers and devices may require an AAC derivative.',
+    guidance: 'Use -c:a aac -b:a 192k when compatibility matters; audio re-encoding is lossy.',
+  },
+  high_video_bitrate: {
+    title: 'High video bitrate',
+    detail: 'Estimated video or container bitrate is at least 40 Mb/s and may increase storage-read and clip costs.',
+    guidance: 'If source I/O is the bottleneck, make a lower-bitrate derivative; compare quality and storage throughput first.',
+  },
+  suspected_variable_frame_rate: {
+    title: 'Possible variable frame rate',
+    detail: 'Average and nominal frame rates differ by more than 5%; confirm with frame timestamps before changing cadence.',
+    guidance: 'If constant frame rate is required, re-encode with an explicit -vf fps=... chosen for the source.',
+  },
+  deep_b_frame_reordering: {
+    title: 'Deep B-frame reordering',
+    detail: 'FFprobe reports more than 4 reordered B-frames. This is only a latency concern for strict low-latency workflows.',
+    guidance: 'For low-latency derivatives, test -bf 2 or -bf 0; GOP spacing and random-access points matter more for seeking.',
+  },
+}
+const optimizationFindings = computed(() => Object.entries(optimization.value?.codes ?? {})
+  .filter(([code, count]) => count > 0 && optimizationRules[code])
+  .map(([code, count]) => ({ code, count, ...optimizationRules[code] })))
 
 const lastUpdateLabel = computed(() => {
   if (!lastUpdate.value) return 'waiting'
@@ -357,9 +408,14 @@ async function bootstrap() {
   loading.value = true
   error.value = ''
   try {
-    const [sys, b] = await Promise.all([api.diagnosticsSystem(), api.diagnosticsBenchmarks(windowSel.value)])
+    const [sys, b, mediaOptimization] = await Promise.all([
+      api.diagnosticsSystem(),
+      api.diagnosticsBenchmarks(windowSel.value),
+      api.diagnosticsMediaOptimization(),
+    ])
     system.value = sys
     bench.value = b
+    optimization.value = mediaOptimization
   } catch (err) {
     error.value = (err as Error).message
   }
@@ -379,9 +435,14 @@ async function refreshGauge() {
 async function refreshAll() {
   loading.value = true
   try {
-    const [sys, b] = await Promise.all([api.diagnosticsSystem(), api.diagnosticsBenchmarks(windowSel.value)])
+    const [sys, b, mediaOptimization] = await Promise.all([
+      api.diagnosticsSystem(),
+      api.diagnosticsBenchmarks(windowSel.value),
+      api.diagnosticsMediaOptimization(),
+    ])
     system.value = sys
     bench.value = b
+    optimization.value = mediaOptimization
   } catch (err) {
     error.value = (err as Error).message
   }
@@ -721,6 +782,45 @@ onUnmounted(() => {
 }
 .bench-table tr:last-child td {
   border-bottom: none;
+}
+.optimization-panel {
+  margin-bottom: 12px;
+}
+.optimization-note {
+  margin: 0 0 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+.optimization-list {
+  display: grid;
+  gap: 10px;
+}
+.optimization-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.optimization-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+.optimization-item p {
+  margin: 6px 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.optimization-item code {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text);
 }
 .env-panel {
   margin-bottom: 12px;

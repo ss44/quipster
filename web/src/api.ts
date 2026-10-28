@@ -254,6 +254,13 @@ export interface SystemInfo {
   container: boolean
 }
 
+export interface MediaOptimizationStats {
+  updatedAt: number
+  scanned: number
+  recommended: number
+  codes: Record<string, number>
+}
+
 export interface JobBench {
   type: string
   count: number
@@ -330,6 +337,7 @@ export const api = {
   diagnosticsMetrics: () => getJSON<GaugeSnapshot>('/api/admin/diagnostics/metrics'),
   diagnosticsBenchmarks: (window = '1h') =>
     getJSON<Benchmarks>(`/api/admin/diagnostics/benchmarks?window=${encodeURIComponent(window)}`),
+  diagnosticsMediaOptimization: () => getJSON<MediaOptimizationStats>('/api/admin/diagnostics/media-optimization'),
   diagnosticsProbe: () =>
     fetch('/api/admin/diagnostics/probe', { method: 'POST' }).then(async (r) => {
       if (!r.ok) throw new Error('hardware probe failed')

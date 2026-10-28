@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -122,16 +123,73 @@ func TestProbeTimeout(t *testing.T) {
 	}
 }
 
+func TestOptimizationFlags(t *testing.T) {
+	result := &Result{
+		VideoCodec: "hevc",
+		AudioCodec: "ac3",
+		metadata: optimizationMetadata{
+			videoBitRate: highVideoBitRate,
+			avgFrameRate: 30,
+			frameRate:    24,
+			maxBFrames:   maxLowLatencyBFrames + 1,
+		},
+	}
+	got := optimizationFlags(result)
+	want := []string{
+		"video_codec_compatibility",
+		"audio_codec_compatibility",
+		"high_video_bitrate",
+		"suspected_variable_frame_rate",
+		"deep_b_frame_reordering",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("optimizationFlags = %v, want %v", got, want)
+	}
+	below := &Result{
+		VideoCodec: "h264",
+		AudioCodec: "aac",
+		metadata: optimizationMetadata{
+			avgFrameRate: 24,
+			frameRate:    25,
+			maxBFrames:   4,
+			videoBitRate: highVideoBitRate - 1,
+		},
+	}
+	if got := optimizationFlags(below); len(got) != 0 {
+		t.Fatalf("below-threshold result produced flags: %v", got)
+	}
+	audioOnly := &Result{AudioCodec: "flac", metadata: optimizationMetadata{formatBitRate: highVideoBitRate}}
+	if got := optimizationFlags(audioOnly); !reflect.DeepEqual(got, []string{"audio_codec_compatibility"}) {
+		t.Fatalf("audio-only result flags = %v", got)
+	}
+	if got := optimizationFlags(nil); got != nil {
+		t.Fatalf("nil result flags = %v, want nil", got)
+	}
+}
+
+func TestProbeParsesOptimizationMetadata(t *testing.T) {
+	writeFakeFfprobe(t, `cat <<'EOF'
+{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"bit_rate":"45000000","avg_frame_rate":"30000/1001","r_frame_rate":"30/1","has_b_frames":5}],"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","bit_rate":"46000000"}}
+EOF`)
+	res, err := Probe(context.Background(), "/media/movie.mp4")
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.metadata.videoBitRate != 45_000_000 || res.metadata.formatBitRate != 46_000_000 || res.metadata.avgFrameRate < 29.9 || res.metadata.frameRate != 30 || res.metadata.maxBFrames != 5 {
+		t.Fatalf("unexpected optimization metrics: %+v", res)
+	}
+}
+
 func TestProbeParsesStreams(t *testing.T) {
 	writeFakeFfprobe(t, `cat <<'EOF'
 {
   "streams": [
-    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080, "bit_rate": "45000000", "avg_frame_rate": "30000/1001", "r_frame_rate": "30/1", "has_b_frames": 5},
     {"index": 2, "codec_type": "audio", "codec_name": "aac", "channels": 2,
      "disposition": {"default": 1}, "tags": {"language": "eng"}},
     {"index": 3, "codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "eng"}}
   ],
-  "format": {"format_name": "matroska,webm", "duration": "120.5", "start_time": "1.25"}
+  "format": {"format_name": "matroska,webm", "duration": "120.5", "start_time": "1.25", "bit_rate": "46000000"}
 }
 EOF`)
 	res, err := Probe(context.Background(), "/media/movie.mkv")

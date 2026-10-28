@@ -38,6 +38,14 @@ func TestDiagnosticsEndpoints(t *testing.T) {
 		t.Errorf("benchmark window = %v", got["window"])
 	}
 
+	optimization := do(t, h, http.MethodGet, "/api/admin/diagnostics/media-optimization", nil, nil)
+	if optimization.Code != http.StatusOK {
+		t.Fatalf("media optimization status = %d", optimization.Code)
+	}
+	if got := decodeMap(t, optimization); got["scanned"] == nil || got["codes"] == nil {
+		t.Errorf("media optimization body = %v", got)
+	}
+
 	probe := do(t, h, http.MethodPost, "/api/admin/diagnostics/probe", nil, nil)
 	if probe.Code != http.StatusOK {
 		t.Fatalf("probe status = %d", probe.Code)
@@ -96,6 +104,7 @@ func TestDiagnosticsUnavailable(t *testing.T) {
 		"/api/admin/diagnostics/system",
 		"/api/admin/diagnostics/metrics",
 		"/api/admin/diagnostics/benchmarks",
+		"/api/admin/diagnostics/media-optimization",
 		"/api/admin/diagnostics/stream",
 	} {
 		if rr := do(t, h, http.MethodGet, target, nil, nil); rr.Code != http.StatusServiceUnavailable {
