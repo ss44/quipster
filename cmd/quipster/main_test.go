@@ -88,6 +88,7 @@ func clearConfigEnv(t *testing.T) {
 		"CLIP_WORKERS", "API_TOKEN", "CLIP_PAD_MS", "MAX_CLIP_SEC", "CACHE_MAX_GB",
 		"LONG_CUT_SEC", "CLIP_PREVIEW_RES", "CLIP_ACCURATE_RES", "CLIP_CPU_PRESET",
 		"SCAN_TIMEOUT", "EXTRACT_TIMEOUT", "PROBE_TIMEOUT",
+		"MCP_ENABLED", "MCP_TRANSPORT", "MCP_TOKENS", "MCP_RATE_LIMIT", "MCP_ALLOW_ADMIN",
 	} {
 		t.Setenv(key, "")
 	}
@@ -114,9 +115,32 @@ func TestLoadConfigDefaults(t *testing.T) {
 		longCutSec:     20,
 		scanTimeout:    2 * time.Hour,
 		extractTimeout: 10 * time.Minute,
+		mcpRateLimit:   120,
 	}
 	if got := loadConfig(); got != want {
 		t.Errorf("loadConfig = %+v, want %+v", got, want)
+	}
+}
+
+func TestMCPEnvironment(t *testing.T) {
+	clearConfigEnv(t)
+	if cfg := loadConfig(); cfg.mcpEnabled || cfg.mcpStdio || cfg.mcpAllowAdmin {
+		t.Errorf("MCP must default to disabled: %+v", cfg)
+	}
+
+	t.Setenv("MCP_ENABLED", "1")
+	t.Setenv("MCP_TRANSPORT", "STDIO")
+	t.Setenv("MCP_ALLOW_ADMIN", "yes")
+	t.Setenv("MCP_RATE_LIMIT", "30")
+	t.Setenv("MCP_TOKENS", "tok:read+clip")
+	cfg := loadConfig()
+	if !cfg.mcpEnabled || !cfg.mcpStdio || !cfg.mcpAllowAdmin || cfg.mcpRateLimit != 30 || cfg.mcpTokens != "tok:read+clip" {
+		t.Fatalf("MCP env not loaded: %+v", cfg)
+	}
+
+	t.Setenv("MCP_ENABLED", "false")
+	if cfg := loadConfig(); cfg.mcpEnabled {
+		t.Errorf("MCP_ENABLED=false must disable: %+v", cfg)
 	}
 }
 
@@ -171,6 +195,7 @@ func TestLoadConfigOverrides(t *testing.T) {
 		longCutSec:     30,
 		scanTimeout:    2 * time.Hour,
 		extractTimeout: 10 * time.Minute,
+		mcpRateLimit:   120,
 	}
 	if got := loadConfig(); got != want {
 		t.Errorf("loadConfig = %+v, want %+v", got, want)

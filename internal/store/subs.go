@@ -131,6 +131,61 @@ func (s *Store) CuesInRange(mediaFileID int64, startIdx, endIdx int) (span, befo
 	return span, before, after, err
 }
 
+// CuesAround returns the cues spanning [startIdx, endIdx] plus up to context
+// cues on each side, in chronological order within each slice. It generalizes
+// CuesInRange, which is the context=1 special case kept for the REST chunks
+// endpoint.
+func (s *Store) CuesAround(mediaFileID int64, startIdx, endIdx, context int) (span, before, after []Cue, err error) {
+	rows, err := s.db.Query(`SELECT id, media_file_id, track_id, idx, start_sec, end_sec, text, COALESCE(chunk_id,0) FROM cues
+		WHERE media_file_id=? AND idx BETWEEN ? AND ? ORDER BY idx`, mediaFileID, startIdx, endIdx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer closeRows(rows)
+	for rows.Next() {
+		var c Cue
+		if scanErr := rows.Scan(&c.ID, &c.MediaFileID, &c.TrackID, &c.Idx, &c.StartSec, &c.EndSec, &c.Text, &c.ChunkID); scanErr != nil {
+			return nil, nil, nil, scanErr
+		}
+		span = append(span, c)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, nil, nil, rowsErr
+	}
+	if before, err = s.cuesNear(mediaFileID, startIdx, -1, context); err != nil {
+		return nil, nil, nil, err
+	}
+	if after, err = s.cuesNear(mediaFileID, endIdx, 1, context); err != nil {
+		return nil, nil, nil, err
+	}
+	return span, before, after, nil
+}
+
+// cuesNear collects up to n cues adjacent to an index boundary. Direction -1
+// walks backwards from idx-1 and returns the result in ascending index order;
+// direction +1 walks forward from idx+1.
+func (s *Store) cuesNear(mediaFileID int64, idx, direction, n int) ([]Cue, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT id, media_file_id, track_id, idx, start_sec, end_sec, text, COALESCE(chunk_id,0) FROM cues
+		WHERE media_file_id=? AND idx BETWEEN ? AND ? ORDER BY idx`, mediaFileID,
+		min(idx+direction, idx+direction*n), max(idx+direction, idx+direction*n))
+	if err != nil {
+		return nil, err
+	}
+	defer closeRows(rows)
+	var out []Cue
+	for rows.Next() {
+		var c Cue
+		if scanErr := rows.Scan(&c.ID, &c.MediaFileID, &c.TrackID, &c.Idx, &c.StartSec, &c.EndSec, &c.Text, &c.ChunkID); scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) cueAtIdx(mediaFileID int64, idx int) ([]Cue, error) {
 	row := s.db.QueryRow(`SELECT id, media_file_id, track_id, idx, start_sec, end_sec, text, COALESCE(chunk_id,0) FROM cues
 		WHERE media_file_id=? AND idx=?`, mediaFileID, idx)

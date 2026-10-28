@@ -47,6 +47,7 @@ type Deps struct {
 	SubsDir     string
 	APIToken    string
 	Diagnostics *diagnostics.Collector
+	MCP         http.Handler // Model Context Protocol endpoint at /mcp; nil disables it
 }
 
 // Router builds the application HTTP handler: standard middleware, public
@@ -69,6 +70,13 @@ func Router(d Deps) http.Handler {
 	r.Get("/api/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "meiliUp": d.Indexer.Healthy(), "semantic": d.Indexer.EmbedderEnabled()})
 	})
+
+	// Model Context Protocol endpoint for agent clients. It performs its own
+	// scoped-token auth, so it mounts before the public REST routes with the
+	// shared request-id/logging/recoverer middleware still applied.
+	if d.MCP != nil {
+		r.Handle("/mcp", d.MCP)
+	}
 
 	// Public read API
 	r.Get("/api/suggest", d.handleSuggest)

@@ -23,6 +23,7 @@ import (
 	"quipster/internal/indexer"
 	"quipster/internal/jobs"
 	"quipster/internal/logbuf"
+	"quipster/internal/mcp"
 	"quipster/internal/probe"
 	"quipster/internal/scan"
 	"quipster/internal/search"
@@ -56,6 +57,11 @@ type config struct {
 	scanTimeout    time.Duration
 	extractTimeout time.Duration
 	logs           *logbuf.Buffer
+	mcpEnabled     bool
+	mcpStdio       bool
+	mcpTokens      string
+	mcpRateLimit   int
+	mcpAllowAdmin  bool
 }
 
 func envStr(key, def string) string {
@@ -107,6 +113,26 @@ func loadConfig() config {
 		previewRes:     envStr("CLIP_PREVIEW_RES", ""),
 		accurateRes:    envStr("CLIP_ACCURATE_RES", ""),
 		cpuPreset:      envStr("CLIP_CPU_PRESET", ""),
+		mcpEnabled:     envBool("MCP_ENABLED", false),
+		mcpStdio:       strings.EqualFold(strings.TrimSpace(os.Getenv("MCP_TRANSPORT")), "stdio"),
+		mcpTokens:      os.Getenv("MCP_TOKENS"),
+		mcpRateLimit:   envInt("MCP_RATE_LIMIT", mcp.DefaultRateLimit),
+		mcpAllowAdmin:  envBool("MCP_ALLOW_ADMIN", false),
+	}
+}
+
+// envBool parses a boolean environment flag, accepting the usual 1/true/yes
+// spellings and their negations; an absent or unrecognized variable keeps the
+// default.
+func envBool(key string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
 	}
 }
 
@@ -157,6 +183,7 @@ type app struct {
 	Runner *jobs.Runner
 	Stop   func()
 	Deps   api.Deps
+	MCP    *mcp.Server
 }
 
 // assembleApp wires every service around the shared store: clip/thumbnail
@@ -217,7 +244,29 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 		APIToken:    cfg.apiToken,
 		Diagnostics: diag,
 	}
-	return &app{Deps: deps, Runner: runner, Stop: func() {
+	// MCP is served in two modes: streamable HTTP mounted at /mcp on API
+	// processes, and stdio for local single-process integrations (worker role
+	// plus stdio turns this process into an MCP subprocess that also processes
+	// jobs). Enablement is explicit and requires at least one scoped token.
+	var mcpSrv *mcp.Server
+	if cfg.mcpEnabled && strings.TrimSpace(cfg.mcpTokens) != "" {
+		mcpTokens := mcp.ParseTokens(cfg.mcpTokens)
+		mcpSrv = mcp.New(mcp.Deps{
+			St: st, Search: searchSvc, Indexer: ix, Clips: clipSvc, Thumbs: thumbSvc,
+			Events: collector, Runner: runner, MediaDir: cfg.mediaDir, ClipWorkers: cfg.clipWorkers,
+		}, mcp.Config{
+			Tokens: mcpTokens, AllowAdmin: cfg.mcpAllowAdmin,
+			RateLimit: cfg.mcpRateLimit, Version: version,
+		})
+		if cfg.role == "all" || cfg.role == "api" {
+			deps.MCP = mcpSrv.HTTPHandler()
+			log.Printf("mcp enabled at /mcp (%d token(s), admin tools %t)",
+				len(mcpTokens), cfg.mcpAllowAdmin)
+		}
+	} else if cfg.mcpEnabled {
+		log.Printf("mcp requested but disabled: set MCP_TOKENS to grant agent access")
+	}
+	return &app{Deps: deps, Runner: runner, MCP: mcpSrv, Stop: func() {
 		cancel()
 		runner.Stop()
 	}}
@@ -260,46 +309,75 @@ func main() {
 	// Semantic search is optional: an invalid embedder configuration logs a
 	// clear error and stays disabled rather than aborting startup.
 	emb, embErr := indexer.ParseEmbedderConfig(os.Getenv)
-	if embErr != nil {
-		log.Printf("semantic search disabled: %v", embErr)
-	} else if emb.Enabled() {
-		log.Printf("semantic search: enabled (source=%s model=%s hybridRatio=%.2f)",
-			emb.Source, emb.Model, emb.SemanticRatio) //nolint:gosec // operator-supplied env, logged locally only
-	} else {
-		log.Printf("semantic search: disabled (set EMBEDDINGS_SOURCE to enable)")
-	}
+	logEmbedderConfig(emb, embErr)
 
 	ix := indexer.New(st, cfg.meiliURL, cfg.meiliKey, indexer.WithEmbedder(emb))
 	go ensureSettingsLoop(ix, 15*time.Second)
 
 	application := assembleApp(context.Background(), cfg, st, ix)
+	defer application.Stop()
 
+	// Stdio mode replaces the HTTP server entirely: the process is launched
+	// by an MCP client as a subprocess and speaks MCP over stdin/stdout. It
+	// runs with the full scope set (operator-launched), still processing jobs
+	// per the configured role.
+	if cfg.mcpEnabled && cfg.mcpStdio && application.MCP != nil {
+		log.Printf("mcp stdio mode: serving over stdin/stdout")
+		if err := application.MCP.ConnectStdio(context.Background()); err != nil {
+			log.Printf("mcp stdio: %v", err)
+		}
+		return
+	}
+
+	serveHTTP(cfg, application)
+}
+
+// logEmbedderConfig reports the semantic-search startup state.
+func logEmbedderConfig(emb indexer.EmbedderConfig, err error) {
+	switch {
+	case err != nil:
+		log.Printf("semantic search disabled: %v", err)
+	case emb.Enabled():
+		log.Printf("semantic search: enabled (source=%s model=%s hybridRatio=%.2f)",
+			emb.Source, emb.Model, emb.SemanticRatio) //nolint:gosec // operator-supplied env, logged locally only
+	default:
+		log.Printf("semantic search: disabled (set EMBEDDINGS_SOURCE to enable)")
+	}
+}
+
+// serveHTTP starts the HTTP server (API roles only) and blocks until a
+// termination signal, then drains connections and stops the runner.
+func serveHTTP(cfg config, application *app) {
 	srv := &http.Server{
 		Addr:              cfg.addr,
 		Handler:           api.Router(application.Deps),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
-	if cfg.role == "all" || cfg.role == "api" {
-		go func() {
-			log.Printf("http listening on %s", cfg.addr)
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("http: %v", err)
-			}
-		}()
-	} else {
+	if cfg.role != "all" && cfg.role != "api" {
 		log.Printf("worker mode: processing jobs, no http server")
+		waitForSignal(application)
+		return
 	}
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-	log.Printf("shutting down")
+	go func() {
+		log.Printf("http listening on %s", cfg.addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("http: %v", err)
+		}
+	}()
+	waitForSignal(application)
 	shCtx, shCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shCancel()
 	if err := srv.Shutdown(shCtx); err != nil {
 		log.Printf("http shutdown: %v", err)
 	}
+}
+
+// waitForSignal blocks until SIGINT/SIGTERM, then stops the runner.
+func waitForSignal(application *app) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+	log.Printf("shutting down")
 	application.Stop()
 }
 

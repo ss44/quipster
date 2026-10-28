@@ -443,6 +443,24 @@ func displayName(m *MediaFile) string {
 	return filepath.Base(m.Path)
 }
 
+// GetJob returns one job by id, enriched with media metadata like ListJobs,
+// or nil when the id is unknown.
+func (s *Store) GetJob(jobID int64) (*Job, error) {
+	rows, err := s.db.Query(`SELECT id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at
+		FROM jobs WHERE id=?`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := scanJobs(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+	return &s.enrichJobs(jobs)[0], nil
+}
+
 // LineStats summarizes how much dialog has been digested and indexed.
 type LineStats struct {
 	Cues          int64 `json:"cues"`
