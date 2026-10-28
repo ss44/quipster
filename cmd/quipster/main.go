@@ -17,6 +17,7 @@ import (
 	"quipster/internal/cache"
 	"quipster/internal/clips"
 	"quipster/internal/events"
+	"quipster/internal/hardware"
 	"quipster/internal/indexer"
 	"quipster/internal/jobs"
 	"quipster/internal/probe"
@@ -154,6 +155,15 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	lru := &cache.LRU{St: st, MaxBytes: int64(cfg.cacheMaxGB * 1024 * 1024 * 1024), Kinds: []string{"clip", "thumb", "sub"}}
 	cache.RunDaemon(ctx, lru, 5*time.Minute)
 
+	// Detect hardware acceleration capabilities once at startup so clip and
+	// thumbnail pipelines can use NVENC/QSV/VAAPI/VideoToolbox when available.
+	hw := hardware.Detect(probe.FfmpegBin())
+	if hw.Available() {
+		log.Printf("hardware acceleration: %s (device=%s)", hw.Backend, hw.Device)
+	} else {
+		log.Printf("hardware acceleration: none, using cpu")
+	}
+
 	clipSvc := clips.New(st, clips.Config{
 		CacheDir:     cfg.cacheDir,
 		MaxClipSec:   cfg.maxClipSec,
@@ -162,8 +172,9 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 		PreviewRes:   cfg.previewRes,
 		AccurateRes:  cfg.accurateRes,
 		CPUPreset:    cfg.cpuPreset,
+		Hw:           hw,
 	})
-	thumbSvc := &thumbs.Service{St: st, CacheDir: cfg.cacheDir, Hw: clipSvc}
+	thumbSvc := &thumbs.Service{St: st, CacheDir: cfg.cacheDir, Hw: hw}
 	searchSvc := search.New(st, ix)
 	collector := &events.Collector{St: st, MeiliUp: ix.Healthy}
 

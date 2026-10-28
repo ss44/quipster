@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"quipster/internal/hardware"
 	"quipster/internal/store"
 )
 
@@ -37,13 +38,14 @@ func mockSlowCreate(t *testing.T) {
 	mockEnv(t, map[string]string{"MOCK_SLEEP": "0.5"})
 }
 
-// forceHW pins the vaapi probe result so tests are deterministic regardless
-// of whether /dev/dri exists on the host.
-func forceHW(s *Service, avail bool) {
-	s.mu.Lock()
-	s.hwprobed = true
-	s.hwavail = avail
-	s.mu.Unlock()
+// forceHWOn/forceHWOff pin the hardware backend so tests are deterministic
+// regardless of the host's GPUs.
+func forceHWOn(s *Service) {
+	s.cfg.Hw = hardware.Capabilities{Backend: hardware.BackendVaapi, Device: "/dev/dri/renderD128"}
+}
+
+func forceHWOff(s *Service) {
+	s.cfg.Hw = hardware.Capabilities{}
 }
 
 func newTestService(t *testing.T) (*Service, *store.Store) {
@@ -86,9 +88,10 @@ func TestEncodingSettings(t *testing.T) {
 
 func TestEncodingArguments(t *testing.T) {
 	for _, preset := range []string{"", "superfast"} {
-		cfg := New(nil, Config{PreviewRes: "480:-2", AccurateRes: "854:480", CPUPreset: preset}).Config()
-		preview := previewArgs("source.mkv", 1, 12, 3, "preview.mp4", false, cfg)
-		accurate := accurateArgs("source.mkv", 1, 12, 3, "accurate.mp4", false, true, cfg)
+		svc := New(nil, Config{PreviewRes: "480:-2", AccurateRes: "854:480", CPUPreset: preset})
+		cpu := hardware.Capabilities{}
+		preview := transcodeArgs(cpu.Pipeline(svc.cfg.PreviewRes), svc.previewProfile(), "source.mkv", 1, 12, 3, "preview.mp4", false)
+		accurate := transcodeArgs(cpu.Pipeline(svc.cfg.AccurateRes), svc.accurateProfile(), "source.mkv", 1, 12, 3, "accurate.mp4", true)
 		assert.Contains(t, preview, "scale=480:-2")
 		assert.Contains(t, accurate, "scale=854:480")
 		assert.Contains(t, accurate, "pipe:1")
@@ -99,9 +102,23 @@ func TestEncodingArguments(t *testing.T) {
 			assert.Contains(t, preview, preset)
 			assert.Contains(t, accurate, preset)
 		}
-		assert.Contains(t, previewArgs("source.mkv", 0, 12, 3, "preview.mp4", true, cfg), "scale_vaapi=480:-2:format=nv12")
-		assert.Contains(t, accurateArgs("source.mkv", 0, 12, 3, "accurate.mp4", true, false, cfg), "scale_vaapi=854:480:format=nv12")
+		assert.NotContains(t, preview, "pipe:1")
+		assert.Contains(t, preview, "-tune")
+		assert.Contains(t, accurate, "-movflags")
 	}
+
+	// Hardware pipelines substitute the hw decoder, GPU/CPU filter and the
+	// hardware encoder, keeping the shared container/audio flags.
+	hw := hardware.Capabilities{Backend: hardware.BackendVaapi, Device: "/dev/dri/renderD128"}
+	svc := New(nil, Config{})
+	hwPreview := transcodeArgs(hw.Pipeline(svc.cfg.PreviewRes), svc.previewProfile(), "source.mkv", 0, 12, 3, "preview.mp4", false)
+	assert.Contains(t, hwPreview, "-hwaccel")
+	assert.Contains(t, hwPreview, "vaapi")
+	assert.Contains(t, hwPreview, "scale_vaapi=640:-2:format=nv12")
+	assert.Contains(t, hwPreview, "h264_vaapi")
+	assert.Contains(t, hwPreview, "-b:v")
+	assert.NotContains(t, hwPreview, "libx264")
+	assert.Contains(t, hwPreview, "-vaapi_device")
 }
 
 func TestProfileCacheKeys(t *testing.T) {
@@ -148,7 +165,7 @@ func TestProduceFastMKVFallback(t *testing.T) {
 func TestProduceFastBothFail(t *testing.T) {
 	mockFailAlways(t)
 	s, st := newTestService(t)
-	forceHW(s, false)
+	forceHWOff(s)
 	id := seedMedia(t, st, "/fake/source", 0)
 	_, _, err := s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "fast", PadMs: 250})
 	require.Error(t, err)
@@ -159,7 +176,7 @@ func TestProduceFastBothFail(t *testing.T) {
 func TestProducePreviewBothFail(t *testing.T) {
 	mockFailAlways(t)
 	s, st := newTestService(t)
-	forceHW(s, true)
+	forceHWOn(s)
 	id := seedMedia(t, st, "/fake/source", 0)
 	_, _, err := s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "preview", PadMs: 250})
 	require.Error(t, err)
@@ -170,7 +187,7 @@ func TestProducePreviewBothFail(t *testing.T) {
 func TestProduceAccurateBothFail(t *testing.T) {
 	mockFailAlways(t)
 	s, st := newTestService(t)
-	forceHW(s, true)
+	forceHWOn(s)
 	id := seedMedia(t, st, "/fake/source", 0)
 	_, _, err := s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250})
 	require.Error(t, err)
@@ -211,7 +228,7 @@ func TestProduceFlightDedup(t *testing.T) {
 func TestProduceConcurrentDedup(t *testing.T) {
 	mockSlowCreate(t)
 	s, st := newTestService(t)
-	forceHW(s, false)
+	forceHWOff(s)
 	id := seedMedia(t, st, "/fake/source", 0)
 	req := Request{MediaID: id, Start: 10, End: 20, Mode: "fast", PadMs: 250}
 
@@ -248,7 +265,7 @@ func TestRunWithProgressFastDelegates(t *testing.T) {
 func TestRunWithProgressCached(t *testing.T) {
 	mockFailAlways(t)
 	s, st := newTestService(t)
-	forceHW(s, false)
+	forceHWOff(s)
 	id := seedMedia(t, st, "/fake/source", 0)
 	realPath := filepath.Join(t.TempDir(), "cached.mp4")
 	require.NoError(t, os.WriteFile(realPath, []byte("x"), 0o600))
@@ -271,7 +288,7 @@ func TestRunWithProgressVariants(t *testing.T) {
 	t.Run("hw success", func(t *testing.T) {
 		mockCreateOutput(t)
 		s, st := newTestService(t)
-		forceHW(s, true)
+		forceHWOn(s)
 		id := seedMedia(t, st, "/fake/source", 0)
 		path, ext, err := s.RunWithProgress(context.Background(), req(id), func(float64) {})
 		require.NoError(t, err)
@@ -281,7 +298,7 @@ func TestRunWithProgressVariants(t *testing.T) {
 	t.Run("hw retry exhausted", func(t *testing.T) {
 		mockFailAlways(t)
 		s, st := newTestService(t)
-		forceHW(s, true)
+		forceHWOn(s)
 		id := seedMedia(t, st, "/fake/source", 0)
 		_, _, err := s.RunWithProgress(context.Background(), req(id), func(float64) {})
 		require.Error(t, err)
@@ -289,7 +306,7 @@ func TestRunWithProgressVariants(t *testing.T) {
 	t.Run("cpu fail", func(t *testing.T) {
 		mockFailAlways(t)
 		s, st := newTestService(t)
-		forceHW(s, false)
+		forceHWOff(s)
 		id := seedMedia(t, st, "/fake/source", 0)
 		_, _, err := s.RunWithProgress(context.Background(), req(id), func(float64) {})
 		require.Error(t, err)
@@ -297,7 +314,7 @@ func TestRunWithProgressVariants(t *testing.T) {
 	t.Run("start error", func(t *testing.T) {
 		t.Setenv("FFMPEG_BIN", "/nonexistent/ffmpeg-missing")
 		s, st := newTestService(t)
-		forceHW(s, false)
+		forceHWOff(s)
 		id := seedMedia(t, st, "/fake/source", 0)
 		_, _, err := s.RunWithProgress(context.Background(), req(id), func(float64) {})
 		require.Error(t, err)
@@ -309,7 +326,7 @@ func TestRunWithProgressVariants(t *testing.T) {
 // Each mode gets a fresh failure counter so both hardware attempts fail.
 func TestProduceHWPreviewAndAccurateFallback(t *testing.T) {
 	s, st := newTestService(t)
-	forceHW(s, true)
+	forceHWOn(s)
 	id := seedMedia(t, st, "/fake/source", 0)
 
 	mockFailFirstThenCreate(t)
@@ -330,7 +347,7 @@ func TestProduceHWPreviewAndAccurateFallback(t *testing.T) {
 func TestProduceCPUTranscodeFailure(t *testing.T) {
 	mockFailAlways(t)
 	s, st := newTestService(t)
-	forceHW(s, false)
+	forceHWOff(s)
 	id := seedMedia(t, st, "/fake/source", 0)
 
 	_, _, err := s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "preview", PadMs: 250})
@@ -347,7 +364,7 @@ func TestProduceCPUTranscodeFailure(t *testing.T) {
 func TestProduceHWPreviewSuccess(t *testing.T) {
 	mockCreateOutput(t)
 	s, st := newTestService(t)
-	forceHW(s, true)
+	forceHWOn(s)
 	id := seedMedia(t, st, "/fake/source", -1) // no audio mapped
 	path, ext, err := s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "preview", PadMs: 250})
 	require.NoError(t, err)
@@ -416,7 +433,7 @@ func TestProduceMkdirError(t *testing.T) {
 func TestJobHandler(t *testing.T) {
 	mockCreateOutput(t)
 	s, st := newTestService(t)
-	forceHW(s, false)
+	forceHWOff(s)
 	id := seedMedia(t, st, "/fake/source", 0)
 	handler := s.JobHandler()
 	validMedia := `{"mediaId":` + strconv.FormatInt(id, 10) + ``

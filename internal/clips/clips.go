@@ -1,6 +1,6 @@
 // Package clips renders short media clips on demand into a content-addressed
 // cache directory, deduplicating concurrent requests for the same clip and
-// using vaapi hardware encoding when available.
+// using hardware encoding (NVENC/QSV/VAAPI/VideoToolbox) when available.
 package clips
 
 import (
@@ -21,12 +21,15 @@ import (
 	"sync"
 	"time"
 
+	"quipster/internal/hardware"
 	"quipster/internal/probe"
 	"quipster/internal/store"
 )
 
 // Config holds the clip service tuning parameters; zero fields fall back to
 // the defaults applied by New.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
 type Config struct {
 	CacheDir     string
 	PreviewRes   string // width:height; one dimension may be -2 to preserve aspect ratio
@@ -34,20 +37,18 @@ type Config struct {
 	CPUPreset    string // optional x264 override; preview defaults to ultrafast, accurate to veryfast
 	MaxClipSec   float64
 	DefaultPadMs int
-	LongCutSec   float64 // accurate cuts longer than this run as async jobs
+	LongCutSec   float64               // accurate cuts longer than this run as async jobs
+	Hw           hardware.Capabilities // detected hw backend; zero value = cpu only
 }
 
 // Service renders clips into a cache directory and records them as cache
 // entries in the store. Concurrent requests for the same clip share a single
 // render flight instead of running duplicate ffmpeg work.
 type Service struct {
-	st       *store.Store
-	sf       map[string]*flight
-	cfg      Config
-	mu       sync.Mutex
-	sfMu     sync.Mutex
-	hwavail  bool
-	hwprobed bool
+	st   *store.Store
+	sf   map[string]*flight
+	cfg  Config
+	sfMu sync.Mutex
 }
 
 // flight tracks one in-flight render so later requests can await its result.
@@ -319,42 +320,20 @@ func (s *Service) cutFast(ctx context.Context, src string, start, dur float64, a
 // preview quality is intentionally low (640px by default).
 func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
 	out := outBase + ".mp4"
-	hw := s.HWAvailable()
-	err := runFFmpeg(ctx, previewArgs(src, audioOrdinal, start, dur, out, hw, s.cfg))
-	if err == nil {
-		return out, nil
-	}
-	if !hw {
+	if err := s.runTranscode(ctx, src, out, start, dur, audioOrdinal, s.previewProfile(), nil); err != nil {
 		removePartial(out)
 		return "", fmt.Errorf("preview cut failed: %w", err)
-	}
-	log.Printf("[clips] vaapi preview failed (%v), falling back to cpu", err)
-	removePartial(out)
-	if err2 := runFFmpeg(ctx, previewArgs(src, audioOrdinal, start, dur, out, false, s.cfg)); err2 != nil {
-		removePartial(out)
-		return "", fmt.Errorf("preview cut failed: %w", err2)
 	}
 	return out, nil
 }
 
-// cutAccurate transcodes a high-quality 720p clip, preferring the vaapi
+// cutAccurate transcodes a high-quality 720p clip, preferring the hardware
 // pipeline and falling back to libx264 when hardware encoding fails.
 func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
 	out := outBase + ".mp4"
-	hw := s.HWAvailable()
-	err := runFFmpeg(ctx, accurateArgs(src, audioOrdinal, start, dur, out, hw, false, s.cfg))
-	if err == nil {
-		return out, nil
-	}
-	if !hw {
+	if err := s.runTranscode(ctx, src, out, start, dur, audioOrdinal, s.accurateProfile(), nil); err != nil {
 		removePartial(out)
 		return "", fmt.Errorf("accurate cut failed: %w", err)
-	}
-	log.Printf("[clips] vaapi encode failed (%v), falling back to cpu", err)
-	removePartial(out)
-	if err2 := runFFmpeg(ctx, accurateArgs(src, audioOrdinal, start, dur, out, false, false, s.cfg)); err2 != nil {
-		removePartial(out)
-		return "", fmt.Errorf("accurate cut failed: %w", err2)
 	}
 	return out, nil
 }
@@ -383,60 +362,98 @@ func fastCopyArgs(src string, start, dur float64, audioOrdinal int, out string) 
 	)
 }
 
-// previewArgs builds the low-latency transcode invocation; hw selects
-// the vaapi pipeline over the cpu ultrafast fallback.
-func previewArgs(src string, audioOrdinal int, start, dur float64, out string, hw bool, cfg Config) []string {
-	var hwinput, video []string
-	if hw {
-		hwinput = []string{"-vaapi_device", "/dev/dri/renderD128", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"}
-		video = []string{"-vf", "scale_vaapi=" + cfg.PreviewRes + ":format=nv12", "-c:v", "h264_vaapi", "-qp", "32"}
-	} else {
-		preset := cfg.CPUPreset
-		if preset == "" {
-			preset = "ultrafast"
-		}
-		video = []string{"-vf", "scale=" + cfg.PreviewRes, "-c:v", "libx264", "-preset", preset,
-			"-crf", "32", "-tune", "zerolatency"}
-	}
-	return slices.Concat(
-		[]string{"-v", "error", "-y"},
-		hwinput,
-		[]string{"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"},
-		audioMapArgs(audioOrdinal),
-		[]string{"-dn", "-sn", "-map_chapters", "-1"},
-		video,
-		[]string{"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out},
-	)
+// encProfile holds the per-mode encoder parameters for transcoded cuts: the
+// target resolution, the extra encoder args for hardware and CPU pipelines,
+// and the audio bitrate.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
+type encProfile struct {
+	res      string   // ffmpeg resolution string for the scale filter
+	hwEnc    []string // extra args for the hardware encoder
+	cpuEnc   []string // extra x264 args for the CPU encoder
+	abitrate string
 }
 
-// accurateArgs builds the 720p transcode invocation shared by the synchronous
-// accurate cutter and the async progress-reporting job: progress adds the
-// pipe:1 progress switches and hw selects the vaapi pipeline.
-func accurateArgs(src string, audioOrdinal int, start, dur float64, out string, hw, progress bool, cfg Config) []string {
-	var prefix, hwinput, video []string
+// previewProfile returns the low-quality, low-latency encoder profile.
+func (s *Service) previewProfile() encProfile {
+	return encProfile{
+		res:      s.cfg.PreviewRes,
+		hwEnc:    []string{"-b:v", "1M"},
+		cpuEnc:   s.cpuEncArgs("ultrafast", "32", "-tune", "zerolatency"),
+		abitrate: "96k",
+	}
+}
+
+// accurateProfile returns the 720p high-quality encoder profile.
+func (s *Service) accurateProfile() encProfile {
+	return encProfile{
+		res:      s.cfg.AccurateRes,
+		hwEnc:    []string{"-b:v", "2M"},
+		cpuEnc:   s.cpuEncArgs("veryfast", "23"),
+		abitrate: "128k",
+	}
+}
+
+// cpuEncArgs builds the x264 encoder args for a mode, honoring the configured
+// CPU preset override over the mode default.
+func (s *Service) cpuEncArgs(defPreset, crf string, extra ...string) []string {
+	preset := s.cfg.CPUPreset
+	if preset == "" {
+		preset = defPreset
+	}
+	return append([]string{"-preset", preset, "-crf", crf}, extra...)
+}
+
+// transcodeArgs builds the transcode invocation from a pipeline plan and a
+// per-mode encoder profile: plan.Input supplies the input-side decode flags,
+// plan.Filter the scale filter, and plan.Encoder the video codec; progress
+// adds the pipe:1 progress switches for the async reporting path.
+func transcodeArgs(plan hardware.Pipeline, prof encProfile, src string, audioOrdinal int,
+	start, dur float64, out string, progress bool) []string {
+	var prefix []string
 	if progress {
 		prefix = []string{"-progress", "pipe:1", "-nostats"}
 	}
-	if hw {
-		hwinput = []string{"-vaapi_device", "/dev/dri/renderD128", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"}
-		video = []string{"-vf", "scale_vaapi=" + cfg.AccurateRes + ":format=nv12", "-c:v", "h264_vaapi", "-b:v", "2M"}
-	} else {
-		preset := cfg.CPUPreset
-		if preset == "" {
-			preset = "veryfast"
-		}
-		video = []string{"-vf", "scale=" + cfg.AccurateRes, "-c:v", "libx264", "-preset", preset, "-crf", "23"}
+	enc := prof.cpuEnc
+	if plan.IsHW {
+		enc = prof.hwEnc
 	}
 	return slices.Concat(
 		[]string{"-v", "error", "-y"},
 		prefix,
-		hwinput,
+		plan.Input,
 		[]string{"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"},
 		audioMapArgs(audioOrdinal),
 		[]string{"-dn", "-sn", "-map_chapters", "-1"},
-		video,
-		[]string{"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out},
+		[]string{"-vf", plan.Filter, "-c:v", plan.Encoder},
+		enc,
+		[]string{"-c:a", "aac", "-b:a", prof.abitrate, "-movflags", "+faststart", out},
 	)
+}
+
+// runTranscode renders one transcoded clip, trying the hardware pipeline
+// first and falling back to CPU libx264 when the hardware attempt fails
+// (hardware encoders can fail mid-run on driver hiccups or unsupported input).
+// When report is non-nil, ffmpeg progress is parsed and forwarded (0..1).
+func (s *Service) runTranscode(ctx context.Context, src, out string, start, dur float64,
+	audioOrdinal int, prof encProfile, report func(float64)) error {
+
+	hwPlan := s.cfg.Hw.Pipeline(prof.res)
+	cpuPlan := hardware.Capabilities{}.Pipeline(prof.res)
+	progress := report != nil
+	run := func(args []string) error { return runFFmpeg(ctx, args) }
+	if progress {
+		run = func(args []string) error { return runFFmpegProgress(ctx, args, dur, report) }
+	}
+	if hwPlan.IsHW {
+		if err := run(transcodeArgs(hwPlan, prof, src, audioOrdinal, start, dur, out, progress)); err != nil {
+			log.Printf("[clips] %s encode failed (%v), falling back to cpu", s.cfg.Hw.Backend, err)
+			removePartial(out)
+		} else {
+			return nil
+		}
+	}
+	return run(transcodeArgs(cpuPlan, prof, src, audioOrdinal, start, dur, out, progress))
 }
 
 // removePartial deletes a failed render's output file. A missing file is
@@ -458,42 +475,6 @@ func runFFmpeg(ctx context.Context, args []string) error {
 	}
 	log.Printf("[clips] ffmpeg completed elapsed=%s", time.Since(started).Round(time.Millisecond))
 	return nil
-}
-
-// HWAvailable reports whether vaapi acceleration works. The probe runs once
-// per process and the result is cached, so cold starts pay one ffmpeg run.
-func (s *Service) HWAvailable() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.hwprobed {
-		return s.hwavail
-	}
-	s.hwprobed = true
-	s.hwavail = probeVaapi()
-	if s.hwavail {
-		log.Printf("[clips] vaapi acceleration available")
-	} else {
-		log.Printf("[clips] vaapi unavailable, using cpu encode fallback")
-	}
-	return s.hwavail
-}
-
-// probeVaapi runs a tiny synthetic encode to verify the render device works.
-func probeVaapi() bool {
-	if _, err := os.Stat("/dev/dri/renderD128"); err != nil {
-		log.Printf("[clips] VAAPI device unavailable: %v", err)
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, probe.FfmpegBin(), "-v", "error", "-init_hw_device", "vaapi=va:/dev/dri/renderD128", //nolint:gosec // fixed diagnostic invocation with no user input
-		"-f", "lavfi", "-i", "testsrc2=s=320x240:d=0.2", "-vf", "format=nv12,hwupload",
-		"-c:v", "h264_vaapi", "-f", "null", "-")
-	if b, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("[clips] VAAPI encode self-test failed: %v stderr=%q context=%v", err, strings.TrimSpace(string(b)), ctx.Err())
-		return false
-	}
-	return true
 }
 
 // RunWithProgress renders a clip while reporting 0..1 progress (for async jobs).
@@ -534,21 +515,10 @@ func (s *Service) RunWithProgress(ctx context.Context, r Request, report func(fl
 	}
 	path := filepath.Join(outDir, key) + ".mp4"
 
-	hw := s.HWAvailable()
-	if perr := runFFmpegProgress(ctx, accurateArgs(m.Path, m.AudioStreamIndex, start, dur, path, hw, true, s.cfg), dur, report); perr != nil {
-		if !hw {
-			removePartial(path)
-			f.err = perr
-			return "", "", perr
-		}
-		// vaapi may fail mid-run; retry once on cpu
-		log.Printf("[clips] vaapi async encode failed (%v), falling back to cpu", perr)
+	if terr := s.runTranscode(ctx, m.Path, path, start, dur, m.AudioStreamIndex, s.accurateProfile(), report); terr != nil {
 		removePartial(path)
-		if err2 := runFFmpegProgress(ctx, accurateArgs(m.Path, m.AudioStreamIndex, start, dur, path, false, true, s.cfg), dur, report); err2 != nil {
-			removePartial(path)
-			f.err = err2
-			return "", "", err2
-		}
+		f.err = terr
+		return "", "", terr
 	}
 	st, err := os.Stat(path)
 	if err != nil {

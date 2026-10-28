@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"quipster/internal/hardware"
 	"quipster/internal/probe"
 	"quipster/internal/store"
 )
@@ -23,7 +24,7 @@ const bucketSec = 5.0
 type Service struct {
 	St       *store.Store
 	CacheDir string
-	Hw       interface{ HWAvailable() bool } // optional vaapi provider
+	Hw       hardware.Capabilities // detected hw backend; zero value = cpu only
 }
 
 var widths = []int{320, 640}
@@ -106,12 +107,12 @@ func (s *Service) render(ctx context.Context, src string, t float64, width int, 
 	build := func(hw bool) []string {
 		args := []string{"-v", "error", "-y"}
 		if hw {
-			args = append(args, "-hwaccel", "vaapi")
+			args = append(args, s.Hw.DecodeArgs()...)
 		}
 		return append(args, "-ss", fmt.Sprintf("%.3f", t), "-i", src, "-frames:v", "1",
 			"-vf", fmt.Sprintf("scale=%d:-2", width), "-q:v", "5", "-f", "image2", out)
 	}
-	hw := s.Hw != nil && s.Hw.HWAvailable()
+	hw := s.Hw.Available()
 	//nolint:gosec // the ffmpeg binary and media paths are operator supplied.
 	cmd := exec.CommandContext(ctx, probe.FfmpegBin(), build(hw)...)
 	if b, err := cmd.CombinedOutput(); err != nil {

@@ -29,15 +29,107 @@ services:
         bind:
           create_host_path: false
       - app-data:/data
-    devices:
-      - /dev/dri:/dev/dri
-    group_add:
-      - render
-      - video
     depends_on:
       meilisearch:
         condition: service_healthy
     restart: unless-stopped
+
+  # CPU-only variant. No GPU passthrough; ffmpeg encodes with libx264.
+  app-cpu:
+    extends: app
+    image: ghcr.io/ss44/quipster:latest
+    environment:
+      <<: &app-env
+        MEILI_URL: http://meilisearch:7700
+        MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}
+        MEDIA_DIR: /media
+        DATA_DIR: /data
+        CACHE_DIR: /cache
+      HWACCEL: "none"
+    volumes:
+      - type: bind
+        source: ${MEDIA_DIR:?set MEDIA_DIR in .env}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CACHE_DIR:?set CACHE_DIR in .env}
+        target: /cache
+        bind:
+          create_host_path: false
+      - app-data:/data
+    profiles: ["cpu"]
+    depends_on:
+      meilisearch:
+        condition: service_healthy
+
+  # Intel/AMD iGPU (VAAPI/QSV). Exposes /dev/dri so the in-container ffmpeg
+  # detects the render node at startup.
+  app-igpu:
+    extends: app
+    image: ghcr.io/ss44/quipster:latest
+    environment:
+      <<: *app-env
+      HWACCEL: "auto"
+    volumes:
+      - type: bind
+        source: ${MEDIA_DIR:?set MEDIA_DIR in .env}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CACHE_DIR:?set CACHE_DIR in .env}
+        target: /cache
+        bind:
+          create_host_path: false
+      - app-data:/data
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    profiles: ["igpu"]
+    depends_on:
+      meilisearch:
+        condition: service_healthy
+
+  # NVIDIA GPU (NVDEC/NVENC). Requires the NVIDIA Container Toolkit on the
+  # host; NVIDIA_VISIBLE_DEVICES makes the driver libraries visible inside the
+  # container and ffmpeg probes h264_nvenc at startup.
+  app-nvidia:
+    extends: app
+    image: ghcr.io/ss44/quipster:latest
+    environment:
+      <<: *app-env
+      HWACCEL: "nvenc"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    volumes:
+      - type: bind
+        source: ${MEDIA_DIR:?set MEDIA_DIR in .env}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CACHE_DIR:?set CACHE_DIR in .env}
+        target: /cache
+        bind:
+          create_host_path: false
+      - app-data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
+    profiles: ["nvidia"]
+    depends_on:
+      meilisearch:
+        condition: service_healthy
 
   meilisearch:
     image: getmeili/meilisearch:v1.11
