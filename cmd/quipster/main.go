@@ -248,7 +248,19 @@ func main() {
 	}
 	seedLibraryPaths(st)
 
-	ix := indexer.New(st, cfg.meiliURL, cfg.meiliKey)
+	// Semantic search is optional: an invalid embedder configuration logs a
+	// clear error and stays disabled rather than aborting startup.
+	emb, embErr := indexer.ParseEmbedderConfig(os.Getenv)
+	if embErr != nil {
+		log.Printf("semantic search disabled: %v", embErr)
+	} else if emb.Enabled() {
+		log.Printf("semantic search: enabled (source=%s model=%s hybridRatio=%.2f)",
+			emb.Source, emb.Model, emb.SemanticRatio) //nolint:gosec // operator-supplied env, logged locally only
+	} else {
+		log.Printf("semantic search: disabled (set EMBEDDINGS_SOURCE to enable)")
+	}
+
+	ix := indexer.New(st, cfg.meiliURL, cfg.meiliKey, indexer.WithEmbedder(emb))
 	go ensureSettingsLoop(ix, 15*time.Second)
 
 	application := assembleApp(context.Background(), cfg, st, ix)

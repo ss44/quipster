@@ -15,7 +15,9 @@ Media dir (bind-mount, read-only) ──> ingestion; cache dir (clips/thumbs) �
 ```
 
 - **Search unit:** cues are merged into non-overlapping chunks (≤ ~280 chars, ≤ 3 cues) indexed in
-  Meilisearch (`lines` index). Hits are joined back to SQLite for exact cue timestamps.
+  Meilisearch (`lines` index). Hits are joined back to SQLite for exact cue timestamps. With the
+  optional embedder configured, Meilisearch also generates one vector per chunk during ingestion and
+  the search endpoints can run hybrid or pure-semantic queries.
 - **Clips:** `fast` mode stream-copies from the previous keyframe via a single input-seek pass
   (`-c copy`, no keyframe pre-scan); `preview` mode transcodes a low-bitrate 960px H.264 clip
   (ultrafast/VAAPI) so it always plays in the browser; `accurate` mode re-encodes 720p from the
@@ -88,6 +90,38 @@ cached briefly, so opening several tabs does not multiply vendor tool invocation
 `ROLE=api`/`ROLE=worker` deployment the diagnostics page describes the API process; check each
 worker's logs separately.
 
+### Semantic (vector) search
+
+Quipster can search dialogue by meaning, not just exact words. Meilisearch generates the vectors
+itself: configure an embedder once and every subtitle chunk gets embedded during the normal
+ingestion step (the document template embeds only the dialogue text). No extra workers, no local
+model in the Go app.
+
+```sh
+# Free, fully local option (Meilisearch downloads BAAI/bge-base-en-v1.5 on first use):
+EMBEDDINGS_SOURCE=huggingFace
+
+# Any OpenAI-compatible endpoint (OpenAI, Ollama, LM Studio, vLLM ...):
+EMBEDDINGS_SOURCE=openAi
+EMBEDDINGS_API_KEY=sk-...            # local servers accept a placeholder value
+EMBEDDINGS_URL=http://ollama:11434/v1
+EMBEDDINGS_MODEL=nomic-embed-text
+
+# Or any HTTP embedding service via the REST embedder (requires dimensions + templates):
+EMBEDDINGS_SOURCE=rest
+EMBEDDINGS_URL=https://embedder.example/embed
+EMBEDDINGS_DIMENSIONS=768
+EMBEDDINGS_REQUEST={"text":"{{text}}"}
+EMBEDDINGS_RESPONSE={"embedding":"{{embedding}}"}
+```
+
+With an embedder configured, `/api/search` defaults to **hybrid** retrieval (keyword + vectors,
+blend via `EMBEDDINGS_SEMANTIC_RATIO`, default `0.5`), and the results view gains a
+Keyword / Hybrid / Semantic toggle. `mode=semantic` runs pure vector search. Without an embedder
+everything behaves exactly as before — queries degrade to plain keyword search. Changing embedder
+settings makes Meilisearch re-embed the whole index on startup; run **Admin → Reindex** after
+switching models or dimensions to be safe.
+
 ## Configuration
 
 | Env | Default | Meaning |
@@ -116,12 +150,22 @@ worker's logs separately.
 | `LONG_CUT_SEC` | `20` | accurate cuts longer than this run as async jobs with progress |
 | `HWACCEL` | `auto` | `auto` (probe NVENC/QSV/VAAPI/VideoToolbox), `none`/`cpu` (software only), or force a backend: `nvenc`, `qsv`, `vaapi`, `videotoolbox` |
 | `API_TOKEN` | — | when set, guards `/api/admin/*` (header `X-API-Token`) |
+| `EMBEDDINGS_SOURCE` | off | `openAi`, `huggingFace`, or `rest`; enables semantic/vector search |
+| `EMBEDDINGS_URL` | — | embedder endpoint (optional for `openAi`, required for `rest`) |
+| `EMBEDDINGS_API_KEY` | — | embedder API key (required for `openAi`; placeholder accepted for local servers) |
+| `EMBEDDINGS_MODEL` | provider default | embedder model name |
+| `EMBEDDINGS_DIMENSIONS` | — | vector size (optional for `openAi`, required for `rest`) |
+| `EMBEDDINGS_DOCUMENT_TEMPLATE` | `{{doc.text}}` | Liquid template rendering the text to embed |
+| `EMBEDDINGS_REQUEST` / `EMBEDDINGS_RESPONSE` | — | `rest` source JSON request/response templates |
+| `EMBEDDINGS_SEMANTIC_RATIO` | `0.5` | keyword/semantic blend for hybrid queries (0 = keyword only, 1 = pure semantic) |
 
 ## API
 
-- `GET /api/health`
+- `GET /api/health` — also reports `semantic` (embedder configured)
 - `GET /api/suggest?q=` — autocomplete (limit 8, `<mark>` highlight)
-- `GET /api/search?q=&show=&page=` — chunk hits + media meta + cue timestamps
+- `GET /api/search?q=&show=&page=[&mode=keyword|hybrid|semantic]` — chunk hits + media meta + cue
+  timestamps; the response echoes the executed `mode` and `semanticAvailable` (hybrid/semantic fall
+  back to keyword when no embedder is configured)
 - `GET /api/media`, `GET /api/media/{id}`
 - `GET /api/thumb/{mediaId}?t=&w=` — JPEG, 5s-bucketed cache
 - `GET /api/chunks/{mediaId}:{startCueIdx}-{endCueIdx}` — chunk + cues for the clip modal

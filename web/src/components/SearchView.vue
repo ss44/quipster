@@ -66,10 +66,23 @@
           <span class="results-query">“{{ query }}”</span>
           <span v-if="heroCount" class="results-heroes">in {{ heroCount }} {{ heroCount === 1 ? 'title' : 'titles' }}</span>
         </div>
-        <div class="results-hint">
-          <span>All words must match</span>
-          <span class="dot">·</span>
-          <span>“quoted” for exact phrase</span>
+        <div class="results-tools">
+          <div v-if="results?.semanticAvailable" class="mode-toggle" role="group" aria-label="Search mode">
+            <button
+              v-for="m in modeOptions"
+              :key="m.value"
+              type="button"
+              class="mode-btn"
+              :class="{ active: activeMode === m.value }"
+              :aria-pressed="activeMode === m.value"
+              @click="setMode(m.value)"
+            >
+              {{ m.label }}
+            </button>
+          </div>
+          <div class="results-hint">
+            <span>{{ modeHint }}</span>
+          </div>
         </div>
       </header>
 
@@ -119,7 +132,10 @@
               </ul>
 
               <div class="foot">
-                <span class="time">{{ timecode(hit.startSec) }} <span class="sep">–</span> {{ timecode(hit.endSec) }}</span>
+                <span class="time">
+                  {{ timecode(hit.startSec) }} <span class="sep">–</span> {{ timecode(hit.endSec) }}
+                  <span v-if="activeMode !== 'keyword' && hit.score" class="score">{{ matchPct(hit.score) }}</span>
+                </span>
                 <div class="actions">
                   <button type="button" class="btn-text" @click.stop="openClip(hit)">Clip</button>
                   <a class="icon-btn" :href="clipUrl(hit, true)" title="Download this clip" @click.stop>
@@ -167,7 +183,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, clipStreamURL, type Hit, type Quote, type SearchResponse } from '../api'
+import { api, clipStreamURL, type Hit, type Quote, type SearchMode, type SearchResponse } from '../api'
 import BrandLogo from './BrandLogo.vue'
 
 const route = useRoute()
@@ -175,6 +191,54 @@ const router = useRouter()
 
 const examples = ref<string[]>([])
 const quotes = ref<Quote[]>([])
+
+const modeOptions: { value: Exclude<SearchMode, ''>; label: string }[] = [
+  { value: 'keyword', label: 'Keyword' },
+  { value: 'hybrid', label: 'Hybrid' },
+  { value: 'semantic', label: 'Semantic' },
+]
+
+// mode mirrors the ?mode= query param so the chosen retrieval strategy is
+// shareable; '' defers to the server (hybrid when an embedder is configured).
+function modeFromQuery(value: unknown): SearchMode {
+  return value === 'keyword' || value === 'hybrid' || value === 'semantic' ? value : ''
+}
+const mode = ref<SearchMode>(modeFromQuery(route.query.mode))
+watch(
+  () => route.query.mode,
+  (value) => {
+    mode.value = modeFromQuery(value)
+  },
+)
+
+// activeMode falls back to what the server actually executed until the user
+// picks a mode explicitly, so the toggle reflects the first response too.
+const activeMode = computed<Exclude<SearchMode, ''>>(() => {
+  if (mode.value) return mode.value
+  const executed = results.value?.mode
+  return executed === 'semantic' || executed === 'hybrid' ? executed : 'keyword'
+})
+
+const modeHint = computed(() => {
+  switch (activeMode.value) {
+    case 'semantic':
+      return 'Matches dialogue with similar meaning'
+    case 'hybrid':
+      return 'Blends exact words and similar meaning'
+    default:
+      return 'All words must match · “quoted” for exact phrase'
+  }
+})
+
+function setMode(value: Exclude<SearchMode, ''>) {
+  if (mode.value === value) return
+  page.value = 1
+  void router.replace({ name: 'search', query: { q: query.value, mode: value } })
+}
+
+function matchPct(score: number): string {
+  return `${Math.round(Math.min(Math.max(score, 0), 1) * 100)}%`
+}
 
 onMounted(async () => {
   try {
@@ -233,7 +297,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    results.value = await api.search(query.value, '', page.value)
+    results.value = await api.search(query.value, '', page.value, mode.value)
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -241,11 +305,15 @@ async function load() {
   }
 }
 
-watch([query, page], load, { immediate: true })
-watch(query, () => (page.value = 1))
+// Declared before the load watcher so a mode change resets the page within
+// the same flush cycle and triggers only a single fetch.
+watch([query, mode], () => (page.value = 1))
+watch([query, page, mode], load, { immediate: true })
 
 function runQuery(q: string) {
-  router.push({ name: 'search', query: { q } })
+  const next: Record<string, string> = { q }
+  if (mode.value) next.mode = mode.value
+  router.push({ name: 'search', query: next })
 }
 
 function openClip(hit: Hit) {
@@ -448,14 +516,43 @@ function pad(n: number): string {
   color: var(--text);
   font-weight: 500;
 }
+.results-tools {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.mode-toggle {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.mode-btn {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: background 130ms ease, color 130ms ease;
+}
+.mode-btn:hover {
+  color: var(--text);
+}
+.mode-btn.active {
+  background: var(--surface-3);
+  color: var(--text);
+}
 .results-hint {
   display: flex;
   gap: 6px;
   font-size: 12px;
   color: var(--faint);
-}
-.results-hint .dot {
-  opacity: 0.6;
 }
 
 /* grid + cards */
@@ -606,6 +703,14 @@ function pad(n: number): string {
 .time .sep {
   opacity: 0.5;
   padding: 0 2px;
+}
+.score {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 10px;
+  color: var(--muted);
 }
 .actions {
   display: flex;

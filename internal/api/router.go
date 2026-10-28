@@ -67,7 +67,7 @@ func Router(d Deps) http.Handler {
 	})
 
 	r.Get("/api/health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"ok": true, "meiliUp": d.Indexer.Healthy()})
+		writeJSON(w, map[string]any{"ok": true, "meiliUp": d.Indexer.Healthy(), "semantic": d.Indexer.EmbedderEnabled()})
 	})
 
 	// Public read API
@@ -185,7 +185,10 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 	show := r.URL.Query().Get("show")
 	page := atoiQuery(r.URL.Query().Get("page"))
 	perPage := atoiQuery(r.URL.Query().Get("perPage"))
-	res, err := d.Search.Search(q, show, page, perPage)
+	// mode picks keyword/hybrid/semantic retrieval; blank or unknown values
+	// resolve server-side (hybrid when an embedder is configured).
+	mode := r.URL.Query().Get("mode")
+	res, err := d.Search.Search(q, show, page, perPage, mode)
 	if err != nil {
 		log.Printf("[api] search: %v", err)
 		writeErr(w, http.StatusServiceUnavailable, "search unavailable")
