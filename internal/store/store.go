@@ -98,7 +98,9 @@ func (s *Store) migrate() error {
 			start_time REAL NOT NULL DEFAULT 0,
 			ever_indexed INTEGER NOT NULL DEFAULT 0,
 			audio_stream_index INTEGER NOT NULL DEFAULT 0,
-			audio_lang TEXT NOT NULL DEFAULT ''
+			audio_lang TEXT NOT NULL DEFAULT '',
+			optimization_flags TEXT NOT NULL DEFAULT '',
+			optimization_checked INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS subtitle_tracks (
 			id INTEGER PRIMARY KEY,
@@ -176,6 +178,8 @@ func (s *Store) migrate() error {
 		{"ever_indexed", "INTEGER NOT NULL DEFAULT 0"},
 		{"audio_stream_index", "INTEGER NOT NULL DEFAULT 0"},
 		{"audio_lang", "TEXT NOT NULL DEFAULT ''"},
+		{"optimization_flags", "TEXT NOT NULL DEFAULT ''"},
+		{"optimization_checked", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, m := range migrations {
 		var n int

@@ -43,6 +43,13 @@ func (d Deps) handleDiagnosticsBenchmarks(w http.ResponseWriter, r *http.Request
 	writeJSON(w, d.Diagnostics.Benchmarks(r.URL.Query().Get("window")))
 }
 
+func (d Deps) handleDiagnosticsMediaOptimization(w http.ResponseWriter, _ *http.Request) {
+	if d.diagnosticsUnavailable(w) {
+		return
+	}
+	writeJSON(w, d.Diagnostics.MediaOptimizationStats())
+}
+
 // handleDiagnosticsStream streams gauge snapshots over SSE.
 func (d Deps) handleDiagnosticsStream(w http.ResponseWriter, r *http.Request) {
 	if d.diagnosticsUnavailable(w) {

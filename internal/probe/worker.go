@@ -124,9 +124,16 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 		} else {
 			audioOrdinal = -1
 		}
+		flags := optimizationFlags(res)
+		if len(flags) > 0 {
+			logger.Printf("stage=optimization recommended=true flags=%q video_bitrate=%d format_bitrate=%d avg_frame_rate=%.3f nominal_frame_rate=%.3f max_b_frames=%d", flags, res.metadata.videoBitRate, res.metadata.formatBitRate, res.metadata.avgFrameRate, res.metadata.frameRate, res.metadata.maxBFrames)
+		}
 		logger.Printf("stage=metadata probe ok elapsed=%s container=%q duration_sec=%.3f video=%q width=%d height=%d audio=%q audio_streams=%d audio_ordinal=%d audio_lang=%q subtitle_streams=%d", elapsed, res.Container, res.Duration, res.VideoCodec, res.Width, res.Height, res.AudioCodec, len(res.Audio), audioOrdinal, audioLang, len(res.Subs))
 		stage = "metadata_store"
 		if uerr := p.St.UpdateMediaProbe(m.ID, res.Duration, res.Width, res.Height, res.VideoCodec, res.AudioCodec, res.Container, res.StartTime, audioOrdinal, audioLang); uerr != nil {
+			return uerr
+		}
+		if uerr := p.St.UpdateMediaOptimizationFlags(m.ID, flags); uerr != nil {
 			return uerr
 		}
 		progress(0.3)

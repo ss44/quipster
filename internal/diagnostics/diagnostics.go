@@ -127,6 +127,14 @@ type SystemInfo struct {
 	Container   bool              `json:"container"`
 }
 
+// MediaOptimizationStats summarizes files whose probe metadata matches a recommendation heuristic.
+type MediaOptimizationStats struct {
+	Codes       map[string]int64 `json:"codes"`
+	UpdatedAt   int64            `json:"updatedAt"`
+	Scanned     int64            `json:"scanned"`
+	Recommended int64            `json:"recommended"`
+}
+
 // cpuTimes is a raw /proc/stat sample used to compute a CPU percentage delta.
 type cpuTimes struct {
 	at    time.Time
@@ -264,6 +272,22 @@ func (c *Collector) Logs(limit int) []string {
 		return nil
 	}
 	return c.LogBuffer.Lines(limit)
+}
+
+// MediaOptimizationStats summarizes persisted media probe recommendations.
+func (c *Collector) MediaOptimizationStats() *MediaOptimizationStats {
+	stats := &MediaOptimizationStats{UpdatedAt: time.Now().UnixMilli(), Codes: map[string]int64{}}
+	if c == nil || c.St == nil {
+		return stats
+	}
+	scanned, recommended, codes, err := c.St.MediaOptimizationStats()
+	if err != nil {
+		return stats
+	}
+	stats.Scanned = scanned
+	stats.Recommended = recommended
+	stats.Codes = codes
+	return stats
 }
 
 // collectSystem gathers the slow-changing environment report.

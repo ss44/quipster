@@ -48,6 +48,14 @@ type AudioStream struct {
 	Default  bool
 }
 
+type optimizationMetadata struct {
+	videoBitRate  int64
+	formatBitRate int64
+	avgFrameRate  float64
+	frameRate     float64
+	maxBFrames    int
+}
+
 // Result is the probe summary of a media file: format metadata plus the
 // audio and subtitle streams relevant for clip building.
 type Result struct {
@@ -60,6 +68,7 @@ type Result struct {
 	Width      int
 	Height     int
 	StartTime  float64
+	metadata   optimizationMetadata
 }
 
 // ffprobeOut mirrors the subset of ffprobe JSON output the pipeline consumes.
@@ -69,17 +78,22 @@ type ffprobeOut struct {
 		FormatName string `json:"format_name"`
 		Duration   string `json:"duration"`
 		StartTime  string `json:"start_time"`
+		BitRate    string `json:"bit_rate"`
 	} `json:"format"`
 	Streams []struct {
-		Tags        map[string]string `json:"tags"`
-		CodecName   string            `json:"codec_name"`
-		CodecType   string            `json:"codec_type"`
-		Duration    string            `json:"duration"`
-		Index       int               `json:"index"`
-		Width       int               `json:"width"`
-		Height      int               `json:"height"`
-		Channels    int               `json:"channels"`
-		Disposition struct {
+		Tags         map[string]string `json:"tags"`
+		CodecName    string            `json:"codec_name"`
+		CodecType    string            `json:"codec_type"`
+		Duration     string            `json:"duration"`
+		BitRate      string            `json:"bit_rate"`
+		AvgFrameRate string            `json:"avg_frame_rate"`
+		FrameRate    string            `json:"r_frame_rate"`
+		Index        int               `json:"index"`
+		Width        int               `json:"width"`
+		Height       int               `json:"height"`
+		Channels     int               `json:"channels"`
+		HasBFrames   int               `json:"has_b_frames"`
+		Disposition  struct {
 			Default int `json:"default"`
 		} `json:"disposition"`
 	} `json:"streams"`
@@ -96,6 +110,27 @@ func envOr(k, d string) string {
 		return v
 	}
 	return d
+}
+
+func parseBitRate(s string) int64 {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func parseRate(s string) float64 {
+	parts := strings.Split(s, "/")
+	if len(parts) != 2 {
+		return 0
+	}
+	numerator, nerr := strconv.ParseFloat(parts[0], 64)
+	denominator, derr := strconv.ParseFloat(parts[1], 64)
+	if nerr != nil || derr != nil || denominator == 0 || numerator <= 0 {
+		return 0
+	}
+	return numerator / denominator
 }
 
 func fileDuration(o *ffprobeOut) float64 {
@@ -162,6 +197,7 @@ func Probe(ctx context.Context, path string) (*Result, error) {
 	r := &Result{
 		Duration:  fileDuration(&o),
 		Container: o.Format.FormatName,
+		metadata:  optimizationMetadata{formatBitRate: parseBitRate(o.Format.BitRate)},
 	}
 	// start_time is best-effort metadata; a missing or unparsable value
 	// simply means no drift correction later.
@@ -177,6 +213,10 @@ func Probe(ctx context.Context, path string) (*Result, error) {
 				r.VideoCodec = s.CodecName
 				r.Width = s.Width
 				r.Height = s.Height
+				r.metadata.videoBitRate = parseBitRate(s.BitRate)
+				r.metadata.avgFrameRate = parseRate(s.AvgFrameRate)
+				r.metadata.frameRate = parseRate(s.FrameRate)
+				r.metadata.maxBFrames = s.HasBFrames
 			}
 		case "audio":
 			r.Audio = append(r.Audio, AudioStream{

@@ -205,6 +205,9 @@ func TestReportRedactsSecrets(t *testing.T) {
 	if !strings.Contains(report, "### Quipster diagnostics") {
 		t.Errorf("report missing header:\n%s", report)
 	}
+	if !strings.Contains(report, "Media optimization:") {
+		t.Errorf("report missing media optimization summary:\n%s", report)
+	}
 	if strings.Contains(report, "supersecret-value") {
 		t.Error("report leaked a secret")
 	}
@@ -245,7 +248,7 @@ func TestBundleContentsAndPathRedaction(t *testing.T) {
 			t.Errorf("%s leaked a secret", f.Name)
 		}
 	}
-	for _, want := range []string{"system.json", "metrics.json", "benchmarks.json", "jobs.json", "logs.txt", "README.txt"} {
+	for _, want := range []string{"system.json", "metrics.json", "benchmarks.json", "media-optimization.json", "jobs.json", "logs.txt", "README.txt"} {
 		if !names[want] {
 			t.Errorf("bundle missing %s", want)
 		}
@@ -287,6 +290,15 @@ func TestStreamHandlerSendsInitialFrame(t *testing.T) {
 	}
 	if !strings.Contains(string(buf[:n]), "event: tick") {
 		t.Errorf("first frame = %q", string(buf[:n]))
+	}
+}
+
+func TestOptimizationCodeSummary(t *testing.T) {
+	if optimizationCodeSummary(nil) != "none" {
+		t.Fatal("empty optimization codes should render as none")
+	}
+	if got := optimizationCodeSummary(map[string]int64{"z": 1, "a": 2}); got != "a=2, z=1" {
+		t.Fatalf("optimization summary = %q", got)
 	}
 }
 
