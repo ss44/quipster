@@ -151,10 +151,9 @@ const examples = ref<string[]>([])
 
 onMounted(async () => {
   try {
-    const res = await api.examples()
-    examples.value = res.examples || []
-  } catch (e) {
-    console.error('Failed to load examples:', e)
+    examples.value = (await api.examples()).examples
+  } catch {
+    examples.value = []
   }
 })
 
