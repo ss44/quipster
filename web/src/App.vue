@@ -2,8 +2,8 @@
   <v-app>
     <header class="app-header">
       <div class="header-inner">
-        <RouterLink to="/" class="text-decoration-none d-flex align-center">
-          <span class="wordmark">Quipster</span>
+        <RouterLink to="/" class="text-decoration-none d-flex align-center" aria-label="Quipster home">
+          <BrandLogo :size="26" />
         </RouterLink>
 
         <div class="search-slot">
@@ -46,6 +46,7 @@ import { onMounted, onUnmounted, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import SearchBar from './components/SearchBar.vue'
 import ClipModal from './components/ClipModal.vue'
+import BrandLogo from './components/BrandLogo.vue'
 
 const router = useRouter()
 const snack = reactive({ show: false, text: '', color: 'success' })

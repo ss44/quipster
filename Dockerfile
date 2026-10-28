@@ -5,6 +5,8 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install
 COPY web/ ./
+ARG VITE_SITE_URL=""
+ENV VITE_SITE_URL=$VITE_SITE_URL
 RUN npm run build
 
 FROM golang:1.27-bookworm AS gobuild

@@ -91,24 +91,6 @@ body {
   background: var(--surface-1);
   border-bottom: 1px solid var(--border);
 }
-.wordmark {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 1px;
-  font-weight: 700;
-  font-size: 17px;
-  letter-spacing: -0.01em;
-  color: var(--text);
-}
-.wordmark::after {
-  content: '•';
-  color: var(--accent);
-  font-size: 20px;
-  line-height: 0;
-}
-.wordmark:hover {
-  color: #fff;
-}
 .nav-link {
   font-size: 13px;
   font-weight: 500;

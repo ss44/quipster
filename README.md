@@ -160,6 +160,10 @@ sh testdata/make_fixtures.sh                 # small fixture library (sidecar/em
 The built SPA (`web/dist`) is embedded into the Go binary via `go:embed`; rebuild the web app
 before `go build` after frontend changes.
 
+Set `VITE_SITE_URL` (for example `https://quipster.example.com`) when building the web app — or pass
+it as a `--build-arg` to `docker build` — so `og:image`/`twitter:image` are emitted as absolute URLs.
+When it is unset the paths stay relative, which browsers render but social crawlers ignore.
+
 ## Notes & limits (MVP)
 
 - Probing is bounded so file size cannot stall ingestion: ffprobe runs with a 10-second analysis
