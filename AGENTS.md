@@ -19,7 +19,7 @@ Based on the repository's history and architecture, you must use one of the foll
 - `INFRA`: For infrastructure adjustments, Dockerfiles, Docker Compose configurations, and GitHub Actions (CI).
 - `DOCS`: For changes strictly relating to READMEs, markdown documentation, or licensing.
 
-*Example:* `backend: fix subtitle extraction concurrency limits on NFS`
+*Example:* `BACKEND: fix subtitle extraction concurrency limits on NFS`
 
 ## 2. Architecture and Design Standards
 
