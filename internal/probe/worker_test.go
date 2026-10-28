@@ -1,8 +1,6 @@
 package probe
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestClampMin(t *testing.T) {
 	if got := clampMin(5.0); got != 5.0 {
@@ -25,7 +23,7 @@ func TestPipelineSem(t *testing.T) {
 	if cap(s) != 3 {
 		t.Errorf("expected cap 3, got %d", cap(s))
 	}
-	
+
 	// Default
 	p2 := &Pipeline{}
 	s2 := p2.sem()

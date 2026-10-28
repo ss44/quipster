@@ -60,3 +60,14 @@ func TestPickEnglishAudioEmpty(t *testing.T) {
 		t.Fatalf("expected nil for empty tracks, got %+v", got)
 	}
 }
+
+func TestPickEnglishAudioAllUnusable(t *testing.T) {
+	tracks := []AudioStream{
+		{Ordinal: 0, Codec: "aac", Lang: "en", Title: "Commentary"},
+		{Ordinal: 1, Codec: "ac3", Lang: "en", Title: "Audio Description"},
+	}
+	got := PickEnglishAudio(tracks)
+	if got == nil || got.Ordinal != 0 {
+		t.Fatalf("expected raw first track when every track is commentary/description, got %+v", got)
+	}
+}
