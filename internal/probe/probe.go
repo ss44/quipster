@@ -27,6 +27,10 @@ const (
 	// defaultProbeTimeout bounds one ffprobe run before it is killed and the
 	// file skipped.
 	defaultProbeTimeout = 60 * time.Second
+	// defaultExtractTimeout bounds one embedded-subtitle extraction. Without
+	// it a stalled ffmpeg can occupy a probe worker (and the media share) for
+	// the whole multi-hour job timeout.
+	defaultExtractTimeout = 10 * time.Minute
 )
 
 // SubtitleStream describes one embedded subtitle stream reported by ffprobe.

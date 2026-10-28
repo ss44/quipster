@@ -102,6 +102,7 @@ func (s *Store) migrate() error {
 			optimization_flags TEXT NOT NULL DEFAULT '',
 			optimization_checked INTEGER NOT NULL DEFAULT 0
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_media_status ON media_files(status)`,
 		`CREATE TABLE IF NOT EXISTS subtitle_tracks (
 			id INTEGER PRIMARY KEY,
 			media_file_id INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
@@ -110,6 +111,7 @@ func (s *Store) migrate() error {
 			stream_index INTEGER NOT NULL DEFAULT 0,
 			extracted_path TEXT NOT NULL DEFAULT ''
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_subtitle_tracks_media ON subtitle_tracks(media_file_id)`,
 		`CREATE TABLE IF NOT EXISTS chunks (
 			id INTEGER PRIMARY KEY,
 			media_file_id INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
@@ -119,6 +121,7 @@ func (s *Store) migrate() error {
 			indexed_at INTEGER NOT NULL DEFAULT 0,
 			UNIQUE(media_file_id, start_cue_idx)
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_indexed ON chunks(indexed_at, media_file_id)`,
 		`CREATE TABLE IF NOT EXISTS cues (
 			id INTEGER PRIMARY KEY,
 			media_file_id INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
@@ -147,6 +150,7 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(status, priority DESC, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_jobs_type_status_finished ON jobs(type, status, finished_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_jobs_dedupe ON jobs(type, payload, status)`,
 		`CREATE TABLE IF NOT EXISTS scans (
 			id INTEGER PRIMARY KEY,
 			root_path TEXT NOT NULL,
@@ -156,6 +160,7 @@ func (s *Store) migrate() error {
 			started_at INTEGER NOT NULL DEFAULT 0,
 			finished_at INTEGER NOT NULL DEFAULT 0
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_scans_status ON scans(status, id)`,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL DEFAULT ''

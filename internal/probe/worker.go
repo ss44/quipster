@@ -30,7 +30,11 @@ type Pipeline struct {
 	// timed-out probe is killed and the file skipped instead of stalling the
 	// queue (issue #1).
 	ProbeTimeout time.Duration
-	once         sync.Once
+	// ExtractTimeout bounds one embedded-subtitle extraction; <=0 uses
+	// defaultExtractTimeout. This keeps a pathological file from pinning a
+	// worker for the full JOB_TIMEOUT and starving the rest of the queue.
+	ExtractTimeout time.Duration
+	once           sync.Once
 }
 
 func (p *Pipeline) probeTimeout() time.Duration {
@@ -38,6 +42,13 @@ func (p *Pipeline) probeTimeout() time.Duration {
 		return p.ProbeTimeout
 	}
 	return defaultProbeTimeout
+}
+
+func (p *Pipeline) extractTimeout() time.Duration {
+	if p.ExtractTimeout > 0 {
+		return p.ExtractTimeout
+	}
+	return defaultExtractTimeout
 }
 
 func (p *Pipeline) sem() chan struct{} {
@@ -200,6 +211,9 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 					if ctx.Err() != nil {
 						return ctx.Err()
 					}
+					if xerr != nil && errors.Is(xerr, context.DeadlineExceeded) {
+						logger.Printf("stage=extraction timed out after %s", p.extractTimeout())
+					}
 				} else {
 					logger.Printf("stage=extraction cache reused path=%q (no full-file scan)", outPath)
 				}
@@ -317,6 +331,15 @@ func (p *Pipeline) extract(ctx context.Context, path string, ordinal int, outPat
 		return err
 	}
 	logger.Printf("stage=extraction_queue acquired wait_elapsed=%s active=%d capacity=%d", time.Since(waitStart).Round(time.Millisecond), len(sem), cap(sem))
+	// The timeout starts after the concurrency slot is acquired: waiting
+	// behind other full-file extractions must not turn a healthy file into a
+	// false no_subs result.
+	runCtx := ctx
+	if d := p.extractTimeout(); d > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
+	}
 	started := time.Now()
 	logger.Printf("stage=extraction started ordinal=%d output=%q gpu=false (full-file container scan, storage-bound; CPU subtitle conversion, no GPU; elapsed only, not measured bytes or throughput)", ordinal, outPath)
 	stop, done := make(chan struct{}), make(chan struct{})
@@ -328,14 +351,19 @@ func (p *Pipeline) extract(ctx context.Context, path string, ordinal int, outPat
 			select {
 			case <-stop:
 				return
+			case <-runCtx.Done():
+				return
 			case <-ticker.C:
 				logger.Printf("stage=extraction running elapsed=%s (elapsed only, not measured bytes or throughput)", time.Since(started).Round(time.Second))
 			}
 		}
 	}()
-	err := ExtractSubtitle(ctx, path, ordinal, outPath)
+	err := ExtractSubtitle(runCtx, path, ordinal, outPath)
 	close(stop)
 	<-done
+	if err != nil && runCtx.Err() != nil && ctx.Err() == nil {
+		err = fmt.Errorf("subtitle extraction timed out after %s: %w", p.extractTimeout(), runCtx.Err())
+	}
 	if err != nil {
 		logger.Printf("stage=extraction failed elapsed=%s error=%q", time.Since(started).Round(time.Millisecond), err)
 	} else {

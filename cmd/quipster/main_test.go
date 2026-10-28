@@ -87,6 +87,7 @@ func clearConfigEnv(t *testing.T) {
 		"MEILI_MASTER_KEY", "SCAN_INTERVAL", "SUBTITLE_WORKERS", "INDEX_WORKERS",
 		"CLIP_WORKERS", "API_TOKEN", "CLIP_PAD_MS", "MAX_CLIP_SEC", "CACHE_MAX_GB",
 		"LONG_CUT_SEC", "CLIP_PREVIEW_RES", "CLIP_ACCURATE_RES", "CLIP_CPU_PRESET",
+		"SCAN_TIMEOUT", "EXTRACT_TIMEOUT", "PROBE_TIMEOUT",
 	} {
 		t.Setenv(key, "")
 	}
@@ -95,22 +96,24 @@ func clearConfigEnv(t *testing.T) {
 func TestLoadConfigDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	want := config{
-		addr:         ":8080",
-		role:         "all",
-		dataDir:      "./data",
-		mediaDir:     "./media",
-		cacheDir:     "./cache",
-		meiliURL:     "http://localhost:7700",
-		meiliKey:     "",
-		scanIntvl:    0,
-		subWorkers:   4,
-		indexWorkers: 4,
-		clipWorkers:  2,
-		apiToken:     "",
-		padMs:        250,
-		maxClipSec:   120,
-		cacheMaxGB:   10,
-		longCutSec:   20,
+		addr:           ":8080",
+		role:           "all",
+		dataDir:        "./data",
+		mediaDir:       "./media",
+		cacheDir:       "./cache",
+		meiliURL:       "http://localhost:7700",
+		meiliKey:       "",
+		scanIntvl:      0,
+		subWorkers:     4,
+		indexWorkers:   4,
+		clipWorkers:    2,
+		apiToken:       "",
+		padMs:          250,
+		maxClipSec:     120,
+		cacheMaxGB:     10,
+		longCutSec:     20,
+		scanTimeout:    2 * time.Hour,
+		extractTimeout: 10 * time.Minute,
 	}
 	if got := loadConfig(); got != want {
 		t.Errorf("loadConfig = %+v, want %+v", got, want)
@@ -150,22 +153,24 @@ func TestLoadConfigOverrides(t *testing.T) {
 		t.Setenv(k, v)
 	}
 	want := config{
-		addr:         ":9000",
-		role:         "api",
-		dataDir:      "/data",
-		mediaDir:     "/media",
-		cacheDir:     "/cache",
-		meiliURL:     "http://meili:7700",
-		meiliKey:     "key",
-		scanIntvl:    15 * time.Minute,
-		subWorkers:   8,
-		indexWorkers: 6,
-		clipWorkers:  3,
-		apiToken:     "token",
-		padMs:        100,
-		maxClipSec:   300,
-		cacheMaxGB:   2.5,
-		longCutSec:   30,
+		addr:           ":9000",
+		role:           "api",
+		dataDir:        "/data",
+		mediaDir:       "/media",
+		cacheDir:       "/cache",
+		meiliURL:       "http://meili:7700",
+		meiliKey:       "key",
+		scanIntvl:      15 * time.Minute,
+		subWorkers:     8,
+		indexWorkers:   6,
+		clipWorkers:    3,
+		apiToken:       "token",
+		padMs:          100,
+		maxClipSec:     300,
+		cacheMaxGB:     2.5,
+		longCutSec:     30,
+		scanTimeout:    2 * time.Hour,
+		extractTimeout: 10 * time.Minute,
 	}
 	if got := loadConfig(); got != want {
 		t.Errorf("loadConfig = %+v, want %+v", got, want)

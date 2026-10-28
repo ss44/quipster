@@ -8,7 +8,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"quipster/internal/store"
@@ -26,14 +28,50 @@ var skipDirs = map[string]bool{
 	".grab": true, "lost+found": true,
 }
 
+const (
+	defaultBatchSize   = 200
+	defaultScanTimeout = 2 * time.Hour
+	progressInterval   = 2 * time.Second
+	probeEnqueueBatch  = 1000
+)
+
 // Result summarizes one scan walk: how many files were seen, added,
 // changed, and removed.
 type Result struct {
-	ScanID  int64
-	Seen    int
-	Added   int
-	Changed int
-	Removed int
+	ScanID     int64
+	Seen       int
+	Walked     int
+	Added      int
+	Changed    int
+	Removed    int
+	Probes     int
+	Errors     int
+	WalkErrors int
+}
+
+// Options tunes a scan run. Timeout is applied by JobHandler; BatchSize
+// controls how many file-system entries are committed per transaction.
+type Options struct {
+	Timeout   time.Duration
+	BatchSize int
+}
+
+// Option customizes a scan handler.
+type Option func(*Options)
+
+// WithTimeout bounds a scan job. A non-positive duration disables the
+// scan-specific timeout and leaves the runner's JOB_TIMEOUT as the only bound.
+func WithTimeout(d time.Duration) Option {
+	return func(o *Options) { o.Timeout = d }
+}
+
+// WithBatchSize sets how many media entries are upserted per transaction.
+func WithBatchSize(n int) Option {
+	return func(o *Options) {
+		if n > 0 {
+			o.BatchSize = n
+		}
+	}
 }
 
 // CleanRoots normalises library folder paths relative to the media root:
@@ -70,7 +108,15 @@ func CleanRoots(roots []string) ([]string, error) {
 // and enqueues probe jobs for new or changed files. With prune=true, media rows
 // outside the configured folders are removed (Meili cleanup via onDeleted).
 func Run(ctx context.Context, mediaRoot string, roots []string, prune bool, st *store.Store, onDeleted func(ids []int64)) (*Result, error) {
-	res := &Result{}
+	return runWithOptions(ctx, mediaRoot, roots, prune, st, onDeleted, Options{BatchSize: defaultBatchSize})
+}
+
+// runWithOptions is the testable scan entry point. Probe enqueueing is
+// deliberately deferred until the walk completes: probing the first media
+// file while the walker is still traversing the library makes every stat and
+// SQLite write contend with a full-file read from the same network share.
+func runWithOptions(ctx context.Context, mediaRoot string, roots []string, prune bool, st *store.Store, onDeleted func(ids []int64), opts Options) (res *Result, err error) {
+	res = &Result{}
 	scanLabel := mediaRoot
 	if len(roots) > 0 {
 		scanLabel = mediaRoot + " [" + strings.Join(roots, ", ") + "]"
@@ -80,37 +126,98 @@ func Run(ctx context.Context, mediaRoot string, roots []string, prune bool, st *
 		return nil, err
 	}
 	res.ScanID = scanID
-	keep := map[string]bool{}
-	lastFlush := time.Now()
+	started := time.Now()
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[scan] #%d panic: %v\n%s", scanID, rec, debug.Stack())
+			err = fmt.Errorf("scan panic: %v", rec)
+		}
+		status := "done"
+		if err != nil {
+			status = "error"
+		}
+		if uerr := st.UpdateScan(scanID, int64(res.Seen), int64(res.Seen), status); uerr != nil {
+			log.Printf("[scan] #%d update status %s: %v", scanID, status, uerr)
+		}
+	}()
 
+	batchSize := opts.BatchSize
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
+	// Recover media whose previous scan wrote the row but died before it could
+	// enqueue its probe. This is best-effort: the walk should still run if the
+	// recovery query is temporarily unavailable.
+	if n, rerr := recoverPendingProbes(ctx, st); rerr != nil {
+		log.Printf("[scan] #%d pending probe recovery: %v", scanID, rerr)
+	} else if n > 0 {
+		log.Printf("[scan] #%d recovered %d pending probe job(s)", scanID, n)
+	}
+
+	keep := map[string]bool{}
+	batch := newMediaBatch(st, res, batchSize)
 	walkRoots := roots
 	if len(walkRoots) == 0 {
 		walkRoots = []string{""}
 	}
-	for _, relRoot := range walkRoots {
+	if walkErr := walkAll(ctx, mediaRoot, walkRoots, st, res, keep, batch, scanID, started); walkErr != nil {
+		return res, walkErr
+	}
+	batch.Flush()
+	pruneOrLog(st, mediaRoot, walkRoots, keep, prune, res, scanID, onDeleted)
+
+	probes, perr := enqueueProbes(ctx, st, batch.probeIDs)
+	res.Probes = probes
+	if perr != nil {
+		log.Printf("[scan] #%d enqueue probe jobs after %d file(s): %v", scanID, probes, perr)
+	}
+	log.Printf("[scan] #%d complete roots=%v prune=%v walked=%d seen=%d changed=%d removed=%d probes=%d errors=%d walk_errors=%d elapsed=%s",
+		scanID, roots, prune, res.Walked, res.Seen, res.Changed, res.Removed, res.Probes, res.Errors, res.WalkErrors,
+		time.Since(started).Round(time.Second))
+	return res, nil
+}
+
+// walkAll walks every root, sharing the keep set and upsert batch. A shared
+// batch lets a large root commit in bounded transaction sizes without holding a
+// transaction open across the whole file-system walk.
+func walkAll(ctx context.Context, mediaRoot string, roots []string, st *store.Store, res *Result, keep map[string]bool, batch *mediaBatch, scanID int64, started time.Time) error {
+	for _, relRoot := range roots {
 		root := mediaRoot
 		if relRoot != "" {
 			root = filepath.Join(mediaRoot, filepath.FromSlash(relRoot))
 		}
-		err = walkRoot(ctx, mediaRoot, root, st, res, keep, scanID, &lastFlush)
-		if err != nil {
-			if uerr := st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "error"); uerr != nil {
-				log.Printf("[scan] update status error: %v", uerr)
-			}
-			return res, err
+		w := &walker{
+			mediaRoot: mediaRoot,
+			root:      root,
+			st:        st,
+			res:       res,
+			keep:      keep,
+			scanID:    scanID,
+			started:   started,
+			batch:     batch,
+		}
+		walkErr := w.walkWithHeartbeat(ctx)
+		batch.Flush()
+		if walkErr != nil {
+			return walkErr
 		}
 	}
+	return nil
+}
 
+// pruneOrLog removes rows for files that were not seen, but only when the walk
+// completed without a single read/stat error. A partial tree is not evidence
+// that the unvisited files disappeared.
+func pruneOrLog(st *store.Store, mediaRoot string, walkRoots []string, keep map[string]bool, prune bool, res *Result, scanID int64, onDeleted func([]int64)) {
+	if res.WalkErrors > 0 {
+		log.Printf("[scan] #%d skipping prune: %d walk error(s) left the tree incomplete", scanID, res.WalkErrors)
+		return
+	}
 	removedIDs := deleteMissing(st, mediaRoot, walkRoots, keep, prune)
 	res.Removed = len(removedIDs)
-
-	if uerr := st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "done"); uerr != nil {
-		log.Printf("[scan] update status done: %v", uerr)
-	}
 	if onDeleted != nil && len(removedIDs) > 0 {
 		onDeleted(removedIDs)
 	}
-	return res, nil
 }
 
 // deleteMissing limits deletion to walked folders unless pruning was requested.
@@ -157,69 +264,245 @@ func isIgnored(path, root string, d fs.DirEntry) (bool, error) {
 	return false, nil
 }
 
-// walkRoot walks one library folder; library-relative paths are always
-// computed from mediaRoot so parsing context stays consistent.
-func walkRoot(ctx context.Context, mediaRoot, root string, st *store.Store, res *Result, keep map[string]bool, scanID int64, lastFlush *time.Time) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+// walker owns the mutable state for one root walk. A heartbeat logs the current
+// path every couple of seconds so a blocked stat on a network mount is visible
+// in the admin logs instead of looking like a silent hang.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
+type walker struct {
+	st        *store.Store
+	res       *Result
+	keep      map[string]bool
+	batch     *mediaBatch
+	mediaRoot string
+	root      string
+	current   string
+	scanID    int64
+	started   time.Time
+	mu        sync.Mutex
+}
+
+// walkWithHeartbeat guarantees the progress goroutine is stopped even when a
+// parser or store panic unwinds the walk.
+func (w *walker) walkWithHeartbeat(ctx context.Context) error {
+	stop := w.startHeartbeat(ctx)
+	defer stop()
+	return w.walk(ctx)
+}
+
+func (w *walker) startHeartbeat(ctx context.Context) func() {
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		ticker := time.NewTicker(progressInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				w.mu.Lock()
+				seen, walked, current := w.res.Seen, w.res.Walked, w.current
+				w.mu.Unlock()
+				log.Printf("[scan] #%d progress seen=%d walked=%d elapsed=%s current=%q",
+					w.scanID, seen, walked, time.Since(w.started).Round(time.Second), current)
+				if uerr := w.st.UpdateScan(w.scanID, int64(seen), int64(seen), ""); uerr != nil {
+					log.Printf("[scan] #%d progress update: %v", w.scanID, uerr)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+	}
+}
+
+// walk visits one root. Directory entries are counted even when they are not
+// media so a walk stuck in a large non-media tree still shows forward progress.
+func (w *walker) walk(ctx context.Context) error {
+	return filepath.WalkDir(w.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if path == w.root {
+				// A configured root that cannot be read is a failed scan, not a
+				// partial walk: surface it so the job retries and the admin sees
+				// an error instead of a false "done".
+				return fmt.Errorf("scan root %s: %w", path, err)
+			}
+			w.mu.Lock()
+			w.res.WalkErrors++
+			w.mu.Unlock()
 			log.Printf("[scan] walk %s: %v", path, err)
 			return nil
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if skip, walkErr := isIgnored(path, root, d); skip {
+		w.mu.Lock()
+		w.res.Walked++
+		w.current = path
+		w.mu.Unlock()
+		if skip, walkErr := isIgnored(path, w.root, d); skip {
 			return walkErr
 		}
-		info, err := d.Info()
+
+		// Keep the path before stat so a transient stat failure cannot cause
+		// the prune pass to delete an existing media row.
+		w.keep[path] = true
+		rel, err := filepath.Rel(w.mediaRoot, path)
 		if err != nil {
-			log.Printf("[scan] stat %s: %v", path, err)
-			return nil //nolint:nilerr // unreadable entry: skip and continue the walk.
-		}
-		rel, err := filepath.Rel(mediaRoot, path)
-		if err != nil {
+			w.mu.Lock()
+			w.res.WalkErrors++
+			w.mu.Unlock()
 			log.Printf("[scan] rel %s: %v", path, err)
 			return nil //nolint:nilerr // path outside root: skip and continue the walk.
 		}
-		rel = filepath.ToSlash(rel)
-		keep[path] = true
-		res.Seen++
+		info, err := d.Info()
+		if err != nil {
+			w.mu.Lock()
+			w.res.WalkErrors++
+			w.mu.Unlock()
+			log.Printf("[scan] stat %s: %v", path, err)
+			return nil //nolint:nilerr // unreadable entry: skip and continue the walk.
+		}
+		w.mu.Lock()
+		w.res.Seen++
+		w.mu.Unlock()
 
-		if !recordMedia(st, res, path, rel, strings.ToLower(filepath.Ext(d.Name())), info) {
-			return nil
-		}
-		if time.Since(*lastFlush) > 400*time.Millisecond {
-			*lastFlush = time.Now()
-			if uerr := st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), ""); uerr != nil {
-				log.Printf("[scan] update progress: %v", uerr)
-			}
-		}
+		p := Parse(filepath.ToSlash(rel))
+		w.batch.Add(store.MediaUpsert{
+			Path:      path,
+			Container: strings.TrimPrefix(strings.ToLower(filepath.Ext(d.Name())), "."),
+			Size:      info.Size(),
+			Mtime:     info.ModTime().Unix(),
+			Title:     p.Title,
+			Year:      p.Year,
+			Season:    p.Season,
+			Episode:   p.Episode,
+			ShowTitle: p.ShowTitle,
+		})
 		return nil
 	})
 }
 
-// recordMedia upserts metadata and queues probing when file contents changed.
-// A failed upsert or payload prevents this entry from triggering a progress flush.
-func recordMedia(st *store.Store, res *Result, path, rel, ext string, info fs.FileInfo) bool {
-	p := Parse(rel)
-	id, changed, err := st.UpsertMedia(path, strings.TrimPrefix(ext, "."), info.Size(), info.ModTime().Unix(),
-		p.Title, p.Year, p.Season, p.Episode, p.ShowTitle)
+// mediaBatch buffers media rows and commits them in transactions. A failed
+// batch is retried entry-by-entry so one malformed row cannot discard the
+// progress of the whole batch.
+type mediaBatch struct {
+	st       *store.Store
+	res      *Result
+	entries  []store.MediaUpsert
+	probeIDs []int64
+	size     int
+}
+
+func newMediaBatch(st *store.Store, res *Result, size int) *mediaBatch {
+	if size <= 0 {
+		size = defaultBatchSize
+	}
+	return &mediaBatch{st: st, res: res, size: size}
+}
+
+func (b *mediaBatch) Add(entry store.MediaUpsert) {
+	b.entries = append(b.entries, entry)
+	if len(b.entries) >= b.size {
+		b.Flush()
+	}
+}
+
+func (b *mediaBatch) Flush() {
+	if len(b.entries) == 0 {
+		return
+	}
+	entries := b.entries
+	b.entries = nil
+	ids, changed, err := b.st.UpsertMediaBatch(entries)
 	if err != nil {
-		log.Printf("[scan] upsert %s: %v", path, err)
-		return false
+		log.Printf("[scan] batch upsert of %d file(s) failed, retrying individually: %v", len(entries), err)
+		for _, entry := range entries {
+			b.upsertOne(entry)
+		}
+		return
+	}
+	for i, id := range ids {
+		if changed[i] {
+			b.res.Changed++
+			b.probeIDs = append(b.probeIDs, id)
+		}
+	}
+}
+
+func (b *mediaBatch) upsertOne(entry store.MediaUpsert) {
+	id, changed, err := b.st.UpsertMedia(entry.Path, entry.Container, entry.Size, entry.Mtime,
+		entry.Title, entry.Year, entry.Season, entry.Episode, entry.ShowTitle)
+	if err != nil {
+		b.res.Errors++
+		log.Printf("[scan] upsert %s: %v", entry.Path, err)
+		return
 	}
 	if changed {
-		payload, merr := json.Marshal(map[string]any{"mediaId": id})
-		if merr != nil {
-			log.Printf("[scan] marshal probe payload %d: %v", id, merr)
-			return false
-		}
-		if _, err := st.EnqueueJob("probe", string(payload), 0); err != nil {
-			log.Printf("[scan] enqueue probe %d: %v", id, err)
-		}
-		res.Changed++
+		b.res.Changed++
+		b.probeIDs = append(b.probeIDs, id)
 	}
-	return true
+}
+
+// probeSpecs converts media ids to deduplicated probe job specifications.
+func probeSpecs(ids []int64) ([]store.JobSpec, error) {
+	specs := make([]store.JobSpec, 0, len(ids))
+	for _, id := range ids {
+		payload, err := json.Marshal(map[string]any{"mediaId": id})
+		if err != nil {
+			return nil, fmt.Errorf("marshal probe payload %d: %w", id, err)
+		}
+		specs = append(specs, store.JobSpec{Type: "probe", Payload: string(payload), Priority: 0})
+	}
+	return specs, nil
+}
+
+// enqueueProbeSpecs inserts batches of unique probe jobs and returns how many
+// were newly created. Batching keeps a large library's handoff to the queue
+// from paying one transaction (and fsync) per file.
+func enqueueProbeSpecs(ctx context.Context, st *store.Store, specs []store.JobSpec) (int, error) {
+	enqueued := 0
+	for start := 0; start < len(specs); start += probeEnqueueBatch {
+		if err := ctx.Err(); err != nil {
+			return enqueued, err
+		}
+		end := min(start+probeEnqueueBatch, len(specs))
+		n, err := st.EnqueueUniqueJobs(specs[start:end])
+		if err != nil {
+			return enqueued, err
+		}
+		enqueued += n
+	}
+	return enqueued, nil
+}
+
+// enqueueProbes hands changed media to the probe queue in bounded batches.
+func enqueueProbes(ctx context.Context, st *store.Store, ids []int64) (int, error) {
+	specs, err := probeSpecs(ids)
+	if err != nil {
+		return 0, err
+	}
+	return enqueueProbeSpecs(ctx, st, specs)
+}
+
+// recoverPendingProbes re-enqueues probes for media that were left pending by
+// an interrupted or crashed scan. It recovers the whole pending set in bounded
+// batches; deduplication keeps active probe jobs from being duplicated.
+func recoverPendingProbes(ctx context.Context, st *store.Store) (int, error) {
+	ids, err := st.MediaIDsByStatus("pending")
+	if err != nil {
+		return 0, err
+	}
+	specs, err := probeSpecs(ids)
+	if err != nil {
+		return 0, err
+	}
+	return enqueueProbeSpecs(ctx, st, specs)
 }
 
 // Done reports how many files the scan has processed so far.
@@ -228,7 +511,11 @@ func (r *Result) Done() int { return r.Seen }
 // JobHandler adapts Run to the job runner. Payload carries {"roots": ["movies","tv"],
 // "prune": true}; roots are validated relative to the media root. The progress
 // callback is unused because scan progress is already latched in the scans table.
-func JobHandler(baseRoot string, st *store.Store, onDeleted func(ids []int64)) func(context.Context, *store.Job, func(float64)) error {
+func JobHandler(baseRoot string, st *store.Store, onDeleted func(ids []int64), opts ...Option) func(context.Context, *store.Job, func(float64)) error {
+	cfg := Options{Timeout: defaultScanTimeout, BatchSize: defaultBatchSize}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	return func(ctx context.Context, j *store.Job, _ func(float64)) error {
 		var payload struct {
 			Roots []string `json:"roots"`
@@ -249,12 +536,13 @@ func JobHandler(baseRoot string, st *store.Store, onDeleted func(ids []int64)) f
 				return fmt.Errorf("library folder %s unavailable", full)
 			}
 		}
-		res, err := Run(ctx, baseRoot, roots, payload.Prune, st, onDeleted)
-		if err != nil {
-			return err
+		if cfg.Timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+			defer cancel()
 		}
-		log.Printf("[scan] #%d: roots=%v prune=%v seen=%d changed=%d removed=%d", res.ScanID, roots, payload.Prune, res.Seen, res.Changed, res.Removed)
-		return nil
+		_, err = runWithOptions(ctx, baseRoot, roots, payload.Prune, st, onDeleted, cfg)
+		return err
 	}
 }
 
