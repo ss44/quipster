@@ -22,6 +22,7 @@ import (
 	"quipster/internal/hardware"
 	"quipster/internal/indexer"
 	"quipster/internal/jobs"
+	"quipster/internal/mcp"
 	"quipster/internal/search"
 	"quipster/internal/store"
 	"quipster/internal/thumbs"
@@ -911,5 +912,44 @@ func TestStoreErrorPaths(t *testing.T) {
 		if rr.Code != http.StatusInternalServerError {
 			t.Errorf("%s %s status = %d, want 500", tc.method, tc.target, rr.Code)
 		}
+	}
+}
+
+func TestMCPEndpoint(t *testing.T) {
+	st, deps := newEnv(t)
+	id := seedMedia(t, st)
+	seedChunks(t, st, id)
+	deps.MCP = mcp.New(mcp.Deps{
+		St: st, Search: deps.Search, Indexer: deps.Indexer, Clips: deps.Clips,
+		Thumbs: deps.Thumbs, Events: deps.Events, Runner: deps.Runner,
+		MediaDir: deps.MediaDir, ClipWorkers: 1,
+	}, mcp.Config{Tokens: map[string]string{"agent": "read+clip"}}).HTTPHandler()
+	h := Router(deps)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	jsonHeader := map[string]string{"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+	if rr := do(t, h, http.MethodPost, "/mcp", strings.NewReader(body), jsonHeader); rr.Code != http.StatusUnauthorized {
+		t.Errorf("missing token status = %d, want 401", rr.Code)
+	}
+	wrong := map[string]string{"Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Authorization": "Bearer nope"}
+	if rr := do(t, h, http.MethodPost, "/mcp", strings.NewReader(body), wrong); rr.Code != http.StatusUnauthorized {
+		t.Errorf("wrong token status = %d, want 401", rr.Code)
+	}
+
+	authed := map[string]string{"Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Authorization": "Bearer agent"}
+	rr := do(t, h, http.MethodPost, "/mcp", strings.NewReader(body), authed)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tools/list status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "search_quotes") {
+		t.Errorf("tools/list body missing search_quotes: %s", rr.Body.String())
+	}
+
+	// Calling a tool end to end resolves real library data through the MCP
+	// adapter mounted on the shared router middleware.
+	call := fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_media","arguments":{"mediaId":%d}}}`, id)
+	rr = do(t, h, http.MethodPost, "/mcp", strings.NewReader(call), authed)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Pilot") {
+		t.Fatalf("tools/call status = %d body=%s", rr.Code, rr.Body.String())
 	}
 }

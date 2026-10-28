@@ -195,6 +195,42 @@ func (s *Store) GetChunkByKey(mediaID int64, startIdx, endIdx int) (*ChunkWithMe
 	row := s.db.QueryRow(`SELECT `+chunkJoinCols+`
 		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
 		WHERE c.media_file_id=? AND c.start_cue_idx=? AND c.end_cue_idx=?`, mediaID, startIdx, endIdx)
+	return scanChunkJoin(row)
+}
+
+// GetChunkByID resolves a chunk by its primary key.
+func (s *Store) GetChunkByID(chunkID int64) (*ChunkWithMedia, error) {
+	row := s.db.QueryRow(`SELECT `+chunkJoinCols+`
+		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
+		WHERE c.id=?`, chunkID)
+	return scanChunkJoin(row)
+}
+
+// ChunkAtTime resolves the chunk whose cue span covers the given second.
+// Lookup goes through cues.chunk_id so a cue that is not (yet) part of any
+// chunk yields no match rather than the wrong one. When no cue is active at
+// that instant the chunk owning the last cue that starts at or before it is
+// returned, so callers asking for a mid-silence timestamp still get the
+// surrounding scene. Returns nil when the media has no preceding cue at all.
+func (s *Store) ChunkAtTime(mediaID int64, sec float64) (*ChunkWithMedia, error) {
+	var chunkID int64
+	err := s.db.QueryRow(`SELECT COALESCE(chunk_id,0) FROM cues
+		WHERE media_file_id=? AND idx=(SELECT MAX(idx) FROM cues WHERE media_file_id=? AND start_sec<=?)`,
+		mediaID, mediaID, sec).Scan(&chunkID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if chunkID == 0 {
+		return nil, nil
+	}
+	return s.GetChunkByID(chunkID)
+}
+
+// scanChunkJoin scans a single row produced by chunkJoinCols.
+func scanChunkJoin(row *sql.Row) (*ChunkWithMedia, error) {
 	var c ChunkWithMedia
 	err := row.Scan(&c.ID, &c.MediaFileID, &c.StartCueIdx, &c.EndCueIdx, &c.Text, &c.IndexedAt,
 		&c.MediaTitle, &c.ShowTitle, &c.Year, &c.Season, &c.Episode, &c.DurationSec, &c.FilePath,

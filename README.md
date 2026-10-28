@@ -31,6 +31,7 @@
 - [Quickstart (Docker)](#quickstart-docker)
 - [Configuration](#configuration)
 - [API](#api)
+- [MCP for AI agents](#mcp-for-ai-agents)
 - [Local development](#local-development)
 - [Contributing](#contributing)
 - [Troubleshooting](#troubleshooting)
@@ -252,6 +253,11 @@ switching models or dimensions to be safe.
 | `LONG_CUT_SEC` | `20` | accurate cuts longer than this run as async jobs with progress |
 | `HWACCEL` | `auto` | `auto` (probe NVENC/QSV/VAAPI/VideoToolbox), `none`/`cpu` (software only), or force a backend: `nvenc`, `qsv`, `vaapi`, `videotoolbox` |
 | `API_TOKEN` | — | when set, guards `/api/admin/*` (header `X-API-Token`) |
+| `MCP_ENABLED` | `false` | expose Quipster to AI agents over MCP (see below) |
+| `MCP_TOKENS` | — | scoped agent tokens: `token:scopes` comma-separated, scopes are `read`, `clip`, `admin` joined by `+` (e.g. `secret1:read+clip,secret2:admin`); bare tokens default to `read` |
+| `MCP_ALLOW_ADMIN` | `false` | master switch for MCP admin tools (admin-scoped tokens still required) |
+| `MCP_RATE_LIMIT` | `120` | MCP requests per minute per token |
+| `MCP_TRANSPORT` | `http` | `http` mounts `/mcp` on API roles; `stdio` serves MCP over stdin/stdout (replaces the HTTP server) |
 | `EMBEDDINGS_SOURCE` | off | `openAi`, `huggingFace`, or `rest`; enables semantic/vector search |
 | `EMBEDDINGS_URL` | — | embedder endpoint (optional for `openAi`, required for `rest`) |
 | `EMBEDDINGS_API_KEY` | — | embedder API key (required for `openAi`; placeholder accepted for local servers) |
@@ -283,6 +289,49 @@ switching models or dimensions to be safe.
     (pause + abort in-flight jobs + clear queued). Pause state is persisted and workers in any
     process stop claiming/cancel within a second.
   - `GET /api/admin/status`, `GET /api/admin/events` (SSE, 1s tick), `GET /api/admin/jobs`
+
+## MCP for AI agents
+
+Quipster ships a [Model Context Protocol](https://modelcontextprotocol.io) server so AI agents can
+search dialogue and cut clips directly. It is **off by default**; enable it with scoped tokens:
+
+```sh
+MCP_ENABLED=1
+MCP_TOKENS=agent-secret:read+clip,ops-secret:admin
+MCP_ALLOW_ADMIN=0        # 1 additionally exposes admin tools to admin-scoped tokens
+MCP_RATE_LIMIT=120       # requests per minute per token (default 120)
+```
+
+Then point any streamable-HTTP MCP client at `http://<host>:8080/mcp` with
+`Authorization: Bearer <token>` (or `X-API-Token`). A `read` token grants the search/status tools,
+`clip` adds clip creation and thumbnails, `admin` adds queue/scan/config tools (which also require
+`MCP_ALLOW_ADMIN=1`).
+
+Local single-process integrations can run MCP over stdio instead of HTTP:
+
+```sh
+MCP_ENABLED=1 MCP_TRANSPORT=stdio quipster
+```
+
+### Tools
+
+| Tool | Scope | Purpose |
+|---|---|---|
+| `get_processing_status` | read | queue, scan, index and media counts in one snapshot |
+| `search_quotes` | read | full-text dialogue search with metadata and timestamps |
+| `suggest_quotes` | read | autocomplete candidates for a partial line |
+| `check_quote_exists` | read | cheap existence probe (5 sample hits) |
+| `get_scene_by_line` | read | expand a chunk (by `chunkId` or `mediaId` + `startSec`) into its scene with context cues |
+| `list_media`, `get_media` | read | library metadata (filesystem paths are redacted) |
+| `get_job` | read | poll one processing job |
+| `create_clip` | clip | render or queue a clip; returns a ready URL or a `jobId` to poll |
+| `get_thumbnail` | clip | thumbnail URL for a timestamp |
+| `trigger_scan`, `reindex_library`, `queue_control`, `list_jobs`, `get_library_config`, `set_library_config` | admin | the operator surface |
+
+Resources (`quipster://media/{id}`, `quipster://chunk/{chunkId}`, `quipster://thumb/{mediaId}`,
+`quipster://clip/{cacheKey}`) expose the same data as compact JSON, and prompts
+(`find_and_clip_scene`, `summarize_show_quotes`, `audit_processing_queue`) encode safe multi-step
+workflows. Every tool call is rate-limited per token and audited with the token's hashed id.
 
 ## Local development
 
