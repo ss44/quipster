@@ -150,6 +150,7 @@
         </div>
 
         <div v-else class="empty">
+          <BrandLogo :size="54" :wordmark="false" class="empty-mark" />
           <p class="empty-title">No dialogue matched.</p>
           <p class="empty-copy">Try fewer words, a different phrasing, or make sure the title has been scanned.</p>
         </div>
@@ -183,6 +184,7 @@
 import { computed, ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, clipStreamURL, type Hit, type Quote, type SearchMode, type SearchResponse } from '../api'
+import BrandLogo from './BrandLogo.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -766,6 +768,11 @@ function pad(n: number): string {
 .empty {
   padding: 56px 0;
   text-align: center;
+}
+.empty-mark {
+  display: inline-flex;
+  margin-bottom: 16px;
+  opacity: 0.22;
 }
 .empty-title {
   font-size: 15px;
