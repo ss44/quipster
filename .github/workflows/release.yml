@@ -1,0 +1,94 @@
+# Weekly automated release: tags the current default branch, publishes a
+# versioned GHCR image, and opens a GitHub release with generated notes.
+# There is no version file anywhere — the git tag itself is the version,
+# so merged PRs never need bookkeeping. Run weekly, or on demand via
+# workflow_dispatch (e.g. to cut the first release immediately).
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Mondays 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Full history so tags and the commit range since the last tag
+          # are available for the version bump and generated notes.
+          fetch-depth: 0
+
+      - name: Compute next version tag
+        id: ver
+        run: |
+          mapfile -t tags < <(git tag --list 'v*' --sort=-v:refname)
+          latest=${tags[0]:-}
+          if [ -z "$latest" ]; then
+            echo "First automated release."
+            echo "tag=v0.0.1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          count=$(git rev-list "${latest}..HEAD" --count)
+          if [ "$count" -eq 0 ]; then
+            echo "No commits since ${latest}; skipping release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Monotonic patch bump: at 0.x the version is a sequence number,
+          # and the release notes tell the real story of what changed.
+          IFS='.' read -r major minor patch <<< "${latest#v}"
+          echo "Bumping ${latest} to v${major}.${minor}.$((patch + 1)) (${count} new commits)."
+          echo "tag=v${major}.${minor}.$((patch + 1))" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the default branch
+        if: steps.ver.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.ver.outputs.tag }}" -m "Automated weekly release"
+          git push origin "${{ steps.ver.outputs.tag }}"
+
+      - name: Create release with generated notes
+        if: steps.ver.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ steps.ver.outputs.tag }}" --generate-notes
+
+      # Tags pushed with GITHUB_TOKEN do not trigger other workflows, so the
+      # docker-publish tag trigger never fires for automated tags. The
+      # versioned image is therefore built and pushed here instead.
+      - name: Set up Docker Buildx
+        if: steps.ver.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: steps.ver.outputs.skip != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        if: steps.ver.outputs.skip != 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.ver.outputs.tag }}
+
+      - name: Build and push image
+        if: steps.ver.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
