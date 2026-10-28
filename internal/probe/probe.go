@@ -3,11 +3,28 @@ package probe
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
+)
+
+// Probing must read container headers, not crawl the media payload. Without
+// caps, files with a trailing or missing index (MP4 with moov at the end, MKV
+// without cues) can make ffprobe scan an entire 20GB+ file. These bounds keep
+// probe time independent of file size (issue #1).
+const (
+	// DefaultAnalyzeDuration caps ffprobe's per-stream analysis window
+	// (flag value is microseconds).
+	DefaultAnalyzeDuration = 10 * time.Second
+	// DefaultProbeSize caps how many input bytes ffprobe inspects.
+	DefaultProbeSize = 50 << 20 // 50 MiB
+	// DefaultProbeTimeout bounds one ffprobe run before it is killed and the
+	// file skipped.
+	DefaultProbeTimeout = 60 * time.Second
 )
 
 type SubtitleStream struct {
@@ -87,12 +104,43 @@ func fileDuration(o *ffprobeOut) float64 {
 	return 0
 }
 
-// Probe runs ffprobe and summarises streams of interest.
-func Probe(path string) (*Result, error) {
-	out, err := exec.Command(FfprobeBin(), "-v", "error", "-print_format", "json",
-		"-show_format", "-show_streams", "--", path).Output()
+// probeArgs builds the ffprobe invocation: capped analysis (-analyzeduration,
+// -probesize) so large files are probed from headers instead of scanned whole.
+func probeArgs(path string) []string {
+	return []string{
+		"-v", "error",
+		"-analyzeduration", strconv.FormatInt(int64(DefaultAnalyzeDuration/time.Microsecond), 10),
+		"-probesize", strconv.FormatInt(int64(DefaultProbeSize), 10),
+		"-print_format", "json",
+		"-show_format", "-show_streams",
+		"--", path,
+	}
+}
+
+// stderrTail surfaces ffprobe's stderr (-v error output) for diagnosis.
+func stderrTail(err error) string {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		if s := strings.TrimSpace(string(ee.Stderr)); s != "" {
+			return ": " + s
+		}
+	}
+	return ""
+}
+
+// Probe runs ffprobe and summarises streams of interest. ctx bounds the run;
+// expiry kills ffprobe and returns a context error the caller can detect with
+// errors.Is.
+func Probe(ctx context.Context, path string) (*Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	out, err := exec.CommandContext(ctx, FfprobeBin(), probeArgs(path)...).Output()
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe %s: %w", path, err)
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, fmt.Errorf("ffprobe %s: %w", path, cerr)
+		}
+		return nil, fmt.Errorf("ffprobe %s: %w%s", path, err, stderrTail(err))
 	}
 	var o ffprobeOut
 	if err := json.Unmarshal(out, &o); err != nil {
