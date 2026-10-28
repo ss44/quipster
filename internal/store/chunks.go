@@ -162,7 +162,7 @@ func (s *Store) MediaIDsNeedingIndex(limit int) ([]int64, error) {
 }
 
 // RandomQuotes returns random indexed chunks for the landing page so the home
-// screen always shows dialogue that actually exists in the library.
+// screen always shows dialog that actually exists in the library.
 func (s *Store) RandomQuotes(limit int) ([]ChunkWithMedia, error) {
 	if limit <= 0 || limit > 12 {
 		limit = 6

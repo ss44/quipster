@@ -261,10 +261,10 @@ func (d Deps) handleThumb(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, e.Path)
 }
 
-// handleQuotes serves real dialogue lines from the indexed library for the
+// handleQuotes serves real dialog lines from the indexed library for the
 // landing page.
 func (d Deps) handleQuotes(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit := atoiQuery(r.URL.Query().Get("limit"))
 	quotes, err := d.St.RandomQuotes(limit)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
