@@ -34,8 +34,8 @@ func TestUpsertMediaReturnsUpdatedRowID(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("insert A: id=%d changed=%v err=%v", idA, changed, err)
 	}
-	if _, _, err := s.UpsertMedia("/media/b.mkv", "mkv", 1, 1, "B", 0, 0, 0, ""); err != nil {
-		t.Fatalf("insert B: %v", err)
+	if _, _, insErr := s.UpsertMedia("/media/b.mkv", "mkv", 1, 1, "B", 0, 0, 0, ""); insErr != nil {
+		t.Fatalf("insert B: %v", insErr)
 	}
 
 	gotA, changed, err := s.UpsertMedia("/media/a.mkv", "mkv", 2, 2, "A", 0, 0, 0, "")
