@@ -8,15 +8,31 @@ import (
 	"time"
 
 	"quipster/internal/cache"
-	"quipster/internal/store"
 )
 
-func TestLRUEvict(t *testing.T) {
-	st, err := store.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
-	defer st.Close()
+}
+
+func assertMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("%s should be deleted", path)
+	}
+}
+
+func assertPresent(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("%s should be kept: %v", path, err)
+	}
+}
+
+func TestLRUEvict(t *testing.T) {
+	st := openTestStore(t)
 
 	lru := &cache.LRU{
 		St:       st,
@@ -29,29 +45,40 @@ func TestLRUEvict(t *testing.T) {
 	f2 := filepath.Join(dir, "2.mp4")
 	f3 := filepath.Join(dir, "3.mp4")
 
-	_ = os.WriteFile(f1, []byte("data"), 0600)
-	_ = os.WriteFile(f2, []byte("data"), 0600)
-	_ = os.WriteFile(f3, []byte("data"), 0600)
+	writeFile(t, f1, "data")
+	writeFile(t, f2, "data")
+	writeFile(t, f3, "data")
 
-	_ = st.UpsertCacheEntry("k1", f1, "clip", 100)
+	if err := st.UpsertCacheEntry("k1", f1, "clip", 100); err != nil {
+		t.Fatalf("upsert k1: %v", err)
+	}
 	time.Sleep(10 * time.Millisecond)
-	_ = st.UpsertCacheEntry("k2", f2, "clip", 100)
+	if err := st.UpsertCacheEntry("k2", f2, "clip", 100); err != nil {
+		t.Fatalf("upsert k2: %v", err)
+	}
 	time.Sleep(10 * time.Millisecond)
-	_ = st.UpsertCacheEntry("k3", f3, "clip", 100)
-	
+	if err := st.UpsertCacheEntry("k3", f3, "clip", 100); err != nil {
+		t.Fatalf("upsert k3: %v", err)
+	}
+
 	// total = 300, over by 150. Oldest are k1 and k2.
-	
-	err = lru.Evict(context.Background())
-	if err != nil {
+
+	if err := lru.Evict(context.Background()); err != nil {
 		t.Fatalf("evict failed: %v", err)
 	}
 
-	total, _ := st.CacheBytes("clip")
+	total, err := st.CacheBytes("clip")
+	if err != nil {
+		t.Fatalf("cache bytes: %v", err)
+	}
 	if total != 100 {
 		t.Errorf("expected 100 bytes left, got %d", total)
 	}
 
-	entries, _ := st.OldestCacheEntries("clip")
+	entries, err := st.OldestCacheEntries("clip")
+	if err != nil {
+		t.Fatalf("oldest entries: %v", err)
+	}
 	if len(entries) != 1 {
 		t.Errorf("expected 1 entry left, got %d", len(entries))
 	}
@@ -59,21 +86,14 @@ func TestLRUEvict(t *testing.T) {
 		t.Errorf("expected k3 to be kept, got %s", entries[0].CacheKey)
 	}
 
-	if _, err := os.Stat(f1); !os.IsNotExist(err) {
-		t.Errorf("expected f1 to be deleted")
-	}
-	if _, err := os.Stat(f2); !os.IsNotExist(err) {
-		t.Errorf("expected f2 to be deleted")
-	}
-	if _, err := os.Stat(f3); err != nil {
-		t.Errorf("expected f3 to be kept")
-	}
+	assertMissing(t, f1)
+	assertMissing(t, f2)
+	assertPresent(t, f3)
 }
 
 func TestRunDaemon(t *testing.T) {
-	st, _ := store.Open(":memory:")
-	defer st.Close()
-	
+	st := openTestStore(t)
+
 	lru := &cache.LRU{
 		St:       st,
 		MaxBytes: 50,
@@ -82,8 +102,10 @@ func TestRunDaemon(t *testing.T) {
 
 	dir := t.TempDir()
 	f := filepath.Join(dir, "thumb.jpg")
-	_ = os.WriteFile(f, []byte("thumb"), 0600)
-	_ = st.UpsertCacheEntry("k1", f, "thumb", 100)
+	writeFile(t, f, "thumb")
+	if err := st.UpsertCacheEntry("k1", f, "thumb", 100); err != nil {
+		t.Fatalf("upsert k1: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cache.RunDaemon(ctx, lru, 10*time.Millisecond)
@@ -91,7 +113,10 @@ func TestRunDaemon(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 
-	total, _ := st.CacheBytes("thumb")
+	total, err := st.CacheBytes("thumb")
+	if err != nil {
+		t.Fatalf("cache bytes: %v", err)
+	}
 	if total != 0 {
 		t.Errorf("daemon failed to evict, bytes remaining: %d", total)
 	}
