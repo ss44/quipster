@@ -15,7 +15,7 @@
   <a href="https://github.com/ss44/quipster/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/ss44/quipster/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/ss44/quipster/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <a href="https://github.com/ss44/quipster/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/ss44/quipster?sort=semver&display_name=tag"></a>
-  <img alt="Coverage >= 85%" src="https://img.shields.io/badge/coverage-%E2%89%A585%25-brightgreen">
+  <img alt="Coverage ≥ 85%" src="https://img.shields.io/badge/coverage-%E2%89%A585%25-brightgreen">
   <a href="https://github.com/ss44/quipster/pkgs/container/quipster"><img alt="Container image" src="https://img.shields.io/badge/ghcr.io-quipster-2496ED?logo=docker&logoColor=white"></a>
   <img alt="Go 1.26" src="https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white">
   <a href="https://github.com/ss44/quipster/graphs/commit-activity"><img alt="Maintained" src="https://img.shields.io/badge/maintained-yes-brightgreen"></a>
