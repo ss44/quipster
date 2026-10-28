@@ -196,9 +196,7 @@ func walkAll(ctx context.Context, mediaRoot string, roots []string, st *store.St
 			started:   started,
 			batch:     batch,
 		}
-		stopHeartbeat := w.startHeartbeat(ctx)
-		walkErr := w.walk(ctx)
-		stopHeartbeat()
+		walkErr := w.walkWithHeartbeat(ctx)
 		batch.Flush()
 		if walkErr != nil {
 			return walkErr
@@ -282,6 +280,14 @@ type walker struct {
 	scanID    int64
 	started   time.Time
 	mu        sync.Mutex
+}
+
+// walkWithHeartbeat guarantees the progress goroutine is stopped even when a
+// parser or store panic unwinds the walk.
+func (w *walker) walkWithHeartbeat(ctx context.Context) error {
+	stop := w.startHeartbeat(ctx)
+	defer stop()
+	return w.walk(ctx)
 }
 
 func (w *walker) startHeartbeat(ctx context.Context) func() {
