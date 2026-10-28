@@ -40,12 +40,31 @@ Open `http://localhost:8080`, go to **Admin → Library folders**, pick the fold
 (e.g. `movies` and `tv`; empty means the whole media root). Save, then **Scan library**. Files
 outside the selected folders are pruned on scan. Wait for indexing, then search dialogue.
 
-Scale-out workers and Intel/AMD iGPU (VAAPI) passthrough:
+### GPU / hardware acceleration
+
+The app probes FFmpeg hardware backends at startup (NVENC → QuickSync → VAAPI → VideoToolbox)
+and automatically falls back to CPU encoding (`libx264`) when none is available, so clips and
+thumbnails never fail on machines without a usable GPU. Pick the compose profile matching your
+hardware:
 
 ```sh
-docker compose --profile workers up -d worker   # extra ingestion/clip workers
-docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
+docker compose --profile igpu up -d app-igpu    # Intel/AMD iGPU via /dev/dri (VAAPI/QSV)
+docker compose --profile nvidia up -d app-nvidia # NVIDIA NVENC/NVDEC (needs NVIDIA Container Toolkit)
+docker compose --profile cpu up -d app-cpu      # force software encoding
 ```
+
+- **Intel/AMD (`app-igpu`)**: exposes `/dev/dri` and adds the `video`/`render` groups; the Debian
+  `ffmpeg` build ships VAAPI and QuickSync support out of the box.
+- **NVIDIA (`app-nvidia`)**: uses Docker's `nvidia` device driver (requires
+  [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+  on the host). FFmpeg's `h264_nvenc` encoder talks to the host driver through the container
+  runtime.
+- **`HWACCEL` env** (default `auto`): `auto` probes all backends in priority order, `none`/`cpu`
+  disables hardware acceleration, or force a specific backend (`nvenc`, `qsv`, `vaapi`,
+  `videotoolbox`).
+
+Startup logs report what was detected, e.g. `hardware acceleration: vaapi (device=/dev/dri/renderD128)`
+or `hardware acceleration: none, using cpu`.
 
 ## Configuration
 
@@ -69,6 +88,7 @@ docker compose --profile gpu up -d app-gpu      # /dev/dri passthrough variant
 | `MAX_CLIP_SEC` | `120` | hard clip cap |
 | `CACHE_MAX_GB` | `10` | LRU cache cap (clips/thumbs/subs) |
 | `LONG_CUT_SEC` | `20` | accurate cuts longer than this run as async jobs with progress |
+| `HWACCEL` | `auto` | `auto` (probe NVENC/QSV/VAAPI/VideoToolbox), `none`/`cpu` (software only), or force a backend: `nvenc`, `qsv`, `vaapi`, `videotoolbox` |
 | `API_TOKEN` | — | when set, guards `/api/admin/*` (header `X-API-Token`) |
 
 ## API
@@ -110,7 +130,9 @@ before `go build` after frontend changes.
   share links are phase 2.
 - mp4 stream-copy falls back to Matroska output when codecs are not mp4-compatible.
 - The Meili index is derived state — `POST /api/admin/reindex` rebuilds it from SQLite.
-- VAAPI is probed at startup; without `/dev/dri` the app uses CPU encoding automatically.
+- Hardware acceleration is probed at startup (`NVENC → QSV → VAAPI → VideoToolbox`); without a
+  usable GPU the app uses CPU encoding automatically. Tune with the `HWACCEL` env var and pick the
+  matching compose profile (`igpu`, `nvidia`, `cpu`) for device passthrough.
 
 ## Troubleshooting
 

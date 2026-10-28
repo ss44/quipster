@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"quipster/internal/hardware"
 	"quipster/internal/probe"
 	"quipster/internal/store"
 )
@@ -19,7 +20,7 @@ const bucketSec = 5.0
 type Service struct {
 	St       *store.Store
 	CacheDir string
-	Hw       interface{ HWAvailable() bool } // optional vaapi provider
+	Hw       hardware.Capabilities // detected hw backend; zero value = cpu decode
 }
 
 var widths = []int{320, 640}
@@ -60,9 +61,6 @@ func (s *Service) Get(ctx context.Context, mediaID int64, t float64, width int) 
 			t = m.DurationSec - 0.1
 		}
 	}
-	if t < 0 {
-		t = 0
-	}
 	t = Bucket(t)
 	width = NearestWidth(width)
 	key := cacheKey(mediaID, t, width)
@@ -98,23 +96,23 @@ func (s *Service) render(ctx context.Context, src string, t float64, width int, 
 	build := func(hw bool) []string {
 		args := []string{"-v", "error", "-y"}
 		if hw {
-			args = append(args, "-hwaccel", "vaapi")
+			args = append(args, s.Hw.DecodeArgs()...)
 		}
 		return append(args, "-ss", fmt.Sprintf("%.3f", t), "-i", src, "-frames:v", "1",
 			"-vf", fmt.Sprintf("scale=%d:-2", width), "-q:v", "5", "-f", "image2", out)
 	}
-	hw := s.Hw != nil && s.Hw.HWAvailable()
+	hw := s.Hw.Available()
 	cmd := exec.CommandContext(ctx, probe.FfmpegBin(), build(hw)...)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		if !hw {
 			return fmt.Errorf("thumbnail failed: %w: %s", err, strings.TrimSpace(string(b)))
 		}
+		// hardware decode failed (driver hiccup, unsupported codec): retry on cpu
 		os.Remove(out)
 		cmd2 := exec.CommandContext(ctx, probe.FfmpegBin(), build(false)...)
 		if b2, err2 := cmd2.CombinedOutput(); err2 != nil {
 			return fmt.Errorf("thumbnail failed: %v / %v: %s", err, err2, strings.TrimSpace(string(b2)))
 		}
-		return nil
 	}
 	return nil
 }

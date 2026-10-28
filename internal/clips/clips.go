@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"quipster/internal/hardware"
 	"quipster/internal/probe"
 	"quipster/internal/store"
 )
@@ -23,15 +24,12 @@ type Config struct {
 	MaxClipSec   float64
 	DefaultPadMs int
 	LongCutSec   float64 // accurate cuts longer than this run as async jobs
+	Hw           hardware.Capabilities // detected hw backend; zero value = cpu only
 }
 
 type Service struct {
 	st  *store.Store
 	cfg Config
-
-	mu       sync.Mutex
-	hwavail  bool
-	hwprobed bool
 
 	sfMu sync.Mutex
 	sf   map[string]*flight
@@ -124,13 +122,30 @@ func (s *Service) Touch(key string) { s.st.TouchCache(key) }
 
 // Produce renders the clip if not cached, deduplicating concurrent requests.
 func (s *Service) Produce(ctx context.Context, r Request) (string, string, error) {
+	return s.renderCached(ctx, r, nil)
+}
+
+// RunWithProgress renders a clip while reporting 0..1 progress (for async jobs).
+func (s *Service) RunWithProgress(ctx context.Context, r Request, report func(float64)) (string, string, error) {
+	return s.renderCached(ctx, r, report)
+}
+
+// renderCached returns the cached clip or renders it once under a singleflight.
+func (s *Service) renderCached(ctx context.Context, r Request, report func(float64)) (string, string, error) {
 	key := CacheKey(r.MediaID, r.Start, r.End, r.Mode, r.PadMs)
 	if e, err := s.Cached(key); err != nil {
 		return "", "", err
 	} else if e != nil {
 		return e.Path, strings.TrimPrefix(filepath.Ext(e.Path), "."), nil
 	}
+	return s.doFlight(ctx, key, func() (string, string, error) {
+		return s.render(ctx, key, r, report)
+	})
+}
 
+// doFlight ensures only one render runs per cache key; concurrent callers
+// wait for the in-flight render and share its result.
+func (s *Service) doFlight(ctx context.Context, key string, render func() (string, string, error)) (string, string, error) {
 	s.sfMu.Lock()
 	if f, ok := s.sf[key]; ok {
 		s.sfMu.Unlock()
@@ -152,11 +167,11 @@ func (s *Service) Produce(ctx context.Context, r Request) (string, string, error
 		close(f.done)
 	}()
 
-	f.path, f.ext, f.err = s.render(ctx, key, r)
+	f.path, f.ext, f.err = render()
 	return f.path, f.ext, f.err
 }
 
-func (s *Service) render(ctx context.Context, key string, r Request) (string, string, error) {
+func (s *Service) render(ctx context.Context, key string, r Request, report func(float64)) (string, string, error) {
 	m, _, err := s.Validate(r)
 	if err != nil {
 		return "", "", err
@@ -166,40 +181,26 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return "", "", err
 	}
+	start := r.Start - pad
+	if start < 0 {
+		start = 0
+	}
+	dur := (r.End + pad) - start
+	if dur > s.cfg.MaxClipSec {
+		dur = s.cfg.MaxClipSec
+	}
 
 	var path string
-	if r.Mode == "fast" {
-		start := r.Start - pad
-		if start < 0 {
-			start = 0
-		}
-		dur := (r.End + pad) - start
-		if dur > s.cfg.MaxClipSec {
-			dur = s.cfg.MaxClipSec
-		}
-		var err error
+	switch r.Mode {
+	case "fast":
 		path, err = s.cutFast(ctx, m.Path, start, dur, m.AudioStreamIndex, filepath.Join(outDir, key))
-		if err != nil {
-			return "", "", err
-		}
-	} else {
-		dur := r.End - r.Start + 2*pad
-		start := r.Start - pad
-		if start < 0 {
-			start = 0
-		}
-		if dur > s.cfg.MaxClipSec {
-			dur = s.cfg.MaxClipSec
-		}
-		var err error
-		if r.Mode == "preview" {
-			path, err = s.cutPreview(ctx, m.Path, start, dur, m.AudioStreamIndex, filepath.Join(outDir, key))
-		} else {
-			path, err = s.cutAccurate(ctx, m.Path, start, dur, m.AudioStreamIndex, filepath.Join(outDir, key))
-		}
-		if err != nil {
-			return "", "", err
-		}
+	case "preview":
+		path, err = s.cutPreview(ctx, m.Path, start, dur, m.AudioStreamIndex, filepath.Join(outDir, key)+".mp4")
+	default: // accurate
+		path, err = s.cutAccurate(ctx, m.Path, start, dur, m.AudioStreamIndex, filepath.Join(outDir, key)+".mp4", report)
+	}
+	if err != nil {
+		return "", "", err
 	}
 	st, err := os.Stat(path)
 	if err != nil {
@@ -220,14 +221,14 @@ func (s *Service) cutFast(ctx context.Context, src string, start, dur float64, a
 	args = append(args, audioMapArgs(audioOrdinal)...)
 	args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-c", "copy", "-avoid_negative_ts", "make_zero",
 		"-movflags", "+faststart", mp4)
-	if err := runFFmpeg(ctx, args); err != nil {
+	if err := s.runFFmpeg(ctx, args, nil, 0); err != nil {
 		log.Printf("[clips] mp4 remux failed (%v), falling back to matroska", err)
 		mkv := outBase + ".mkv"
 		args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
 			"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
 		args = append(args, audioMapArgs(audioOrdinal)...)
 		args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-c", "copy", "-avoid_negative_ts", "make_zero", mkv)
-		if err2 := runFFmpeg(ctx, args); err2 != nil {
+		if err2 := s.runFFmpeg(ctx, args, nil, 0); err2 != nil {
 			os.Remove(mp4)
 			return "", fmt.Errorf("fast cut failed: %v / %v", err, err2)
 		}
@@ -238,65 +239,85 @@ func (s *Service) cutFast(ctx context.Context, src string, start, dur float64, a
 	return mp4, nil
 }
 
+// encProfile holds the per-mode encoder parameters for transcoded cuts.
+type encProfile struct {
+	width    int
+	hwEnc    []string // extra encoder args for the hardware encoder
+	cpuEnc   []string // x264 args for the CPU encoder
+	abitrate string
+}
+
+var (
+	previewProfile = encProfile{
+		width:  960,
+		hwEnc:  []string{"-b:v", "1M"},
+		cpuEnc: []string{"-preset", "ultrafast", "-crf", "32", "-tune", "zerolatency"},
+		abitrate: "96k",
+	}
+	accurateProfile = encProfile{
+		width:  1280,
+		hwEnc:  []string{"-b:v", "2M"},
+		cpuEnc: []string{"-preset", "veryfast", "-crf", "23"},
+		abitrate: "128k",
+	}
+)
+
 // cutPreview transcodes a small, browser-playable clip as fast as possible;
 // preview quality is intentionally low (ultrafast x264 @ 960px).
-func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
-	out := outBase + ".mp4"
-	if s.HWAvailable() {
-		args := []string{"-v", "error", "-y", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
-			"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
-		args = append(args, audioMapArgs(audioOrdinal)...)
-		args = append(args,
-			"-dn", "-sn", "-map_chapters", "-1",
-			"-vf", "scale_vaapi=w=960:h=-2:format=nv12", "-c:v", "h264_vaapi", "-qp", "32",
-			"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out)
-		if err := runFFmpeg(ctx, args); err == nil {
-			return out, nil
-		}
-		log.Printf("[clips] vaapi preview failed, falling back to cpu ultrafast")
-		os.Remove(out)
-	}
-	args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
-		"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
-	args = append(args, audioMapArgs(audioOrdinal)...)
-	args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-vf", "scale=960:-2",
-		"-c:v", "libx264", "-preset", "ultrafast", "-crf", "32", "-tune", "zerolatency",
-		"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out)
-	if err := runFFmpeg(ctx, args); err != nil {
+func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64, audioOrdinal int, out string) (string, error) {
+	if err := s.runTranscode(ctx, src, out, start, dur, audioOrdinal, previewProfile, nil); err != nil {
 		os.Remove(out)
 		return "", fmt.Errorf("preview cut failed: %w", err)
 	}
 	return out, nil
 }
 
-func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
-	out := outBase + ".mp4"
-	if s.HWAvailable() {
-		args := []string{"-v", "error", "-y", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
-			"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
-		args = append(args, audioMapArgs(audioOrdinal)...)
-		args = append(args,
-			"-dn", "-sn", "-map_chapters", "-1",
-			"-vf", "scale_vaapi=w=1280:h=720:format=nv12", "-c:v", "h264_vaapi", "-b:v", "2M",
-			"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out)
-		if err := runFFmpeg(ctx, args); err == nil {
-			return out, nil
-		} else {
-			log.Printf("[clips] vaapi encode failed (%v), falling back to cpu", err)
-			os.Remove(out)
-		}
-	}
-	args := []string{"-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start), "-i", src,
-		"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
-	args = append(args, audioMapArgs(audioOrdinal)...)
-	args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-vf", "scale=1280:-2",
-		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-		"-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out)
-	if err := runFFmpeg(ctx, args); err != nil {
+// cutAccurate transcodes a 720p clip from the exact timestamp.
+func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float64, audioOrdinal int, out string, report func(float64)) (string, error) {
+	if err := s.runTranscode(ctx, src, out, start, dur, audioOrdinal, accurateProfile, report); err != nil {
 		os.Remove(out)
 		return "", fmt.Errorf("accurate cut failed: %w", err)
 	}
 	return out, nil
+}
+
+// runTranscode renders one transcoded clip, trying the hardware pipeline
+// first and falling back to CPU libx264 when the hardware attempt fails
+// (hardware encoders can fail mid-run on driver hiccups or unsupported input).
+func (s *Service) runTranscode(ctx context.Context, src, out string, start, dur float64,
+	audioOrdinal int, p encProfile, report func(float64)) error {
+
+	hwPlan := s.cfg.Hw.Pipeline(p.width)
+	cpuPlan := hardware.Capabilities{}.Pipeline(p.width)
+	build := func(plan hardware.Pipeline) []string {
+		args := []string{"-v", "error", "-y"}
+		if report != nil {
+			args = append(args, "-progress", "pipe:1", "-nostats")
+		}
+		args = append(args, plan.Input...)
+		args = append(args, "-ss", fmt.Sprintf("%.3f", start), "-i", src,
+			"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0")
+		args = append(args, audioMapArgs(audioOrdinal)...)
+		args = append(args, "-dn", "-sn", "-map_chapters", "-1",
+			"-vf", plan.Filter, "-c:v", plan.Encoder)
+		if plan.IsHW {
+			args = append(args, p.hwEnc...)
+		} else {
+			args = append(args, p.cpuEnc...)
+		}
+		args = append(args, "-c:a", "aac", "-b:a", p.abitrate, "-movflags", "+faststart", out)
+		return args
+	}
+
+	if hwPlan.IsHW {
+		if err := s.runFFmpeg(ctx, build(hwPlan), report, dur); err == nil {
+			return nil
+		} else {
+			log.Printf("[clips] %s encode failed (%v), falling back to cpu", s.cfg.Hw.Backend, err)
+			os.Remove(out)
+		}
+	}
+	return s.runFFmpeg(ctx, build(cpuPlan), report, dur)
 }
 
 // audioMapArgs maps the media's chosen English audio stream. Optional '?' keeps
@@ -308,203 +329,22 @@ func audioMapArgs(ordinal int) []string {
 	return []string{"-map", fmt.Sprintf("0:a:%d?", ordinal)}
 }
 
-func runFFmpeg(ctx context.Context, args []string) error {
-	cmd := exec.CommandContext(ctx, probe.FfmpegBin(), args...)
-	if b, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(b)))
-	}
-	return nil
-}
-
-func (s *Service) HWAvailable() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.hwprobed {
-		return s.hwavail
-	}
-	s.hwprobed = true
-	s.hwavail = probeVaapi()
-	if s.hwavail {
-		log.Printf("[clips] vaapi acceleration available")
-	} else {
-		log.Printf("[clips] vaapi unavailable, using cpu encode fallback")
-	}
-	return s.hwavail
-}
-
-func probeVaapi() bool {
-	if _, err := os.Stat("/dev/dri/renderD128"); err != nil {
-		return false
-	}
-	cmd := exec.Command(probe.FfmpegBin(), "-v", "error", "-init_hw_device", "vaapi=va:/dev/dri/renderD128",
-		"-f", "lavfi", "-i", "testsrc2=s=320x240:d=0.2", "-vf", "format=nv12,hwupload",
-		"-c:v", "h264_vaapi", "-f", "null", "-")
-	return cmd.Run() == nil
-}
-
-// RunWithProgress renders a clip while reporting 0..1 progress (for async jobs).
-func (s *Service) RunWithProgress(ctx context.Context, r Request, report func(float64)) (string, string, error) {
-	if r.Mode != "accurate" {
-		return s.Produce(ctx, r)
-	}
-	key := CacheKey(r.MediaID, r.Start, r.End, r.Mode, r.PadMs)
-	if e, err := s.Cached(key); err != nil {
-		return "", "", err
-	} else if e != nil {
-		return e.Path, strings.TrimPrefix(filepath.Ext(e.Path), "."), nil
-	}
-	s.sfMu.Lock()
-	if f, ok := s.sf[key]; ok {
-		s.sfMu.Unlock()
-		select {
-		case <-f.done:
-			return f.path, f.ext, f.err
-		case <-ctx.Done():
-			return "", "", ctx.Err()
+// runFFmpeg runs one ffmpeg command, reporting 0..1 progress when report is set.
+func (s *Service) runFFmpeg(ctx context.Context, args []string, report func(float64), dur float64) error {
+	if report == nil {
+		cmd := exec.CommandContext(ctx, probe.FfmpegBin(), args...)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(b)))
 		}
+		return nil
 	}
-	f := &flight{done: make(chan struct{})}
-	s.sf[key] = f
-	s.sfMu.Unlock()
-	defer func() {
-		s.sfMu.Lock()
-		delete(s.sf, key)
-		s.sfMu.Unlock()
-		close(f.done)
-	}()
-
-	m, _, err := s.Validate(r)
-	if err != nil {
-		f.err = err
-		return "", "", err
-	}
-	pad := float64(r.PadMs) / 1000
-	outDir := filepath.Join(s.cfg.CacheDir, "clips")
-	os.MkdirAll(outDir, 0o755)
-	start := r.Start - pad
-	if start < 0 {
-		start = 0
-	}
-	dur := r.End - r.Start + 2*pad
-	if dur > s.cfg.MaxClipSec {
-		dur = s.cfg.MaxClipSec
-	}
-	outBase := filepath.Join(outDir, key)
-	path := outBase + ".mp4"
-
-	var args []string
-	if s.HWAvailable() {
-		args = []string{"-progress", "pipe:1", "-nostats", "-v", "error", "-y", "-hwaccel", "vaapi",
-			"-hwaccel_output_format", "vaapi", "-ss", fmt.Sprintf("%.3f", start), "-i", m.Path,
-			"-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
-		args = append(args, audioMapArgs(m.AudioStreamIndex)...)
-		args = append(args, "-dn", "-sn", "-map_chapters", "-1",
-			"-vf", "scale_vaapi=w=1280:h=720:format=nv12",
-			"-c:v", "h264_vaapi", "-b:v", "2M", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", path)
-	} else {
-		args = []string{"-progress", "pipe:1", "-nostats", "-v", "error", "-y", "-ss", fmt.Sprintf("%.3f", start),
-			"-i", m.Path, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"}
-		args = append(args, audioMapArgs(m.AudioStreamIndex)...)
-		args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-vf", "scale=1280:-2",
-			"-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "128k",
-			"-movflags", "+faststart", path)
-	}
-	if err := runFFmpegProgress(ctx, args, dur, report); err != nil {
-		// vaapi may fail mid-run; retry once on cpu
-		if s.HWAvailable() {
-			os.Remove(path)
-			args = args[:0]
-			args = append(args, "-progress", "pipe:1", "-nostats", "-v", "error", "-y", "-ss",
-				fmt.Sprintf("%.3f", start), "-i", m.Path, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0")
-			args = append(args, audioMapArgs(m.AudioStreamIndex)...)
-			args = append(args, "-dn", "-sn", "-map_chapters", "-1", "-vf", "scale=1280:-2",
-				"-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "128k",
-				"-movflags", "+faststart", path)
-			if err2 := runFFmpegProgress(ctx, args, dur, report); err2 != nil {
-				os.Remove(path)
-				f.err = err2
-				return "", "", err2
-			}
-		} else {
-			os.Remove(path)
-			f.err = err
-			return "", "", err
-		}
-	}
-	st, err := os.Stat(path)
-	if err != nil {
-		f.err = err
-		return "", "", err
-	}
-	if err := s.st.UpsertCacheEntry(key, path, "clip", st.Size()); err != nil {
-		f.err = err
-		return "", "", err
-	}
-	f.path = path
-	f.ext = "mp4"
-	return path, "mp4", nil
-}
-
-func runFFmpegProgress(ctx context.Context, args []string, dur float64, report func(float64)) error {
-	cmd := exec.CommandContext(ctx, probe.FfmpegBin(), args...)
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	readerDone := make(chan struct{})
-	go func() {
-		defer close(readerDone)
-		buf := make([]byte, 4096)
-		var acc []byte
-		for {
-			n, rerr := stdout.Read(buf)
-			acc = append(acc, buf[:n]...)
-			for {
-				idx := bytes.IndexByte(acc, '\n')
-				if idx < 0 {
-					break
-				}
-				line := string(acc[:idx])
-				acc = acc[idx+1:]
-				if strings.HasPrefix(line, "out_time_us=") {
-					v := strings.TrimPrefix(line, "out_time_us=")
-					var us float64
-					if _, err := fmt.Sscanf(v, "%f", &us); err == nil && dur > 0 {
-						p := us / (dur * 1e6)
-						if p < 0 {
-							p = 0
-						}
-						if p > 0.99 {
-							p = 0.99
-						}
-						report(p)
-					}
-				}
-			}
-			if rerr != nil {
-				return
-			}
-		}
-	}()
-	werr := cmd.Wait()
-	<-readerDone
-	if werr != nil {
-		return fmt.Errorf("%w: %s", werr, strings.TrimSpace(errBuf.String()))
-	}
-	return nil
+	return runFFmpegProgress(ctx, probe.FfmpegBin(), args, dur, report)
 }
 
 // AsyncJobPayload is the job payload used for long accurate cuts.
 func AsyncJobPayload(r Request) string {
-	b, _ := json.Marshal(map[string]any{
-		"mediaId": r.MediaID, "start": r.Start, "end": r.End, "padMs": r.PadMs,
-		"mode": r.Mode,
-	})
+	b, _ := json.Marshal(map[string]any{"mediaId": r.MediaID, "start": r.Start, "end": r.End, "padMs": r.PadMs,
+		"mode": r.Mode})
 	return string(b)
 }
 
@@ -531,4 +371,57 @@ func (s *Service) JobHandler() func(ctx context.Context, j *store.Job, progress 
 		_, _, err := s.RunWithProgress(ctx, r, progress)
 		return err
 	}
+}
+
+func runFFmpegProgress(ctx context.Context, bin string, args []string, dur float64, report func(float64)) error {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		buf := make([]byte, 4096)
+		var acc []byte
+		for {
+			n, rerr := stdout.Read(buf)
+			acc = append(acc, buf[:n]...)
+			for {
+				idx := bytes.IndexByte(acc, '\n')
+				if idx < 0 {
+					break
+				}
+				line := string(acc[:idx])
+				acc = acc[idx+1:]
+				if v, ok := strings.CutPrefix(line, "out_time_us="); ok {
+					var us float64
+					if _, err := fmt.Sscanf(v, "%f", &us); err == nil && dur > 0 {
+						p := us / (dur * 1e6)
+						if p < 0 {
+							p = 0
+						}
+						if p > 0.99 {
+							p = 0.99
+						}
+						report(p)
+					}
+				}
+			}
+			if rerr != nil {
+				break
+			}
+		}
+	}()
+	werr := cmd.Wait()
+	<-readerDone
+	if werr != nil {
+		return fmt.Errorf("%w: %s", werr, strings.TrimSpace(errBuf.String()))
+	}
+	return nil
 }
