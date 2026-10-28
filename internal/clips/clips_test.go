@@ -2,11 +2,10 @@ package clips
 
 import (
 	"context"
-
 	"os"
-
 	"path/filepath"
 	"testing"
+
 	"quipster/internal/store"
 )
 
@@ -17,6 +16,15 @@ func setupTestStore(t *testing.T) *store.Store {
 		t.Fatalf("store.Open: %v", err)
 	}
 	return st
+}
+
+// closeStore closes a test store, demoting a failed close to a logged note so
+// teardown problems do not mask the test outcome.
+func closeStore(t *testing.T, st *store.Store) {
+	t.Helper()
+	if err := st.Close(); err != nil {
+		t.Logf("close store: %v", err)
+	}
 }
 
 func TestCacheKey(t *testing.T) {
@@ -51,11 +59,10 @@ func TestNew(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	st := setupTestStore(t)
-	defer st.Close()
+	defer closeStore(t, st)
 	s := New(st, Config{MaxClipSec: 30})
 
-	id, _, _ := st.UpsertMedia("/fake/movie.mp4", "mp4", 1024, 0, "Fake Movie", 2026, 0, 0, "")
-	st.UpdateMediaProbe(id, 600, 1920, 1080, "h264", "aac", "mp4", 0, 0, "eng")
+	id := seedMedia(t, st, "/fake/movie.mp4", 0)
 
 	tests := []struct {
 		name    string
@@ -89,10 +96,9 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-
 func TestCachedTouch(t *testing.T) {
 	st := setupTestStore(t)
-	defer st.Close()
+	defer closeStore(t, st)
 	dir := t.TempDir()
 	s := New(st, Config{CacheDir: dir})
 
@@ -107,7 +113,9 @@ func TestCachedTouch(t *testing.T) {
 	}
 
 	// Insert into DB but no file
-	st.UpsertCacheEntry(key, filepath.Join(dir, "missing.mp4"), "clip", 100)
+	if uerr := st.UpsertCacheEntry(key, filepath.Join(dir, "missing.mp4"), "clip", 100); uerr != nil {
+		t.Fatalf("UpsertCacheEntry: %v", uerr)
+	}
 	e, err = s.Cached(key)
 	if err != nil {
 		t.Errorf("expected no err, got %v", err)
@@ -118,8 +126,12 @@ func TestCachedTouch(t *testing.T) {
 
 	// Insert and create file
 	realPath := filepath.Join(dir, "real.mp4")
-	os.WriteFile(realPath, []byte("data"), 0644)
-	st.UpsertCacheEntry(key, realPath, "clip", 4)
+	if werr := os.WriteFile(realPath, []byte("data"), 0o600); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	if uerr := st.UpsertCacheEntry(key, realPath, "clip", 4); uerr != nil {
+		t.Fatalf("UpsertCacheEntry: %v", uerr)
+	}
 
 	e, err = s.Cached(key)
 	if err != nil {
@@ -131,10 +143,15 @@ func TestCachedTouch(t *testing.T) {
 
 	// Test Touch
 	s.Touch(key)
-	// We'd have to read from db to see if LastAccess increased, but 
-	// for coverage simply calling it is enough.
-}
 
+	// Closing the store makes the LRU touch fail, exercising the logged
+	// error path of Touch. The deferred close then double-closes, which is
+	// a harmless no-op.
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	s.Touch(key)
+}
 
 func TestAsyncJobPayload(t *testing.T) {
 	req := Request{MediaID: 1, Start: 1.5, End: 2.5, PadMs: 100, Mode: "accurate"}
@@ -148,28 +165,22 @@ func TestAsyncJobPayload(t *testing.T) {
 	}
 }
 
-
 func setMockFFmpeg(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	mockPath := filepath.Join(cwd, "mock_ffmpeg.sh")
-	os.Setenv("FFMPEG_BIN", mockPath)
-	t.Cleanup(func() {
-		os.Unsetenv("FFMPEG_BIN")
-	})
+	t.Setenv("FFMPEG_BIN", filepath.Join(cwd, "mock_ffmpeg.sh"))
 }
 
 func TestProduce(t *testing.T) {
 	setMockFFmpeg(t)
 	st := setupTestStore(t)
-	defer st.Close()
+	defer closeStore(t, st)
 	dir := t.TempDir()
 	s := New(st, Config{CacheDir: dir, MaxClipSec: 30})
 
-	id, _, _ := st.UpsertMedia("/fake/movie.mp4", "mp4", 1024, 0, "Fake Movie", 2026, 0, 0, "")
-	st.UpdateMediaProbe(id, 600, 1920, 1080, "h264", "aac", "mp4", 0, 0, "eng")
+	id := seedMedia(t, st, "/fake/movie.mp4", 0)
 
 	tests := []struct {
 		name string
@@ -205,21 +216,15 @@ func TestProduce(t *testing.T) {
 	}
 }
 
-
 func TestProduceCPU(t *testing.T) {
 	setMockFFmpeg(t)
 	st := setupTestStore(t)
-	defer st.Close()
+	defer closeStore(t, st)
 	dir := t.TempDir()
 	s := New(st, Config{CacheDir: dir, MaxClipSec: 30})
-	
-	s.mu.Lock()
-	s.hwprobed = true
-	s.hwavail = false
-	s.mu.Unlock()
+	forceHW(s, false)
 
-	id, _, _ := st.UpsertMedia("/fake/movie.mp4", "mp4", 1024, 0, "Fake Movie", 2026, 0, 0, "")
-	st.UpdateMediaProbe(id, 600, 1920, 1080, "h264", "aac", "mp4", 0, 0, "eng")
+	id := seedMedia(t, st, "/fake/movie.mp4", 0)
 
 	tests := []struct {
 		name string
@@ -245,18 +250,17 @@ func TestProduceCPU(t *testing.T) {
 func TestRunWithProgress(t *testing.T) {
 	setMockFFmpeg(t)
 	st := setupTestStore(t)
-	defer st.Close()
+	defer closeStore(t, st)
 	dir := t.TempDir()
 	s := New(st, Config{CacheDir: dir, MaxClipSec: 30})
 
-	id, _, _ := st.UpsertMedia("/fake/movie.mp4", "mp4", 1024, 0, "Fake Movie", 2026, 0, 0, "")
-	st.UpdateMediaProbe(id, 600, 1920, 1080, "h264", "aac", "mp4", 0, 0, "eng")
+	id := seedMedia(t, st, "/fake/movie.mp4", 0)
 
 	var progressReports []float64
 	reportFunc := func(p float64) {
 		progressReports = append(progressReports, p)
 	}
-	
+
 	req := Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250}
 	path, ext, err := s.RunWithProgress(context.Background(), req, reportFunc)
 	if err != nil {
@@ -268,10 +272,9 @@ func TestRunWithProgress(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("expected file to exist at %v, got err %v", path, err)
 	}
-	
+
 	// mock outputs out_time_us=1000000 and 2000000
 	if len(progressReports) < 2 {
 		t.Errorf("expected at least 2 progress reports, got %d", len(progressReports))
 	}
 }
-

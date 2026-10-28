@@ -252,21 +252,40 @@ func TestRunWithProgressVariants(t *testing.T) {
 
 // TestProduceHWPreviewAndAccurateFallback covers the vaapi-failure fallback of
 // cutPreview and cutAccurate: the first attempt fails, the CPU retry succeeds.
+// Each mode gets a fresh failure counter so both hardware attempts fail.
 func TestProduceHWPreviewAndAccurateFallback(t *testing.T) {
-	mockFailFirstThenCreate(t)
 	s, st := newTestService(t)
 	forceHW(s, true)
 	id := seedMedia(t, st, "/fake/source", 0)
 
+	mockFailFirstThenCreate(t)
 	path, ext, err := s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "preview", PadMs: 250})
 	require.NoError(t, err)
 	assert.Equal(t, "mp4", ext)
 	require.FileExists(t, path)
 
+	mockFailFirstThenCreate(t)
 	path, ext, err = s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250})
 	require.NoError(t, err)
 	assert.Equal(t, "mp4", ext)
 	require.FileExists(t, path)
+}
+
+// TestProduceCPUTranscodeFailure covers the cpu-only failure path of
+// cutPreview and cutAccurate, where no hardware attempt is made at all.
+func TestProduceCPUTranscodeFailure(t *testing.T) {
+	mockFailAlways(t)
+	s, st := newTestService(t)
+	forceHW(s, false)
+	id := seedMedia(t, st, "/fake/source", 0)
+
+	_, _, err := s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "preview", PadMs: 250})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preview cut failed")
+
+	_, _, err = s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "accurate cut failed")
 }
 
 // TestProduceHWPreviewSuccess covers the vaapi success path of cutPreview and
@@ -296,6 +315,44 @@ func TestProduceWithClosedStore(t *testing.T) {
 
 	_, _, err = s.RunWithProgress(context.Background(),
 		Request{MediaID: 1, Start: 10, End: 20, Mode: "accurate", PadMs: 250}, func(float64) {})
+	require.Error(t, err)
+}
+
+// TestCutFastCleanupError covers the removePartial branch that logs a failed
+// cleanup: a non-empty directory at the mp4 output path makes os.Remove fail
+// after the successful matroska fallback.
+func TestCutFastCleanupError(t *testing.T) {
+	mockFailMP4(t)
+	s, st := newTestService(t)
+	id := seedMedia(t, st, "/fake/source", 0)
+	key := CacheKey(id, 10, 20, "fast", 250)
+
+	// Plant a non-empty directory where the mp4 output would be written.
+	junk := filepath.Join(s.cfg.CacheDir, "clips", key+".mp4", "occupied")
+	require.NoError(t, os.MkdirAll(junk, 0o750))
+
+	path, ext, err := s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "fast", PadMs: 250})
+	require.NoError(t, err)
+	assert.Equal(t, "mkv", ext)
+	require.FileExists(t, path)
+}
+
+// TestProduceMkdirError covers the clip cache directory creation failure in
+// render and RunWithProgress: pointing CacheDir at a regular file makes
+// MkdirAll fail with ENOTDIR.
+func TestProduceMkdirError(t *testing.T) {
+	mockCreateOutput(t)
+	_, st := newTestService(t)
+	id := seedMedia(t, st, "/fake/source", 0)
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
+	s := New(st, Config{CacheDir: blocker, MaxClipSec: 30})
+
+	_, _, err := s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "fast", PadMs: 250})
+	require.Error(t, err)
+
+	_, _, err = s.RunWithProgress(context.Background(),
+		Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250}, func(float64) {})
 	require.Error(t, err)
 }
 

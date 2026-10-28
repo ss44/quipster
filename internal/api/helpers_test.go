@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -77,6 +78,27 @@ func TestClipName(t *testing.T) {
 				t.Errorf("clipName = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBestEffort covers both outcomes of the best-effort lookup helper: the
+// value passes through and failures are logged, not propagated.
+func TestBestEffort(t *testing.T) {
+	if got := bestEffort(7, nil, "unit"); got != 7 {
+		t.Errorf("bestEffort success = %d, want 7", got)
+	}
+	if got := bestEffort(0, errors.New("boom"), "unit"); got != 0 {
+		t.Errorf("bestEffort failure = %d, want 0", got)
+	}
+}
+
+// TestWriteJSONEncodeError covers the logged encode failure: an unsupported
+// value leaves the body empty instead of panicking or writing garbage.
+func TestWriteJSONEncodeError(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeJSON(rr, map[string]any{"ch": make(chan int)})
+	if rr.Body.String() != "" {
+		t.Errorf("body = %q, want empty", rr.Body.String())
 	}
 }
 
