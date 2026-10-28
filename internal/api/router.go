@@ -683,6 +683,11 @@ func (d Deps) spaHandler() http.HandlerFunc {
 			fileServer.ServeHTTP(w, r2)
 			return
 		}
+		// Go's MIME table has no entry for .webmanifest, and a PWA manifest
+		// must be served as application/manifest+json for browsers to accept it.
+		if strings.HasSuffix(p, ".webmanifest") {
+			w.Header().Set("Content-Type", "application/manifest+json")
+		}
 		fileServer.ServeHTTP(w, r)
 	}
 }

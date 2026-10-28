@@ -315,6 +315,13 @@ sh testdata/make_fixtures.sh               # small fixture library (sidecar/embe
 The built SPA (`web/dist`) is embedded into the Go binary via `go:embed`; rebuild the web app
 before `go build` after frontend changes.
 
+The built SPA (`web/dist`) is embedded into the Go binary via `go:embed`; rebuild the web app
+before `go build` after frontend changes.
+
+Set `VITE_SITE_URL` (for example `https://quipster.example.com`) when building the web app — or pass
+it as a `--build-arg` to `docker build` — so `og:image`/`twitter:image` are emitted as absolute URLs.
+When it is unset the paths stay relative, which browsers render but social crawlers ignore.
+
 ### Test, lint, and coverage
 
 ```sh

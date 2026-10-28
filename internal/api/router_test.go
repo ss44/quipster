@@ -102,8 +102,9 @@ func buildDeps(t *testing.T, st *store.Store, meiliURL string) Deps {
 		Runner:   runner,
 		MediaDir: t.TempDir(),
 		WebFS: fstest.MapFS{
-			"index.html": &fstest.MapFile{Data: []byte("<html>index</html>")},
-			"app.js":     &fstest.MapFile{Data: []byte("console.log(1)")},
+			"index.html":       &fstest.MapFile{Data: []byte("<html>index</html>")},
+			"app.js":           &fstest.MapFile{Data: []byte("console.log(1)")},
+			"site.webmanifest": &fstest.MapFile{Data: []byte("{}")},
 		},
 	}
 }
@@ -853,6 +854,7 @@ func TestWebServing(t *testing.T) {
 		{"/", "<html>index</html>"},
 		{"/app.js", "console.log(1)"},
 		{"/some/client/route", "<html>index</html>"},
+		{"/site.webmanifest", "{}"},
 	}
 	for _, tc := range cases {
 		rr := do(t, h, http.MethodGet, tc.target, nil, nil)
@@ -861,8 +863,13 @@ func TestWebServing(t *testing.T) {
 		}
 	}
 
+	rr := do(t, h, http.MethodGet, "/site.webmanifest", nil, nil)
+	if got := rr.Header().Get("Content-Type"); got != "application/manifest+json" {
+		t.Errorf("manifest Content-Type = %q, want application/manifest+json", got)
+	}
+
 	deps.WebFS = nil
-	rr := do(t, Router(deps), http.MethodGet, "/missing", nil, nil)
+	rr = do(t, Router(deps), http.MethodGet, "/missing", nil, nil)
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("nil WebFS status = %d, want 404", rr.Code)
 	}
