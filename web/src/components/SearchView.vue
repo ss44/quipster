@@ -9,7 +9,7 @@
         and download or share the clip.
       </p>
 
-      <div class="examples">
+      <div class="examples" v-if="examples.length > 0">
         <button
           v-for="example in examples"
           :key="example"
@@ -140,19 +140,22 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, clipStreamURL, type Hit, type SearchResponse } from '../api'
 
 const route = useRoute()
 const router = useRouter()
 
-const examples = [
-  'show me the money',
-  'the city never sleeps',
-  'i could have been a contender',
-  'run, you fools',
-]
+const examples = ref<string[]>([])
+
+onMounted(async () => {
+  try {
+    examples.value = (await api.examples()).examples
+  } catch {
+    examples.value = []
+  }
+})
 
 const results = ref<SearchResponse | null>(null)
 const loading = ref(false)
