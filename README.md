@@ -1,11 +1,103 @@
-# Quipster
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo.svg" alt="Quipster logo" width="120">
+  </picture>
+</p>
 
-Search a local movie/TV library by subtitle dialogue and generate shareable clips on the fly.
-Fully containerized, web UI, no pre-rendered clips.
+<h1 align="center">Quipster</h1>
+
+<p align="center">
+  <strong>Search your local movie and TV library by subtitle dialogue, then clip the exact moment.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ss44/quipster/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/ss44/quipster/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/ss44/quipster/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="https://github.com/ss44/quipster/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/ss44/quipster?sort=semver&display_name=tag"></a>
+  <img alt="Coverage >= 85%" src="https://img.shields.io/badge/coverage-%E2%89%A585%25-brightgreen">
+  <a href="https://github.com/ss44/quipster/pkgs/container/quipster"><img alt="Container image" src="https://img.shields.io/badge/ghcr.io-quipster-2496ED?logo=docker&logoColor=white"></a>
+  <img alt="Go 1.27" src="https://img.shields.io/badge/go-1.27-00ADD8?logo=go&logoColor=white">
+  <a href="https://github.com/ss44/quipster/graphs/commit-activity"><img alt="Maintained" src="https://img.shields.io/badge/maintained-yes-brightgreen"></a>
+</p>
+
+## Table of contents
+
+- [Why Quipster](#why-quipster)
+- [Screenshots](#screenshots)
+- [Demo](#demo)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Quickstart (Docker)](#quickstart-docker)
+- [Configuration](#configuration)
+- [API](#api)
+- [Local development](#local-development)
+- [Contributing](#contributing)
+- [Troubleshooting](#troubleshooting)
+- [Roadmap](#roadmap)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+- [AI disclosure](#ai-disclosure)
+
+## Why Quipster
+
+- **Find the moment, not the title.** Search every spoken line of your library — sidecar or embedded English subtitles — instead of browsing filenames.
+- **Clip it on demand.** Lossless fast cuts, in-browser previews, or frame-accurate re-encodes are generated on the fly. No pre-rendering, no waiting for a batch job.
+- **Search by meaning.** Optional semantic (vector) search finds paraphrased dialogue when you do not remember the exact words.
+- **Local-first and private.** Your media never leaves your machine. One `docker compose up` brings up the app, the Meilisearch index, and the web UI.
+- **Uses your hardware.** Automatic GPU acceleration (NVENC → QuickSync → VAAPI → VideoToolbox) with a CPU fallback, so clips never fail on machines without a GPU.
+
+## Screenshots
+
+*Coming soon — screenshots of the landing page, search results, clip studio, and admin console will be added from a seeded demo library.*
+
+<!--
+| Search results | Clip studio |
+|---|---|
+| ![Search results](docs/assets/screenshots/search.png) | ![Clip studio](docs/assets/screenshots/clip-studio.png) |
+
+| Landing page | Admin console |
+|---|---|
+| ![Landing page](docs/assets/screenshots/landing.png) | ![Admin console](docs/assets/screenshots/admin.png) |
+-->
+
+## Demo
+
+*Coming soon — a short demo of search → preview → clip download.*
+
+<!--
+![Quipster demo: search dialogue and export a clip](docs/assets/demo.gif)
+
+<sub>30s demo: search for a line, preview the clip, download in fast mode.</sub>
+-->
+
+## Features
+
+- **Subtitle dialogue search** — sidecar `.srt`/`.vtt` (English-tagged or untagged) preferred, else
+  the first English embedded text track is extracted. Files with no English track are still
+  findable by title.
+- **Three clip modes** — `fast` (lossless stream-copy from the nearest keyframe), `preview`
+  (low-bitrate H.264 transcode that always plays in the browser), and `accurate`
+  (frame-exact 720p re-encode with GPU/CPU fallback). Long accurate cuts run as async jobs.
+- **English audio selection** — the English audio track is probed and every clip mode maps that
+  exact stream, so multilingual releases always yield English clips.
+- **Multi-folder libraries** — index specific subfolders (e.g. `movies` and `tv`) under your media
+  root; unselected folders are pruned on scan. Filename parsing fills in title, year, and `SxxExx`.
+- **Semantic (vector) search** — Meilisearch embedders (local HuggingFace, any OpenAI-compatible
+  endpoint, or a REST service) power hybrid keyword + vector retrieval with a Keyword / Hybrid /
+  Semantic toggle. See [Configuration](#configuration).
+- **Queue control** — pause, resume, clear, or stop ingestion and clip jobs from the admin UI;
+  pause state is persisted across restarts.
+- **Diagnostics console** — live view of the encode pipeline, CPU/RAM/GPU usage, storage, job
+  benchmarks, and detected environment, with a one-click export bundle and bug-report copy.
+- **GPU acceleration with fallback** — hardware backends are probed at startup; without a usable
+  GPU the app falls back to CPU encoding automatically. Tune with the `HWACCEL` env var.
+- **Local-first, containerized** — read-only bind-mount of your media root; clips, thumbnails, and
+  extracted subtitles are cached under an LRU cap.
 
 ## How it works
 
-```
+```text
 [Vue SPA] ──HTTP──> [Go API :8080] ──> SQLite (jobs, media, cues) + Meili (lines index)
                           │
                           ├── ingestion workers: scan → ffprobe → subtitle extract/parse → chunk build → Meili batch upsert
@@ -23,31 +115,39 @@ Media dir (bind-mount, read-only) ──> ingestion; cache dir (clips/thumbs) �
   (ultrafast/VAAPI) so it always plays in the browser; `accurate` mode re-encodes 720p from the
   exact timestamp with VAAPI/QuickSync and CPU `libx264` fallback. Outputs are cached
   (`sha256(mediaId|start|end|mode|pad)`) and served with HTTP Range support.
-- **Subtitles (MVP):** sidecar `.srt`/`.vtt` (English-tagged or untagged) preferred, else the first
-  English embedded text track is extracted. No English track → status `no_subs`, still findable by title.
-- **Audio:** the English-tagged audio track is selected during probe (default disposition preferred,
-  commentary/audio-description tracks avoided) and all clip modes map that exact stream, so
-  multilingual releases always yield English clips. `POST /api/admin/reprobe` re-runs selection for
-  already-processed files.
 - **Metadata (MVP):** filename/folder parsing for `Movies/` + `TV Shows/` layouts (title, year, SxxExx).
 
 ## Quickstart (Docker)
 
-```sh
-cp .env.example .env            # set MEDIA_DIR (read-only) and MEILI_MASTER_KEY
-docker compose up -d              # pulls app image and starts app + meilisearch
-```
+1. **Prerequisite:** Docker with the compose plugin.
+2. **Clone and configure:**
 
-Open `http://localhost:8080`, go to **Admin → Library folders**, pick the folders to index
-(e.g. `movies` and `tv`; empty means the whole media root). Save, then **Scan library**. Files
-outside the selected folders are pruned on scan. Wait for indexing, then search dialogue.
+   ```sh
+   git clone https://github.com/ss44/quipster.git && cd quipster
+   cp .env.example .env
+   ```
 
-### GPU / hardware acceleration
+   Edit `.env` and set at least `MEDIA_DIR` (your library root, mounted read-only) and
+   `MEILI_MASTER_KEY`.
+3. **Start the stack:**
 
-The app probes FFmpeg hardware backends at startup (NVENC → QuickSync → VAAPI → VideoToolbox)
-and automatically falls back to CPU encoding (`libx264`) when none is available, so clips and
-thumbnails never fail on machines without a usable GPU. Pick the compose profile matching your
-hardware:
+   ```sh
+   docker compose up -d
+   ```
+
+   This pulls the app image and starts the app plus Meilisearch.
+4. **Verify it is up:**
+
+   ```sh
+   curl localhost:8080/api/health
+   ```
+
+5. **Pick library folders:** open `http://localhost:8080`, go to **Admin → Library folders**, and
+   select the folders to index (e.g. `movies` and `tv`; empty means the whole media root). Save,
+   then click **Scan library**. Files outside the selected folders are pruned on scan.
+6. **Wait for indexing, then search** a line of dialogue. The UI shows suggestions as you type.
+
+Optional compose profiles replace the default `app` service when your hardware has a GPU:
 
 ```sh
 docker compose --profile igpu up -d app-igpu    # Intel/AMD iGPU via /dev/dri (VAAPI/QSV)
@@ -68,7 +168,7 @@ docker compose --profile cpu up -d app-cpu      # force software encoding
 Startup logs report what was detected, e.g. `hardware acceleration: vaapi (device=/dev/dri/renderD128)`
 or `hardware acceleration: none, using cpu`.
 
-### Diagnostics & hardware stats
+### Diagnostics
 
 Open **Admin → Diagnostics** (`/admin/diagnostics`) for a live view of the active encode pipeline,
 CPU/RAM/VRAM/GPU usage, storage, 1h/6h/24h/7d job benchmarks, and the detected environment
@@ -182,41 +282,87 @@ switching models or dimensions to be safe.
     process stop claiming/cancel within a second.
   - `GET /api/admin/status`, `GET /api/admin/events` (SSE, 1s tick), `GET /api/admin/jobs`
 
-## Development
+## Local development
 
-The easiest way to run the full stack locally with hot-reloading is using the included dev script. It will automatically spin up an ephemeral Meilisearch container, generate dummy media test data, run the Go backend, and launch the Vite frontend server.
+### Prerequisites
+
+- Go 1.27+
+- Node.js 22+ (web UI)
+- FFmpeg + ffprobe on `PATH`
+- Meilisearch v1.x reachable at `MEILI_URL` — or run it via Docker (see below)
+
+### Run
+
+The easiest way to run the full stack locally with hot-reloading is the included dev script. It
+spins up an ephemeral Meilisearch container, generates dummy media test data, runs the Go backend,
+and launches the Vite frontend server. Stopping it (`Ctrl+C`) cleans up background processes and
+containers automatically.
 
 ```sh
 ./dev.sh
 ```
 
-When you stop the script (`Ctrl+C`), it cleans up the background processes and containers automatically.
-
-Manual commands:
+Manual commands instead:
 
 ```sh
-(cd web && npm install && npm run dev)      # Vite dev server proxies /api → :8080
-go run ./cmd/quipster                        # API + workers in one process
-go test ./internal/...                       # unit tests
-sh testdata/make_fixtures.sh                 # small fixture library (sidecar/embedded/no-subs)
+docker compose up -d meilisearch           # or point MEILI_URL at an existing instance
+cp .env.example .env
+go run ./cmd/quipster                      # API + workers in one process on :8080
+(cd web && npm install && npm run dev)     # Vite on :5173, proxies /api → :8080
+sh testdata/make_fixtures.sh               # small fixture library (sidecar/embedded/no-subs)
 ```
 
 The built SPA (`web/dist`) is embedded into the Go binary via `go:embed`; rebuild the web app
 before `go build` after frontend changes.
 
-## Notes & limits (MVP)
+### Test, lint, and coverage
 
-- Probing is bounded so file size cannot stall ingestion: ffprobe runs with a 10-second analysis
-  window and a 50 MiB probe budget, and is killed after `PROBE_TIMEOUT` (default 60s); pathological
-  files (e.g. missing `moov`/cues index) are marked errored and skipped instead of blocking the queue.
-- English-only subtitle indexing; OpenSubtitles download, TMDB enrichment, burned-in subs and
-  share links are phase 2.
-- mp4 stream-copy falls back to Matroska output when codecs are not mp4-compatible.
-- The Meili index is derived state — `POST /api/admin/reindex` rebuilds it from SQLite.
-- Hardware acceleration is probed at startup (`NVENC → QSV → VAAPI → VideoToolbox`); without a
-  usable GPU the app uses CPU encoding automatically. Tune with the `HWACCEL` env var and pick the
-  matching compose profile (`igpu`, `nvidia`, `cpu`) for device passthrough. Metadata probing,
-  subtitle extraction, and stream-copy downloads do not use GPU video acceleration.
+```sh
+go test -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out | grep total   # must be >= 85.0%
+golangci-lint run
+(cd web && npm run build)
+```
+
+The pre-commit hook (`.githooks/pre-commit`, enabled via `git config core.hooksPath .githooks`)
+runs the linter and enforces the coverage gate.
+
+## Contributing
+
+Contributions are welcome. Fork the repo, create a branch, and open a pull request against
+`main`. Before you push:
+
+1. `go test ./...` must pass, `golangci-lint run` must be clean, and total statement coverage must
+   stay **>= 85%** — the pre-commit hook rejects commits that fail any of these. Write new unit
+   tests if coverage drops.
+2. Follow the commit message convention (see below); the linter enforces the format.
+3. Keep pull requests focused and small. See [`AGENTS.md`](AGENTS.md) for the full ruleset used
+   by AI agents and humans alike, including
+   [good first issue](https://github.com/ss44/quipster/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+   and help-wanted tickets.
+
+### Commit convention
+
+Commits use `<DOMAIN>: <summary>` — an uppercase domain from the list below, an imperative summary
+starting with a lowercase letter, and no trailing period:
+
+| Domain | Scope |
+|---|---|
+| `BACKEND` | Go backend services, API router, data pipelines, SQLite store |
+| `ADMIN` | Administration features, queue control, multi-folder library settings, ops endpoints |
+| `UI` | Frontend Vue3/Vuetify3 components, design system, client-side logic |
+| `CLIPS` | FFmpeg processing, thumbnail extraction, keyframe snapping, video/audio mapping, caching |
+| `SEARCH` | Meilisearch indexing, document ingestion, search APIs |
+| `INFRA` | Infrastructure, Dockerfiles, Docker Compose, GitHub Actions (CI) |
+| `DOCS` | READMEs, markdown documentation, licensing |
+
+### Coding standards
+
+- SOLID, readable, decoupled packages; documented exported identifiers (Effective Go).
+- Consistent terminology: a **clip** is a generated video segment (never "cut" in user-facing
+  copy), a **library folder** is a folder selected under the media root.
+
+## Troubleshooting
 
 ### Slow previews on network storage
 
@@ -249,9 +395,7 @@ Host-mounted Samba traffic may not appear in container network counters or local
 use host network rates and CIFS statistics for the mounted share rather than treating zero
 container network I/O as proof the app is idle. Low CPU alone does not prove an I/O bottleneck.
 
-## Troubleshooting
-
-**`failed to create mount source path ... mkdir /mnt/plex-library: file exists`**
+### `failed to create mount source path ... mkdir /mnt/plex-library: file exists`
 
 Docker's daemon runs as root and cannot see or enter FUSE mounts (sshfs/rclone) created by your
 user session — by default only the mounting user may access them. Docker then tries to create the
@@ -266,7 +410,7 @@ sshfs -o ro,allow_other,default_permissions bigrig:/media/plex-storage-new /mnt/
 
 Persist it system-wide (requires the `allow_other` line above), e.g. in `/etc/fstab`:
 
-```
+```ini
 bigrig:/media/plex-storage-new /mnt/plex-library fuse.sshfs ro,allow_other,default_permissions,IdentityFile=/home/shinda/.ssh/id_rsa,_netdev,nofail,x-systemd.automount 0 0
 ```
 
@@ -274,9 +418,34 @@ A kernel NFS mount is preferable to sshfs for throughput if the server exports i
 file uses `create_host_path: false`, so Docker will report a missing library path instead of
 silently creating host directories.
 
+### Notes & limits (MVP)
+
+- Probing is bounded so file size cannot stall ingestion: ffprobe runs with a 10-second analysis
+  window and a 50 MiB probe budget, and is killed after `PROBE_TIMEOUT` (default 60s); pathological
+  files (e.g. missing `moov`/cues index) are marked errored and skipped instead of blocking the queue.
+- Subtitle indexing is English-only for now; see [Roadmap](#roadmap) for what is next.
+- mp4 stream-copy falls back to Matroska output when codecs are not mp4-compatible.
+- The Meili index is derived state — `POST /api/admin/reindex` rebuilds it from SQLite.
+
+## Roadmap
+
+- [ ] More subtitle sources: OpenSubtitles download and burned-in subtitle support
+- [ ] Metadata enrichment via TMDB
+- [ ] Share links for generated clips
+- [ ] Languages beyond English subtitle indexing
+- [ ] Split the API reference and troubleshooting notes into `docs/` if the README keeps growing
+
 ## License
 
 [MIT](LICENSE)
+
+## Acknowledgments
+
+- [Meilisearch](https://www.meilisearch.com/) — the dialogue index
+- [FFmpeg](https://ffmpeg.org/) — probing, subtitle extraction, and clip rendering
+- [chi](https://github.com/go-chi/chi) router and [`modernc.org/sqlite`](https://gitlab.com/cznic/sqlite) pure-Go driver
+- [Vue 3](https://vuejs.org/) + [Vuetify 3](https://vuetifyjs.com/) for the SPA
+- [Kilo Code](https://kilo.ai/) — AI-assisted development (see [AI disclosure](#ai-disclosure))
 
 ## AI disclosure
 
