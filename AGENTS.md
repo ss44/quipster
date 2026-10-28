@@ -4,7 +4,7 @@ This document outlines the standard operating procedures, architectural guidelin
 
 ## 1. Commit Message Conventions
 
-We strictly enforce a uniform commit message format to maintain a readable and organized project history.
+We strictly enforce a uniform commit message format to maintain a readable and organized project history. Follow this convention when creating new PR's and setting PR titles also!!
 
 **Format:** `<DOMAIN>: <summary of changes>`
 *(Note: Start the summary with a lowercase letter and use the imperative mood. Do not end the summary with a period.)*
