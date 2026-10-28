@@ -81,11 +81,15 @@ or `hardware acceleration: none, using cpu`.
 | `SCAN_INTERVAL` | off | e.g. `12h` periodic rescan |
 | `SUBTITLE_WORKERS` | `4` | probe/extract/chunk worker pool |
 | `EXTRACT_CONNS` | `4` | parallel embedded-subtitle extractions (each scans the whole file; tune to storage throughput) |
+| `PROBE_TIMEOUT` | `60s` | per-file ffprobe cap; a stalled probe is killed and the file marked errored instead of blocking the queue |
 | `JOB_TIMEOUT` | `3h` | hard per-job timeout |
 | `INDEX_WORKERS` | `1` | Meili indexer pool |
 | `CLIP_WORKERS` | `2` | async clip render pool |
 | `CLIP_PAD_MS` | `250` | head+tail padding |
 | `MAX_CLIP_SEC` | `120` | hard clip cap |
+| `CLIP_PREVIEW_RES` | `640:-2` | preview width:height; even dimensions, with `-2` in one dimension to preserve aspect ratio |
+| `CLIP_ACCURATE_RES` | `1280:-2` | optional precise transcode resolution; does not affect stream-copy downloads |
+| `CLIP_CPU_PRESET` | mode-specific | x264 preset override; blank keeps preview `ultrafast`, precise `veryfast`; ignored for VAAPI |
 | `CACHE_MAX_GB` | `10` | LRU cache cap (clips/thumbs/subs) |
 | `LONG_CUT_SEC` | `20` | accurate cuts longer than this run as async jobs with progress |
 | `HWACCEL` | `auto` | `auto` (probe NVENC/QSV/VAAPI/VideoToolbox), `none`/`cpu` (software only), or force a backend: `nvenc`, `qsv`, `vaapi`, `videotoolbox` |
@@ -114,6 +118,16 @@ or `hardware acceleration: none, using cpu`.
 
 ## Development
 
+The easiest way to run the full stack locally with hot-reloading is using the included dev script. It will automatically spin up an ephemeral Meilisearch container, generate dummy media test data, run the Go backend, and launch the Vite frontend server.
+
+```sh
+./dev.sh
+```
+
+When you stop the script (`Ctrl+C`), it cleans up the background processes and containers automatically.
+
+Manual commands:
+
 ```sh
 (cd web && npm install && npm run dev)      # Vite dev server proxies /api → :8080
 go run ./cmd/quipster                        # API + workers in one process
@@ -126,13 +140,48 @@ before `go build` after frontend changes.
 
 ## Notes & limits (MVP)
 
+- Probing is bounded so file size cannot stall ingestion: ffprobe runs with a 10-second analysis
+  window and a 50 MiB probe budget, and is killed after `PROBE_TIMEOUT` (default 60s); pathological
+  files (e.g. missing `moov`/cues index) are marked errored and skipped instead of blocking the queue.
 - English-only subtitle indexing; OpenSubtitles download, TMDB enrichment, burned-in subs and
   share links are phase 2.
 - mp4 stream-copy falls back to Matroska output when codecs are not mp4-compatible.
 - The Meili index is derived state — `POST /api/admin/reindex` rebuilds it from SQLite.
 - Hardware acceleration is probed at startup (`NVENC → QSV → VAAPI → VideoToolbox`); without a
   usable GPU the app uses CPU encoding automatically. Tune with the `HWACCEL` env var and pick the
-  matching compose profile (`igpu`, `nvidia`, `cpu`) for device passthrough.
+  matching compose profile (`igpu`, `nvidia`, `cpu`) for device passthrough. Metadata probing,
+  subtitle extraction, and stream-copy downloads do not use GPU video acceleration.
+
+### Slow previews on network storage
+
+Previews default to a small 640px-wide H.264 transcode. Downloads default to **Fast cut**,
+which copies the original video/audio without quality loss, but starts at a keyframe rather
+than an exact frame. **Precise** remains an explicit re-encoding option for exact timing.
+Changing transcode settings creates new cache identities; existing files expire via the LRU.
+
+Lowering preview resolution reduces scaling/encoding work and output size, not the source
+resolution that must be decoded or necessarily the bytes read over Samba. Embedded subtitle
+extraction can scan the full movie and compete with interactive requests. Try `EXTRACT_CONNS=1`
+on slower shares, and keep `CACHE_DIR` and `DATA_DIR` on local storage when possible.
+
+On the **deployment host**, while opening a preview, use these diagnostics (some tools may
+need installation or elevated access):
+
+```sh
+docker compose stats --no-stream
+docker compose top app
+vmstat 1 10
+iostat -xz 1 10
+sar -n DEV 1 10
+sudo intel_gpu_top
+docker compose logs --since 5m app
+```
+
+Look for CPU saturation, swap activity, device latency, and busy GPU Video engines.
+Docker CPU percentages may exceed 100% across cores; its I/O counters are cumulative.
+Host-mounted Samba traffic may not appear in container network counters or local disk stats;
+use host network rates and CIFS statistics for the mounted share rather than treating zero
+container network I/O as proof the app is idle. Low CPU alone does not prove an I/O bottleneck.
 
 ## Troubleshooting
 

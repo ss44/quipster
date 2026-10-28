@@ -3,87 +3,95 @@ package hardware
 import "testing"
 
 func TestPipelinePerBackend(t *testing.T) {
+	//nolint:govet // field grouping favors readability over optimal alignment.
 	tests := []struct {
-		name    string
-		caps    Capabilities
-		input   []string
-		filter  string
-		encoder string
-		isHW    bool
+		name        string
+		caps        Capabilities
+		wantInput   []string
+		wantDecode  []string
+		wantFilter  string
+		wantEncoder string
+		wantHW      bool
 	}{
 		{
-			name:    "none yields cpu plan",
-			caps:    Capabilities{Backend: BackendNone},
-			filter:  "scale=960:-2",
-			encoder: "libx264",
+			name:        "none yields cpu plan",
+			caps:        Capabilities{Backend: BackendNone},
+			wantFilter:  "scale=1280x720",
+			wantEncoder: "libx264",
 		},
 		{
-			name:    "zero value yields cpu plan",
-			caps:    Capabilities{},
-			filter:  "scale=960:-2",
-			encoder: "libx264",
+			name:        "zero value yields cpu plan",
+			caps:        Capabilities{},
+			wantFilter:  "scale=1280x720",
+			wantEncoder: "libx264",
 		},
 		{
-			name:    "vaapi full gpu pipeline",
-			caps:    Capabilities{Backend: BackendVaapi, Device: "/dev/dri/renderD128"},
-			input:   []string{"-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"},
-			filter:  "scale_vaapi=w=960:h=-2:format=nv12",
-			encoder: "h264_vaapi",
-			isHW:    true,
+			name:        "vaapi full gpu pipeline",
+			caps:        Capabilities{Backend: BackendVaapi, Device: "/dev/dri/renderD128"},
+			wantInput:   []string{"-vaapi_device", "/dev/dri/renderD128", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"},
+			wantDecode:  []string{"-hwaccel", "vaapi"},
+			wantFilter:  "scale_vaapi=1280x720:format=nv12",
+			wantEncoder: "h264_vaapi",
+			wantHW:      true,
 		},
 		{
-			name:    "nvenc full gpu pipeline",
-			caps:    Capabilities{Backend: BackendNvenc},
-			input:   []string{"-hwaccel", "cuda", "-hwaccel_output_format", "cuda"},
-			filter:  "scale_cuda=w=960:h=-2:format=nv12",
-			encoder: "h264_nvenc",
-			isHW:    true,
+			name:        "vaapi without detected device uses default node",
+			caps:        Capabilities{Backend: BackendVaapi},
+			wantInput:   []string{"-vaapi_device", "/dev/dri/renderD128", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"},
+			wantDecode:  []string{"-hwaccel", "vaapi"},
+			wantFilter:  "scale_vaapi=1280x720:format=nv12",
+			wantEncoder: "h264_vaapi",
+			wantHW:      true,
 		},
 		{
-			name:    "qsv decodes to system memory and scales on cpu",
-			caps:    Capabilities{Backend: BackendQsv},
-			input:   []string{"-hwaccel", "qsv"},
-			filter:  "scale=960:-2",
-			encoder: "h264_qsv",
-			isHW:    true,
+			name:        "nvenc full gpu pipeline",
+			caps:        Capabilities{Backend: BackendNvenc},
+			wantInput:   []string{"-hwaccel", "cuda", "-hwaccel_output_format", "cuda"},
+			wantDecode:  []string{"-hwaccel", "cuda"},
+			wantFilter:  "scale_cuda=1280x720:format=nv12",
+			wantEncoder: "h264_nvenc",
+			wantHW:      true,
 		},
 		{
-			name:    "videotoolbox decodes to system memory and scales on cpu",
-			caps:    Capabilities{Backend: BackendVideotoolbox},
-			input:   []string{"-hwaccel", "videotoolbox"},
-			filter:  "scale=960:-2",
-			encoder: "h264_videotoolbox",
-			isHW:    true,
+			name:        "qsv decodes to system memory and scales on cpu",
+			caps:        Capabilities{Backend: BackendQsv},
+			wantInput:   []string{"-hwaccel", "qsv"},
+			wantDecode:  []string{"-hwaccel", "qsv"},
+			wantFilter:  "scale=1280x720",
+			wantEncoder: "h264_qsv",
+			wantHW:      true,
+		},
+		{
+			name:        "videotoolbox decodes to system memory and scales on cpu",
+			caps:        Capabilities{Backend: BackendVideotoolbox},
+			wantInput:   []string{"-hwaccel", "videotoolbox"},
+			wantDecode:  []string{"-hwaccel", "videotoolbox"},
+			wantFilter:  "scale=1280x720",
+			wantEncoder: "h264_videotoolbox",
+			wantHW:      true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.caps.Available(); got != tc.isHW {
-				t.Errorf("Available() = %v, want %v", got, tc.isHW)
+			if got := tc.caps.Available(); got != tc.wantHW {
+				t.Errorf("Available() = %v, want %v", got, tc.wantHW)
 			}
-			p := tc.caps.Pipeline(960)
-			assertArgs(t, "Pipeline.Input", p.Input, tc.input)
-			if p.Filter != tc.filter {
-				t.Errorf("Filter = %q, want %q", p.Filter, tc.filter)
+			p := tc.caps.Pipeline("1280x720")
+			assertArgs(t, "Pipeline.Input", p.Input, tc.wantInput)
+			if p.Filter != tc.wantFilter {
+				t.Errorf("Filter = %q, want %q", p.Filter, tc.wantFilter)
 			}
-			if p.Encoder != tc.encoder {
-				t.Errorf("Encoder = %q, want %q", p.Encoder, tc.encoder)
+			if p.Encoder != tc.wantEncoder {
+				t.Errorf("Encoder = %q, want %q", p.Encoder, tc.wantEncoder)
 			}
-			if p.IsHW != tc.isHW {
-				t.Errorf("IsHW = %v, want %v", p.IsHW, tc.isHW)
+			if p.IsHW != tc.wantHW {
+				t.Errorf("IsHW = %v, want %v", p.IsHW, tc.wantHW)
 			}
 			// DecodeArgs always hands frames back to system memory, so
 			// CPU filters/encoders can consume them.
-			assertArgs(t, "DecodeArgs", tc.caps.DecodeArgs(), firstTwo(tc.input))
+			assertArgs(t, "DecodeArgs", tc.caps.DecodeArgs(), tc.wantDecode)
 		})
 	}
-}
-
-func firstTwo(args []string) []string {
-	if len(args) < 2 {
-		return nil
-	}
-	return args[:2]
 }
 
 func assertArgs(t *testing.T, name string, got, want []string) {

@@ -1,3 +1,4 @@
+// Package jobs provides the job runner that claims and executes queued work.
 package jobs
 
 import (
@@ -13,6 +14,9 @@ import (
 // Handler executes a claimed job. progress reports 0..1 for long-running jobs.
 type Handler func(ctx context.Context, j *store.Job, progress func(float64)) error
 
+// Runner claims jobs from the store and executes them with registered handlers.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
 type Runner struct {
 	st          *store.Store
 	workerName  string
@@ -30,6 +34,7 @@ type Runner struct {
 	stopOnce sync.Once
 }
 
+// NewRunner creates a Runner and starts its pause watcher.
 func NewRunner(st *store.Store, workerName string) *Runner {
 	r := &Runner{
 		st:          st,
@@ -114,7 +119,9 @@ func (r *Runner) run(jobType string, j *store.Job) {
 	r.mu.Unlock()
 	if h == nil {
 		log.Printf("[jobs] no handler for job type %s", jobType)
-		r.st.FinishJob(j.ID, "error", "no handler registered")
+		if ferr := r.st.FinishJob(j.ID, "error", "no handler registered"); ferr != nil {
+			log.Printf("[jobs] finish error job %d: %v", j.ID, ferr)
+		}
 		return
 	}
 	last := time.Now()
@@ -123,7 +130,9 @@ func (r *Runner) run(jobType string, j *store.Job) {
 			return
 		}
 		last = time.Now()
-		r.st.SetJobProgress(j.ID, p)
+		if perr := r.st.SetJobProgress(j.ID, p); perr != nil {
+			log.Printf("[jobs] progress error job %d: %v", j.ID, perr)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.jobTimeout)
 	defer cancel()
@@ -138,23 +147,29 @@ func (r *Runner) run(jobType string, j *store.Job) {
 
 	err := h(ctx, j, progress)
 	if err == nil {
-		if err := r.st.FinishJob(j.ID, "done", ""); err != nil {
-			log.Printf("[jobs] finish error job %d: %v", j.ID, err)
+		if ferr := r.st.FinishJob(j.ID, "done", ""); ferr != nil {
+			log.Printf("[jobs] finish error job %d: %v", j.ID, ferr)
 		}
 		return
 	}
 	if paused, perr := r.st.GetQueuePaused(); perr == nil && paused {
 		log.Printf("[jobs] job %d (%s) interrupted by queue pause, requeueing", j.ID, j.Type)
-		r.st.RequeueJobSoft(j.ID, "paused")
+		if rerr := r.st.RequeueJobSoft(j.ID, "paused"); rerr != nil {
+			log.Printf("[jobs] soft requeue error job %d: %v", j.ID, rerr)
+		}
 		return
 	}
 	if j.Attempts < r.maxAttempts {
 		log.Printf("[jobs] job %d (%s) attempt %d failed, requeueing: %v", j.ID, j.Type, j.Attempts, err)
-		r.st.RequeueJob(j.ID, err.Error())
+		if rerr := r.st.RequeueJob(j.ID, err.Error()); rerr != nil {
+			log.Printf("[jobs] requeue error job %d: %v", j.ID, rerr)
+		}
 		return
 	}
 	log.Printf("[jobs] job %d (%s) failed permanently after %d attempts: %v", j.ID, j.Type, j.Attempts, err)
-	r.st.FinishJob(j.ID, "error", err.Error())
+	if ferr := r.st.FinishJob(j.ID, "error", err.Error()); ferr != nil {
+		log.Printf("[jobs] finish error job %d: %v", j.ID, ferr)
+	}
 }
 
 // Stop signals all workers and waits for the current job of each to wind down.

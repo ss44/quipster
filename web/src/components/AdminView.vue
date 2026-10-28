@@ -166,7 +166,6 @@
     <section class="panel jobs">
       <header class="panel-header">
         <span>Recent jobs</span>
-        <button type="button" class="link-btn" @click="refreshJobs">Refresh</button>
       </header>
       <div class="table-wrap">
         <table class="jobs-table">
@@ -182,7 +181,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="job in jobs" :key="job.id">
+            <tr v-for="job in (snap?.recentJobs ?? [])" :key="job.id">
               <td class="mono">{{ job.type }}</td>
               <td>
                 <span class="file-title truncate">{{ job.mediaTitle || fileBase(job.mediaPath) || '—' }}</span>
@@ -201,7 +200,7 @@
             </tr>
           </tbody>
         </table>
-        <p v-if="!jobs.length" class="idle">No jobs yet — run a scan to populate the queue.</p>
+        <p v-if="!snap?.recentJobs?.length" class="idle">No jobs yet — run a scan to populate the queue.</p>
       </div>
     </section>
 
@@ -224,11 +223,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useNow } from '@vueuse/core'
 import { api, type AdminConfig, type AdminSnapshot, type Job } from '../api'
 
+const now = useNow({ interval: 1000 })
+
 const snap = ref<AdminSnapshot | null>(null)
-const jobs = ref<Job[]>([])
 const config = ref<AdminConfig | null>(null)
 const folders = ref<string[]>([])
 const savingConfig = ref(false)
@@ -261,20 +262,39 @@ const indexedPct = computed(() => {
   return Math.round((lines.chunksIndexed / lines.chunks) * 100)
 })
 
-onMounted(() => {
+let lastRawSnap = ''
+
+function connectStream() {
+  if (stream) stream.close()
   stream = new EventSource('/api/admin/events')
+  
+  stream.onopen = () => {
+    if (poller) {
+      window.clearInterval(poller)
+      poller = null
+    }
+  }
+
   stream.addEventListener('tick', (event) => {
     try {
-      snap.value = JSON.parse((event as MessageEvent).data)
+      const raw = (event as MessageEvent).data
+      if (raw === lastRawSnap) return
+      lastRawSnap = raw
+      snap.value = JSON.parse(raw)
     } catch {
       /* ignore malformed ticks */
     }
   })
+
   stream.onerror = () => {
-    if (!poller) poller = window.setInterval(refreshJobs, 5000)
+    // EventSource auto-reconnects, but if we wanted manual backoff we'd do it here.
+    // The browser's native EventSource reconnection is usually sufficient.
   }
+}
+
+onMounted(() => {
+  connectStream()
   void loadConfig()
-  void refreshJobs()
 })
 
 onUnmounted(() => {
@@ -308,19 +328,10 @@ async function saveFolders() {
   }
 }
 
-async function refreshJobs() {
-  try {
-    jobs.value = (await api.jobs()).jobs ?? []
-  } catch {
-    /* admin may be token-protected */
-  }
-}
-
 async function doScan() {
   scanning.value = true
   try {
     await api.scan('')
-    await refreshJobs()
   } finally {
     scanning.value = false
   }
@@ -330,7 +341,6 @@ async function doReindex() {
   reindexing.value = true
   try {
     await api.reindex()
-    await refreshJobs()
   } finally {
     reindexing.value = false
   }
@@ -339,7 +349,6 @@ async function doReindex() {
 async function togglePause() {
   if (paused.value) await api.resumeQueue()
   else await api.pauseQueue()
-  await refreshJobs()
 }
 
 async function stopAndClear() {
@@ -347,7 +356,6 @@ async function stopAndClear() {
   try {
     await api.stopQueue()
     confirmOpen.value = false
-    await refreshJobs()
   } finally {
     stopping.value = false
   }
@@ -357,7 +365,6 @@ async function doReprobe() {
   reprobing.value = true
   try {
     await api.reprobe()
-    await refreshJobs()
   } finally {
     reprobing.value = false
   }
@@ -384,11 +391,18 @@ function fileBase(path: string): string {
 
 function elapsed(job: Job): string {
   if (!job.startedAt) return ''
-  const end = job.finishedAt || Date.now()
+  const end = job.finishedAt || now.value.getTime()
   const ms = Math.max(0, end - job.startedAt)
   if (ms < 1000) return `${ms}ms`
   if (ms < 60000) return `${Math.round(ms / 1000)}s`
   return `${(ms / 60000).toFixed(1)}m`
+}
+
+function waitTime(job: Job): string {
+  const start = job.startedAt || now.value.getTime()
+  const ms = Math.max(0, start - job.createdAt)
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`
+  return `${Math.round(ms / 60000)}m`
 }
 
 function fmtTime(ms: number): string {
@@ -397,8 +411,9 @@ function fmtTime(ms: number): string {
 }
 
 function fmtDur(job: Job): string {
+  if (job.status === 'queued') return `wait: ${waitTime(job)}`
   if (!job.startedAt) return '—'
-  if (!job.finishedAt) return job.status === 'running' ? 'running' : '—'
+  if (!job.finishedAt && job.status !== 'running') return '—'
   return elapsed(job)
 }
 

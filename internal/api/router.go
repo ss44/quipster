@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,7 +27,11 @@ import (
 	"quipster/internal/thumbs"
 )
 
+// Deps bundles the collaborators and settings the HTTP router needs.
+// Handlers receive it by value; every field is a shared service or
+// read-only configuration.
 type Deps struct {
+	WebFS      fs.FS
 	St         *store.Store
 	Search     *search.Service
 	Indexer    *indexer.Indexer
@@ -33,17 +39,19 @@ type Deps struct {
 	Thumbs     *thumbs.Service
 	Events     *events.Collector
 	Runner     *jobs.Runner
+	ScanTicker func() // enqueues a scan job if none active; called for POST /scan
 	MediaDir   string
 	SubsDir    string
-	WebFS      fs.FS
 	APIToken   string
-	ScanTicker func() // enqueues a scan job if none active; called for POST /scan
 }
 
+// Router builds the application HTTP handler: standard middleware, public
+// read endpoints, token-guarded admin endpoints and, when a web filesystem is
+// configured, the SPA fallback. middleware.RealIP is deliberately omitted
+// because it is deprecated and spoofable via client-controlled headers.
 func Router(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(5 * time.Minute))
@@ -54,7 +62,7 @@ func Router(d Deps) http.Handler {
 		})
 	})
 
-	r.Get("/api/health", func(w http.ResponseWriter, req *http.Request) {
+	r.Get("/api/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "meiliUp": d.Indexer.Healthy()})
 	})
 
@@ -109,14 +117,38 @@ func (d Deps) tokenAuth(next http.Handler) http.Handler {
 	})
 }
 
+// writeJSON serializes v as JSON. Encode failures (disconnected client or an
+// unsupported value) are logged rather than aborting the handler, since the
+// response is already committed.
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("[api] write json: %v", err)
+	}
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	writeJSON(w, map[string]any{"error": msg})
+}
+
+// bestEffort evaluates a best-effort lookup: a failure is logged and the zero
+// value degrades the response payload instead of failing the whole request.
+func bestEffort[T any](v T, err error, what string) T {
+	if err != nil {
+		log.Printf("[api] %s: %v", what, err)
+	}
+	return v
+}
+
+// atoiQuery parses an integer query parameter, returning 0 when the value is
+// absent or malformed; handlers clamp the zero value into their own ranges.
+func atoiQuery(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func (d Deps) handleSuggest(w http.ResponseWriter, r *http.Request) {
@@ -137,8 +169,8 @@ func (d Deps) handleSuggest(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	show := r.URL.Query().Get("show")
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	perPage, _ := strconv.Atoi(r.URL.Query().Get("perPage"))
+	page := atoiQuery(r.URL.Query().Get("page"))
+	perPage := atoiQuery(r.URL.Query().Get("perPage"))
 	res, err := d.Search.Search(q, show, page, perPage)
 	if err != nil {
 		log.Printf("[api] search: %v", err)
@@ -149,11 +181,11 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d Deps) handleMediaList(w http.ResponseWriter, r *http.Request) {
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	page := atoiQuery(r.URL.Query().Get("page"))
 	if page < 1 {
 		page = 1
 	}
-	perPage, _ := strconv.Atoi(r.URL.Query().Get("perPage"))
+	perPage := atoiQuery(r.URL.Query().Get("perPage"))
 	if perPage < 1 || perPage > 100 {
 		perPage = 50
 	}
@@ -180,9 +212,15 @@ func (d Deps) handleMedia(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "media not found")
 		return
 	}
-	tracks, _ := d.St.TracksForMedia(id)
-	cueCount, _ := d.St.CueCount(id)
-	writeJSON(w, map[string]any{"media": m, "tracks": tracks, "cueCount": cueCount})
+	// Track and cue enrichment is best-effort: a failed lookup degrades the
+	// detail payload rather than failing the whole media response.
+	tracks, terr := d.St.TracksForMedia(id)
+	cueCount, cerr := d.St.CueCount(id)
+	writeJSON(w, map[string]any{
+		"media":    m,
+		"tracks":   bestEffort(tracks, terr, "tracks"),
+		"cueCount": bestEffort(cueCount, cerr, "cue count"),
+	})
 }
 
 func (d Deps) handleThumb(w http.ResponseWriter, r *http.Request) {
@@ -191,8 +229,14 @@ func (d Deps) handleThumb(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	t, _ := strconv.ParseFloat(r.URL.Query().Get("t"), 64)
-	width, _ := strconv.Atoi(r.URL.Query().Get("w"))
+	t, terr := strconv.ParseFloat(r.URL.Query().Get("t"), 64)
+	if terr != nil {
+		t = 0 // absent or malformed t defaults to the video start
+	}
+	width, werr := strconv.Atoi(r.URL.Query().Get("w"))
+	if werr != nil {
+		width = 0 // absent or malformed w lets the thumbs service decide
+	}
 	e, err := d.Thumbs.Get(r.Context(), id, t, width)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -259,41 +303,47 @@ func parseChunkID(id string) (int64, int, int, bool) {
 	return mediaID, s, e, true
 }
 
-func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+// parseClipStreamRequest builds a clips.Request from the stream endpoint's
+// query parameters, applying the service defaults for absent mode and padMs.
+func parseClipStreamRequest(q url.Values, defaultPadMs int) (clips.Request, error) {
 	mediaID, err := strconv.ParseInt(q.Get("mediaId"), 10, 64)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "mediaId required")
-		return
+		return clips.Request{}, errors.New("mediaId required")
 	}
 	start, err1 := strconv.ParseFloat(q.Get("start"), 64)
 	end, err2 := strconv.ParseFloat(q.Get("end"), 64)
 	if err1 != nil || err2 != nil {
-		writeErr(w, http.StatusBadRequest, "start and end required")
-		return
+		return clips.Request{}, errors.New("start and end required")
 	}
 	mode := q.Get("mode")
 	if mode == "" {
 		mode = "fast"
 	}
-	padMs := d.Clips.Config().DefaultPadMs
+	padMs := defaultPadMs
 	if p := q.Get("padMs"); p != "" {
 		padMs, err = strconv.Atoi(p)
 		if err != nil || padMs < 0 || padMs > 5000 {
-			writeErr(w, http.StatusBadRequest, "padMs out of range")
-			return
+			return clips.Request{}, errors.New("padMs out of range")
 		}
 	}
-	req := clips.Request{MediaID: mediaID, Start: start, End: end, PadMs: padMs, Mode: mode}
-	m, _, err := d.Clips.Validate(req)
+	return clips.Request{MediaID: mediaID, Start: start, End: end, PadMs: padMs, Mode: mode}, nil
+}
+
+func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {
+	req, err := parseClipStreamRequest(r.URL.Query(), d.Clips.Config().DefaultPadMs)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	key := clips.CacheKey(req.MediaID, req.Start, req.End, req.Mode, req.PadMs)
+	m, _, verr := d.Clips.Validate(req)
+	if verr != nil {
+		writeErr(w, http.StatusBadRequest, verr.Error())
+		return
+	}
+	key := d.Clips.CacheKey(req)
 
-	if e, err := d.Clips.Cached(key); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+	if e, cerr := d.Clips.Cached(key); cerr != nil {
+		writeErr(w, http.StatusInternalServerError, cerr.Error())
 		return
 	} else if e != nil {
 		d.Clips.Touch(key)
@@ -303,13 +353,13 @@ func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {
 
 	// Long accurate cuts run as background jobs with progress.
 	span := req.End - req.Start
-	if mode == "accurate" && span > d.Clips.Config().LongCutSec {
-		jobID, queued, err := d.enqueueClipJob(req)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+	if req.Mode == "accurate" && span > d.Clips.Config().LongCutSec {
+		jobID, newlyQueued, qerr := d.St.EnqueueUniqueJob("clip", clips.AsyncJobPayload(req), 1)
+		if qerr != nil {
+			writeErr(w, http.StatusInternalServerError, qerr.Error())
 			return
 		}
-		if queued {
+		if newlyQueued || jobID > 0 { // always return accepted if it's async
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			writeJSON(w, map[string]any{"status": "queued", "jobId": jobID, "cacheKey": key})
@@ -317,41 +367,29 @@ func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	path, ext, err := d.Clips.Produce(r.Context(), req)
-	if err != nil {
+	path, _, perr := d.Clips.Produce(r.Context(), req)
+	if perr != nil {
 		if r.Context().Err() != nil {
 			return
 		}
-		log.Printf("[api] clip produce: %v", err)
+		log.Printf("[api] clip produce: %v", perr)
 		writeErr(w, http.StatusInternalServerError, "clip render failed")
 		return
 	}
-	_ = ext
 	d.serveClip(w, r, path, m, req)
 }
 
-func (d Deps) enqueueClipJob(req clips.Request) (int64, bool, error) {
-	payload := clips.AsyncJobPayload(req)
-	jobs, err := d.St.ListJobs(200)
-	if err != nil {
-		return 0, false, err
-	}
-	for _, j := range jobs {
-		if j.Type == "clip" && j.Payload == payload && (j.Status == "queued" || j.Status == "running") {
-			return j.ID, true, nil
-		}
-	}
-	id, err := d.St.EnqueueJob("clip", payload, 1)
-	return id, true, err
-}
-
 func (d Deps) serveClip(w http.ResponseWriter, r *http.Request, path string, m *store.MediaFile, req clips.Request) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path is a clips-service cache entry (cache dir + hash key), not raw user input
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "clip file unreadable")
 		return
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			log.Printf("[api] close clip file: %v", cerr)
+		}
+	}()
 	ext := strings.TrimPrefix(filepath.Ext(path), ".")
 	ct := "video/mp4"
 	if ext == "mkv" {
@@ -421,7 +459,7 @@ func (d Deps) handleScan(w http.ResponseWriter, r *http.Request) {
 		payload["roots"] = roots
 		payload["prune"] = true
 	}
-	pb, _ := json.Marshal(payload)
+	pb, _ := json.Marshal(payload) //nolint:errcheck // the map holds only strings and a bool, so marshaling cannot fail
 	if _, err := d.St.EnqueueJob("scan", string(pb), 3); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -431,7 +469,7 @@ func (d Deps) handleScan(w http.ResponseWriter, r *http.Request) {
 
 // handleConfigGet returns the media root, configured folders and the top-level
 // folders available to choose from.
-func (d Deps) handleConfigGet(w http.ResponseWriter, r *http.Request) {
+func (d Deps) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 	folders, err := d.St.GetLibraryPaths()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -483,7 +521,7 @@ func (d Deps) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"folders": folders})
 }
 
-func (d Deps) handleReindex(w http.ResponseWriter, r *http.Request) {
+func (d Deps) handleReindex(w http.ResponseWriter, _ *http.Request) {
 	n, err := d.Indexer.ReindexAll()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -492,7 +530,7 @@ func (d Deps) handleReindex(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"enqueued": n})
 }
 
-func (d Deps) handleQueuePause(w http.ResponseWriter, r *http.Request) {
+func (d Deps) handleQueuePause(w http.ResponseWriter, _ *http.Request) {
 	if err := d.St.SetQueuePaused(true); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -500,7 +538,7 @@ func (d Deps) handleQueuePause(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"paused": true})
 }
 
-func (d Deps) handleQueueResume(w http.ResponseWriter, r *http.Request) {
+func (d Deps) handleQueueResume(w http.ResponseWriter, _ *http.Request) {
 	if err := d.St.SetQueuePaused(false); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -509,7 +547,7 @@ func (d Deps) handleQueueResume(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleQueueClear drops queued jobs; running jobs keep running unless paused.
-func (d Deps) handleQueueClear(w http.ResponseWriter, r *http.Request) {
+func (d Deps) handleQueueClear(w http.ResponseWriter, _ *http.Request) {
 	n, err := d.St.ClearQueuedJobs()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -520,7 +558,7 @@ func (d Deps) handleQueueClear(w http.ResponseWriter, r *http.Request) {
 
 // handleReprobe re-runs probe (metadata/audio/subtitle selection) for media
 // that already finished, e.g. after a pipeline improvement.
-func (d Deps) handleReprobe(w http.ResponseWriter, r *http.Request) {
+func (d Deps) handleReprobe(w http.ResponseWriter, _ *http.Request) {
 	ids, err := d.St.MediaIDsByStatus("indexed", "no_subs", "error")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -528,7 +566,7 @@ func (d Deps) handleReprobe(w http.ResponseWriter, r *http.Request) {
 	}
 	n := 0
 	for _, id := range ids {
-		payload, _ := json.Marshal(map[string]any{"mediaId": id})
+		payload, _ := json.Marshal(map[string]any{"mediaId": id}) //nolint:errcheck // the map holds only an int64, so marshaling cannot fail
 		if _, err := d.St.EnqueueJob("probe", string(payload), 2); err == nil {
 			n++
 		}
@@ -537,14 +575,14 @@ func (d Deps) handleReprobe(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleQueueStop pauses the queue, aborts in-flight jobs and clears queued work.
-func (d Deps) handleQueueStop(w http.ResponseWriter, r *http.Request) {
+func (d Deps) handleQueueStop(w http.ResponseWriter, _ *http.Request) {
 	if err := d.St.SetQueuePaused(true); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	cancelled := 0
+	canceled := 0
 	if d.Runner != nil {
-		cancelled = d.Runner.CancelActive()
+		canceled = d.Runner.CancelActive()
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -559,15 +597,16 @@ func (d Deps) handleQueueStop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"paused": true, "cancelled": cancelled, "cleared": cleared})
+	// The wire key keeps the historical spelling; the web UI reads it.
+	writeJSON(w, map[string]any{"paused": true, "cancelled": canceled, "cleared": cleared}) //nolint:misspell // legacy API key consumed by web/src/api.ts
 }
 
-func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
+func (d Deps) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, d.Events.Collect())
 }
 
 func (d Deps) handleJobs(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit := atoiQuery(r.URL.Query().Get("limit"))
 	if limit < 1 || limit > 500 {
 		limit = 50
 	}

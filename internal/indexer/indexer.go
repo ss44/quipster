@@ -1,3 +1,5 @@
+// Package indexer pushes subtitle chunk documents into Meilisearch and keeps
+// their indexed state latched in the local store.
 package indexer
 
 import (
@@ -16,8 +18,11 @@ import (
 	"quipster/internal/store"
 )
 
+// IndexName is the Meilisearch index holding one document per subtitle chunk.
 const IndexName = "lines"
 
+// Indexer wraps the Meilisearch client and mediates all index mutations for
+// the local SQLite store.
 type Indexer struct {
 	st     *store.Store
 	client meili.ServiceManager
@@ -26,6 +31,7 @@ type Indexer struct {
 	batch  int
 }
 
+// New builds an Indexer bound to the given store and Meilisearch endpoint.
 func New(st *store.Store, url, masterKey string) *Indexer {
 	return &Indexer{
 		st:     st,
@@ -36,6 +42,8 @@ func New(st *store.Store, url, masterKey string) *Indexer {
 	}
 }
 
+// Client exposes the underlying Meilisearch service manager for readers such
+// as the search service.
 func (ix *Indexer) Client() meili.ServiceManager { return ix.client }
 
 // Healthy reports whether Meilisearch is reachable.
@@ -44,23 +52,26 @@ func (ix *Indexer) Healthy() bool {
 	return err == nil
 }
 
+// LineDoc is the Meilisearch document shape for one subtitle chunk.
 type LineDoc struct {
-	ID            string  `json:"id"`
-	Text          string  `json:"text"`
-	MediaID       int64   `json:"mediaId"`
-	MediaTitle    string  `json:"mediaTitle"`
-	ShowTitle     string  `json:"showTitle"`
-	Season        int     `json:"season"`
-	Episode       int     `json:"episode"`
-	Year          int     `json:"year"`
-	StartCueIdx   int     `json:"startCueIdx"`
-	EndCueIdx     int     `json:"endCueIdx"`
+	ID          string `json:"id"`
+	Text        string `json:"text"`
+	MediaTitle  string `json:"mediaTitle"`
+	ShowTitle   string `json:"showTitle"`
+	MediaID     int64  `json:"mediaId"`
+	Season      int    `json:"season"`
+	Episode     int    `json:"episode"`
+	Year        int    `json:"year"`
+	StartCueIdx int    `json:"startCueIdx"`
+	EndCueIdx   int    `json:"endCueIdx"`
+
 	ChunkStartSec float64 `json:"chunkStartSec"`
 	ChunkEndSec   float64 `json:"chunkEndSec"`
 }
 
+// DocID builds the Meilisearch document id for a chunk. Meili doc ids allow
+// alnum, "-" and "_": use "_{mediaId}-{start}-{end}".
 func DocID(mediaID int64, startIdx, endIdx int) string {
-	// Meili doc ids allow alnum, "-", "_": use "_{mediaId}-{start}-{end}".
 	return fmt.Sprintf("%d_%d-%d", mediaID, startIdx, endIdx)
 }
 
@@ -112,9 +123,16 @@ func (ix *Indexer) applyTypoTolerance() error {
 	if err != nil {
 		return fmt.Errorf("typo settings: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			log.Printf("[indexer] close typo settings response: %v", cerr)
+		}
+	}()
 	if resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		b, rerr := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		if rerr != nil {
+			return fmt.Errorf("typo settings: %s: read body: %w", resp.Status, rerr)
+		}
 		return fmt.Errorf("typo settings: %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
 	return nil
@@ -127,17 +145,19 @@ func (ix *Indexer) IndexMedia(mediaID int64) error {
 		return err
 	}
 	// Docs for a never-indexed media cannot exist; skip the delete round-trip.
-	if ever, err := ix.st.EverIndexed(mediaID); err == nil && ever {
+	ever, eerr := ix.st.EverIndexed(mediaID)
+	if eerr != nil {
+		return eerr
+	}
+	if ever {
 		filter := fmt.Sprintf(`mediaId = %d`, mediaID)
-		task, err := ix.client.Index(IndexName).DeleteDocumentsByFilter(filter, nil)
-		if err != nil {
-			return fmt.Errorf("delete docs %d: %w", mediaID, err)
+		task, derr := ix.client.Index(IndexName).DeleteDocumentsByFilter(filter, nil)
+		if derr != nil {
+			return fmt.Errorf("delete docs %d: %w", mediaID, derr)
 		}
-		if _, err := ix.client.WaitForTask(task.TaskUID, 200*time.Millisecond); err != nil {
-			return fmt.Errorf("delete wait %d: %w", mediaID, err)
+		if _, werr := ix.client.WaitForTask(task.TaskUID, 200*time.Millisecond); werr != nil {
+			return fmt.Errorf("delete wait %d: %w", mediaID, werr)
 		}
-	} else if err != nil {
-		return err
 	}
 	if len(chunkList) == 0 {
 		return nil
@@ -209,14 +229,16 @@ func (ix *Indexer) DeleteMedia(ids []int64) error {
 			log.Printf("[indexer] delete docs media %d: %v", id, err)
 			continue
 		}
-		ix.client.WaitForTask(task.TaskUID, 300*time.Millisecond)
+		if _, err := ix.client.WaitForTask(task.TaskUID, 300*time.Millisecond); err != nil {
+			log.Printf("[indexer] wait delete media %d: %v", id, err)
+		}
 	}
 	return nil
 }
 
 // JobHandler runs index jobs.
 func (ix *Indexer) JobHandler() func(ctx context.Context, j *store.Job, progress func(float64)) error {
-	return func(ctx context.Context, j *store.Job, progress func(float64)) error {
+	return func(_ context.Context, j *store.Job, _ func(float64)) error {
 		var payload struct {
 			MediaID int64 `json:"mediaId"`
 		}
@@ -243,8 +265,8 @@ func (ix *Indexer) ReindexAll() (int, error) {
 	}
 	n := 0
 	for _, id := range ids {
-		payload, _ := json.Marshal(map[string]any{"mediaId": id})
-		if _, err := ix.st.EnqueueJob("index", string(payload), 2); err == nil {
+		payload := fmt.Sprintf(`{"mediaId":%d}`, id)
+		if _, err := ix.st.EnqueueJob("index", payload, 2); err == nil {
 			n++
 		}
 	}

@@ -12,11 +12,12 @@ import (
 	"strings"
 )
 
-// Backend is an FFmpeg hardware acceleration backend.
+// Backend names an FFmpeg hardware acceleration backend.
 type Backend string
 
+// Supported hardware backends, in probe priority order.
 const (
-	BackendNone         Backend = "none"
+	BackendNone         Backend = "none"         // no usable hardware backend; CPU pipeline
 	BackendNvenc        Backend = "nvenc"        // NVIDIA NVDEC/NVENC (cuda)
 	BackendQsv          Backend = "qsv"          // Intel QuickSync
 	BackendVaapi        Backend = "vaapi"        // Intel/AMD iGPU on Linux (/dev/dri)
@@ -26,6 +27,8 @@ const (
 // Pipeline is one complete transcode plan: input-side decode flags, the video
 // filter, and the H.264 encoder. Filter and Encoder are never empty; a CPU
 // plan decodes in software, scales with "scale", and encodes with libx264.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
 type Pipeline struct {
 	Input   []string // input-side flags to insert before -i; nil for CPU
 	Filter  string   // -vf value
@@ -44,10 +47,12 @@ type Capabilities struct {
 func (c Capabilities) Available() bool { return c.Backend != BackendNone && c.Backend != "" }
 
 // backendSpec is everything that varies between backends.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
 type backendSpec struct {
 	hwaccel    string   // -hwaccel decoder name
 	gpuFrames  bool     // pipeline can keep frames in GPU memory end to end
-	gpuScale   string   // GPU scale filter template (%d = width); "" = CPU scale
+	gpuScale   string   // GPU scale filter template (%s = resolution); "" = CPU scale
 	encoder    string   // hardware H.264 encoder
 	probe      []string // synthetic encode args verifying the backend works
 	needDevice bool     // probe requires a DRM render node (vaapi)
@@ -56,7 +61,7 @@ type backendSpec struct {
 var specs = map[Backend]backendSpec{
 	BackendNvenc: {
 		hwaccel: "cuda", gpuFrames: true,
-		gpuScale: "scale_cuda=w=%d:h=-2:format=nv12", encoder: "h264_nvenc",
+		gpuScale: "scale_cuda=%s:format=nv12", encoder: "h264_nvenc",
 		probe: []string{"-f", "lavfi", "-i", "testsrc2=s=320x240:d=0.2",
 			"-c:v", "h264_nvenc", "-f", "null", "-"},
 	},
@@ -67,7 +72,7 @@ var specs = map[Backend]backendSpec{
 	},
 	BackendVaapi: {
 		hwaccel: "vaapi", gpuFrames: true, needDevice: true,
-		gpuScale: "scale_vaapi=w=%d:h=-2:format=nv12", encoder: "h264_vaapi",
+		gpuScale: "scale_vaapi=%s:format=nv12", encoder: "h264_vaapi",
 		probe: []string{"-f", "lavfi", "-i", "testsrc2=s=320x240:d=0.2",
 			"-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-f", "null", "-"},
 	},
@@ -93,26 +98,41 @@ func (c Capabilities) DecodeArgs() []string {
 	return nil
 }
 
-// Pipeline returns a usable transcode plan for `width`. Backends that keep
-// frames in GPU memory (vaapi, nvenc) use their GPU scaler; backends that
-// decode into system memory (qsv, videotoolbox) scale on the CPU and let the
-// hardware encoder upload. Unavailable backends yield the CPU plan.
-func (c Capabilities) Pipeline(width int) Pipeline {
-	p := Pipeline{Filter: fmt.Sprintf("scale=%d:-2", width), Encoder: "libx264"}
+// Pipeline returns a usable transcode plan for `res` (a ffmpeg resolution
+// string like "960x540" or "1280x720"). Backends that keep frames in GPU
+// memory (vaapi, nvenc) use their GPU scaler; backends that decode into
+// system memory (qsv, videotoolbox) scale on the CPU and let the hardware
+// encoder upload. Unavailable backends yield the CPU plan.
+func (c Capabilities) Pipeline(res string) Pipeline {
+	p := Pipeline{Filter: "scale=" + res, Encoder: "libx264"}
 	spec, ok := specs[c.Backend]
 	if !ok {
 		return p
 	}
-	p.Input = c.DecodeArgs()
 	p.Encoder = spec.encoder
 	p.IsHW = true
+	p.Input = c.DecodeArgs()
 	if spec.gpuFrames {
-		p.Input = append(p.Input, "-hwaccel_output_format", spec.hwaccel)
-		if spec.gpuScale != "" {
-			p.Filter = fmt.Sprintf(spec.gpuScale, width)
+		if c.Backend == BackendVaapi {
+			// -vaapi_device makes the DRM render node explicit; without it
+			// ffmpeg would pick the first default node, which can differ
+			// from the probed device on multi-GPU machines.
+			p.Input = append([]string{"-vaapi_device", c.renderNode()}, p.Input...)
 		}
+		p.Input = append(p.Input, "-hwaccel_output_format", spec.hwaccel)
+		p.Filter = fmt.Sprintf(spec.gpuScale, res)
 	}
 	return p
+}
+
+// renderNode returns the DRM render node to use for vaapi pipelines: the
+// detected device, or ffmpeg's default first render node when detection ran
+// without one (forced backend, device not reported).
+func (c Capabilities) renderNode() string {
+	if c.Device != "" {
+		return c.Device
+	}
+	return "/dev/dri/renderD128"
 }
 
 // Detect probes supported backends in priority order and returns the first
@@ -136,9 +156,9 @@ func Detect(ffmpegBin string) Capabilities {
 		if c, ok := probeBackend(ffmpegBin, Backend(force)); ok {
 			return c
 		}
-		log.Printf("[hw] forced backend %q is not available, falling back to cpu", force)
+		log.Printf("[hw] forced backend %q is not available, falling back to cpu", force) //nolint:gosec // G706: force comes from the operator's own env var
 	default:
-		log.Printf("[hw] unknown HWACCEL value %q, probing all backends", force)
+		log.Printf("[hw] unknown HWACCEL value %q, probing all backends", force) //nolint:gosec // G706: force comes from the operator's own env var
 		for _, b := range probeOrder {
 			if c, ok := probeBackend(ffmpegBin, b); ok {
 				return c

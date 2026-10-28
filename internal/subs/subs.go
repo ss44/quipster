@@ -1,3 +1,5 @@
+// Package subs parses SRT/WebVTT subtitles into normalized cues and selects
+// the best English subtitle source for a video.
 package subs
 
 import (
@@ -10,10 +12,11 @@ import (
 	"github.com/asticode/go-astisub"
 )
 
+// Cue is one normalized subtitle line span used for chunk building.
 type Cue struct {
+	Text  string
 	Start float64
 	End   float64
-	Text  string
 }
 
 var sidecarExts = []string{".srt", ".vtt"}
@@ -39,34 +42,9 @@ func PickSidecar(videoPath string) string {
 		}
 		name := e.Name()
 		ext := strings.ToLower(filepath.Ext(name))
-		if !sidecarExtsContain(ext) {
+		score, ok := sidecarScore(name, base, ext)
+		if !ok {
 			continue
-		}
-		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base+".")) && !strings.EqualFold(name, base+ext) {
-			continue
-		}
-		mid := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.ToLower(name), strings.ToLower(base)), ext))
-		mid = strings.Trim(mid, ".")
-		tokens := map[string]bool{}
-		for _, t := range strings.Split(mid, ".") {
-			if t != "" {
-				tokens[t] = true
-			}
-		}
-		score := -1
-		switch {
-		case tokens["en"] || tokens["eng"] || tokens["english"]:
-			score = 100
-		case len(tokens) == 0:
-			score = 50
-		case tokens["forced"] || tokens["sdh"] || tokens["cc"] || tokens["default"]:
-			// forced/SDH-only tracks rank last: they may lack dialogue
-			score = 25
-		default:
-			continue // other language tags
-		}
-		if ext == ".srt" {
-			score++ // prefer srt on ties
 		}
 		c := cand{path: filepath.Join(dir, name), score: score}
 		if best == nil || c.score > best.score {
@@ -78,6 +56,42 @@ func PickSidecar(videoPath string) string {
 		return ""
 	}
 	return best.path
+}
+
+// sidecarScore ranks one sidecar candidate against the video base name.
+// It reports ok=false for files that must not be considered: wrong
+// extension, name not matching the video, or an explicit other-language tag.
+func sidecarScore(name, base, ext string) (int, bool) {
+	if !sidecarExtsContain(ext) {
+		return 0, false
+	}
+	if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base+".")) && !strings.EqualFold(name, base+ext) {
+		return 0, false
+	}
+	mid := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.ToLower(name), strings.ToLower(base)), ext))
+	mid = strings.Trim(mid, ".")
+	tokens := map[string]bool{}
+	for _, t := range strings.Split(mid, ".") {
+		if t != "" {
+			tokens[t] = true
+		}
+	}
+	var score int
+	switch {
+	case tokens["en"] || tokens["eng"] || tokens["english"]:
+		score = 100
+	case len(tokens) == 0:
+		score = 50
+	case tokens["forced"] || tokens["sdh"] || tokens["cc"] || tokens["default"]:
+		// forced/SDH-only tracks rank last: they may lack dialog
+		score = 25
+	default:
+		return 0, false // other language tags
+	}
+	if ext == ".srt" {
+		score++ // prefer srt on ties
+	}
+	return score, true
 }
 
 func sidecarExtsContain(ext string) bool {
@@ -154,11 +168,10 @@ func stripTags(s string) string {
 
 // ParseFile parses an SRT or WebVTT file into normalized cues.
 func ParseFile(path string) ([]Cue, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // parsing arbitrary subtitle paths is this package's purpose
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
 	var subs *astisub.Subtitles
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".vtt":
@@ -166,8 +179,14 @@ func ParseFile(path string) ([]Cue, error) {
 	default:
 		subs, err = astisub.ReadFromSRT(f)
 	}
+	// Close before reporting: a read-only handle close failure never
+	// outweighs a parse error, and the file content is already consumed.
+	cerr := f.Close()
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if cerr != nil {
+		return nil, fmt.Errorf("parse %s: close: %w", path, cerr)
 	}
 	return fromAstisub(subs), nil
 }

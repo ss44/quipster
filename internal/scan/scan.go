@@ -26,7 +26,9 @@ var skipDirs = map[string]bool{
 	".grab": true, "lost+found": true,
 }
 
-type ScanResult struct {
+// Result summarizes one scan walk: how many files were seen, added,
+// changed, and removed.
+type Result struct {
 	ScanID  int64
 	Seen    int
 	Added   int
@@ -67,8 +69,8 @@ func CleanRoots(roots []string) ([]string, error) {
 // Run walks the media root (or only the configured roots), upserts media rows
 // and enqueues probe jobs for new or changed files. With prune=true, media rows
 // outside the configured folders are removed (Meili cleanup via onDeleted).
-func Run(ctx context.Context, mediaRoot string, roots []string, prune bool, st *store.Store, onDeleted func(ids []int64)) (*ScanResult, error) {
-	res := &ScanResult{}
+func Run(ctx context.Context, mediaRoot string, roots []string, prune bool, st *store.Store, onDeleted func(ids []int64)) (*Result, error) {
+	res := &Result{}
 	scanLabel := mediaRoot
 	if len(roots) > 0 {
 		scanLabel = mediaRoot + " [" + strings.Join(roots, ", ") + "]"
@@ -79,7 +81,6 @@ func Run(ctx context.Context, mediaRoot string, roots []string, prune bool, st *
 	}
 	res.ScanID = scanID
 	keep := map[string]bool{}
-	var removedIDs []int64
 	lastFlush := time.Now()
 
 	walkRoots := roots
@@ -93,43 +94,72 @@ func Run(ctx context.Context, mediaRoot string, roots []string, prune bool, st *
 		}
 		err = walkRoot(ctx, mediaRoot, root, st, res, keep, scanID, &lastFlush)
 		if err != nil {
-			st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "error")
+			if uerr := st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "error"); uerr != nil {
+				log.Printf("[scan] update status error: %v", uerr)
+			}
 			return res, err
 		}
 	}
 
-	if prune {
-		ids, err := st.DeleteMissingUnder(mediaRoot, keep)
-		if err != nil {
-			log.Printf("[scan] delete missing: %v", err)
-		}
-		removedIDs = ids
-	} else {
-		for _, relRoot := range walkRoots {
-			base := mediaRoot
-			if relRoot != "" {
-				base = filepath.Join(mediaRoot, filepath.FromSlash(relRoot))
-			}
-			ids, err := st.DeleteMissingUnder(base, keep)
-			if err != nil {
-				log.Printf("[scan] delete missing under %s: %v", base, err)
-				continue
-			}
-			removedIDs = append(removedIDs, ids...)
-		}
-	}
+	removedIDs := deleteMissing(st, mediaRoot, walkRoots, keep, prune)
 	res.Removed = len(removedIDs)
 
-	st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "done")
+	if uerr := st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "done"); uerr != nil {
+		log.Printf("[scan] update status done: %v", uerr)
+	}
 	if onDeleted != nil && len(removedIDs) > 0 {
 		onDeleted(removedIDs)
 	}
 	return res, nil
 }
 
+// deleteMissing limits deletion to walked folders unless pruning was requested.
+func deleteMissing(st *store.Store, mediaRoot string, walkRoots []string, keep map[string]bool, prune bool) []int64 {
+	if prune {
+		ids, err := st.DeleteMissingUnder(mediaRoot, keep)
+		if err != nil {
+			log.Printf("[scan] delete missing: %v", err)
+		}
+		return ids
+	}
+	var removedIDs []int64
+	for _, relRoot := range walkRoots {
+		base := mediaRoot
+		if relRoot != "" {
+			base = filepath.Join(mediaRoot, filepath.FromSlash(relRoot))
+		}
+		ids, err := st.DeleteMissingUnder(base, keep)
+		if err != nil {
+			log.Printf("[scan] delete missing under %s: %v", base, err)
+			continue
+		}
+		removedIDs = append(removedIDs, ids...)
+	}
+	return removedIDs
+}
+
+// isIgnored checks if a directory entry should be skipped or passed over during walk.
+func isIgnored(path, root string, d fs.DirEntry) (bool, error) {
+	name := d.Name()
+	if d.IsDir() {
+		if path != root && (skipDirs[strings.ToLower(name)] || strings.HasPrefix(name, ".")) {
+			return true, fs.SkipDir
+		}
+		return true, nil
+	}
+	if strings.HasPrefix(name, ".") {
+		return true, nil
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	if !videoExts[ext] {
+		return true, nil
+	}
+	return false, nil
+}
+
 // walkRoot walks one library folder; library-relative paths are always
 // computed from mediaRoot so parsing context stays consistent.
-func walkRoot(ctx context.Context, mediaRoot, root string, st *store.Store, res *ScanResult, keep map[string]bool, scanID int64, lastFlush *time.Time) error {
+func walkRoot(ctx context.Context, mediaRoot, root string, st *store.Store, res *Result, keep map[string]bool, scanID int64, lastFlush *time.Time) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			log.Printf("[scan] walk %s: %v", path, err)
@@ -138,60 +168,68 @@ func walkRoot(ctx context.Context, mediaRoot, root string, st *store.Store, res 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		name := d.Name()
-		if d.IsDir() {
-			if path != root && (skipDirs[strings.ToLower(name)] || strings.HasPrefix(name, ".")) {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if strings.HasPrefix(name, ".") {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(name))
-		if !videoExts[ext] {
-			return nil
+		if skip, walkErr := isIgnored(path, root, d); skip {
+			return walkErr
 		}
 		info, err := d.Info()
 		if err != nil {
-			return nil
+			log.Printf("[scan] stat %s: %v", path, err)
+			return nil //nolint:nilerr // unreadable entry: skip and continue the walk.
 		}
 		rel, err := filepath.Rel(mediaRoot, path)
 		if err != nil {
-			return nil
+			log.Printf("[scan] rel %s: %v", path, err)
+			return nil //nolint:nilerr // path outside root: skip and continue the walk.
 		}
 		rel = filepath.ToSlash(rel)
 		keep[path] = true
 		res.Seen++
 
-		p := Parse(rel)
-		id, changed, err := st.UpsertMedia(path, strings.TrimPrefix(ext, "."), info.Size(), info.ModTime().Unix(),
-			p.Title, p.Year, p.Season, p.Episode, p.ShowTitle)
-		if err != nil {
-			log.Printf("[scan] upsert %s: %v", path, err)
+		if !recordMedia(st, res, path, rel, strings.ToLower(filepath.Ext(d.Name())), info) {
 			return nil
-		}
-		if changed {
-			payload, _ := json.Marshal(map[string]any{"mediaId": id})
-			if _, err := st.EnqueueJob("probe", string(payload), 0); err != nil {
-				log.Printf("[scan] enqueue probe %d: %v", id, err)
-			}
-			res.Changed++
 		}
 		if time.Since(*lastFlush) > 400*time.Millisecond {
 			*lastFlush = time.Now()
-			st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), "")
+			if uerr := st.UpdateScan(scanID, int64(res.Seen), int64(res.Done()), ""); uerr != nil {
+				log.Printf("[scan] update progress: %v", uerr)
+			}
 		}
 		return nil
 	})
 }
 
-func (r *ScanResult) Done() int { return r.Seen }
+// recordMedia upserts metadata and queues probing when file contents changed.
+// A failed upsert or payload prevents this entry from triggering a progress flush.
+func recordMedia(st *store.Store, res *Result, path, rel, ext string, info fs.FileInfo) bool {
+	p := Parse(rel)
+	id, changed, err := st.UpsertMedia(path, strings.TrimPrefix(ext, "."), info.Size(), info.ModTime().Unix(),
+		p.Title, p.Year, p.Season, p.Episode, p.ShowTitle)
+	if err != nil {
+		log.Printf("[scan] upsert %s: %v", path, err)
+		return false
+	}
+	if changed {
+		payload, merr := json.Marshal(map[string]any{"mediaId": id})
+		if merr != nil {
+			log.Printf("[scan] marshal probe payload %d: %v", id, merr)
+			return false
+		}
+		if _, err := st.EnqueueJob("probe", string(payload), 0); err != nil {
+			log.Printf("[scan] enqueue probe %d: %v", id, err)
+		}
+		res.Changed++
+	}
+	return true
+}
+
+// Done reports how many files the scan has processed so far.
+func (r *Result) Done() int { return r.Seen }
 
 // JobHandler adapts Run to the job runner. Payload carries {"roots": ["movies","tv"],
-// "prune": true}; roots are validated relative to the media root.
+// "prune": true}; roots are validated relative to the media root. The progress
+// callback is unused because scan progress is already latched in the scans table.
 func JobHandler(baseRoot string, st *store.Store, onDeleted func(ids []int64)) func(context.Context, *store.Job, func(float64)) error {
-	return func(ctx context.Context, j *store.Job, progress func(float64)) error {
+	return func(ctx context.Context, j *store.Job, _ func(float64)) error {
 		var payload struct {
 			Roots []string `json:"roots"`
 			Prune bool     `json:"prune"`
@@ -207,7 +245,7 @@ func JobHandler(baseRoot string, st *store.Store, onDeleted func(ids []int64)) f
 		}
 		for _, rel := range roots {
 			full := filepath.Join(baseRoot, filepath.FromSlash(rel))
-			if info, err := os.Stat(full); err != nil || !info.IsDir() {
+			if info, statErr := os.Stat(full); statErr != nil || !info.IsDir() {
 				return fmt.Errorf("library folder %s unavailable", full)
 			}
 		}
@@ -220,10 +258,11 @@ func JobHandler(baseRoot string, st *store.Store, onDeleted func(ids []int64)) f
 	}
 }
 
-// EnsureDirs creates the data/cache layout used across the app.
+// EnsureDirs creates the data/cache layout used across the app. Directories
+// use 0o750 so they stay private to the owning user/group.
 func EnsureDirs(paths ...string) error {
 	for _, p := range paths {
-		if err := os.MkdirAll(p, 0o755); err != nil {
+		if err := os.MkdirAll(p, 0o750); err != nil {
 			return fmt.Errorf("mkdir %s: %w", p, err)
 		}
 	}

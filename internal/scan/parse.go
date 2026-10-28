@@ -1,3 +1,4 @@
+// Package scan discovers library media and derives metadata from file paths.
 package scan
 
 import (
@@ -6,6 +7,7 @@ import (
 	"strings"
 )
 
+// Parsed holds metadata derived from a media path relative to the library root.
 type Parsed struct {
 	Title     string
 	ShowTitle string
@@ -94,7 +96,16 @@ func looksLikeGroupToken(tail string) bool {
 	if tail == "" || strings.Contains(tail, " ") || len(tail) > 16 || stopwords[strings.ToLower(tail)] {
 		return false
 	}
-	hasUpper, hasLower, hasDigit := false, false, false
+	hasUpper, hasLower, hasDigit := charClasses(tail)
+	if hasDigit && !hasUpper && !hasLower {
+		return false // plain numbers are often real titles/years
+	}
+	return (hasUpper && hasLower) || (hasUpper && !hasLower)
+}
+
+// charClasses inspects a token and reports whether it contains upper case
+// letters, lower case letters, and digits.
+func charClasses(tail string) (hasUpper, hasLower, hasDigit bool) {
 	for _, r := range tail {
 		switch {
 		case r >= 'A' && r <= 'Z':
@@ -105,10 +116,7 @@ func looksLikeGroupToken(tail string) bool {
 			hasDigit = true
 		}
 	}
-	if hasDigit && !hasUpper && !hasLower {
-		return false // plain numbers are often real titles/years
-	}
-	return (hasUpper && hasLower) || (hasUpper && !hasLower)
+	return hasUpper, hasLower, hasDigit
 }
 
 // stripTrailingGroup removes a release-group suffix like "... -iVy" or
@@ -143,10 +151,13 @@ func cleanTitle(s string) string {
 	for i < len(s) {
 		r := s[i]
 		if r == '[' || r == '(' || r == '{' {
-			closer := byte(']')
-			if r == '(' {
+			var closer byte
+			switch r {
+			case '[':
+				closer = ']'
+			case '(':
 				closer = ')'
-			} else if r == '{' {
+			default: // '{'
 				closer = '}'
 			}
 			if end := strings.IndexByte(s[i+1:], closer); end >= 0 {
@@ -169,17 +180,26 @@ func cleanTitle(s string) string {
 	return stripTrailingGroup(out)
 }
 
+// atoiSafe parses an integer, returning 0 on failure. Regex-captured groups
+// only ever contain digits, so a failure here is an impossible edge case;
+// treating it as absent metadata keeps the call sites clean.
+func atoiSafe(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 func findYear(s string) int {
 	if m := reParenYear.FindAllString(s, -1); len(m) > 0 {
-		y, _ := strconv.Atoi(strings.Trim(m[len(m)-1], "()"))
-		return y
+		return atoiSafe(strings.Trim(m[len(m)-1], "()"))
 	}
 	matches := reYear.FindAllString(s, -1)
 	if len(matches) == 0 {
 		return 0
 	}
-	y, _ := strconv.Atoi(matches[len(matches)-1])
-	return y
+	return atoiSafe(matches[len(matches)-1])
 }
 
 var reTrailingYear = regexp.MustCompile(`[ ._-](?:19|20)\d{2}\s*$`)
@@ -213,6 +233,109 @@ func titleCase(s string) string {
 	return string(r)
 }
 
+// parseEpisodePatterns inspects the base filename for season/episode patterns
+// like "S01E02" or "1x03" and fills in TV metadata when matched.
+func parseEpisodePatterns(name string) (Parsed, bool) {
+	if m := reSeasonEp.FindStringSubmatch(name); m != nil {
+		var p Parsed
+		p.IsTV = true
+		p.Season = atoiSafe(m[1])
+		p.Episode = atoiSafe(m[2])
+		idx := strings.Index(strings.ToLower(name), strings.ToLower(m[0]))
+		p.ShowTitle = cleanTitle(name[:idx])
+		p.Title = strings.TrimLeft(cleanTitle(name[idx+len(m[0]):]), " -–_")
+		p.Year = findYear(name)
+		return p, true
+	}
+	if m := reSeasonEp2.FindStringSubmatch(name); m != nil {
+		var p Parsed
+		p.IsTV = true
+		p.Season = atoiSafe(m[1])
+		p.Episode = atoiSafe(m[2])
+		idx := strings.Index(name, m[0])
+		p.ShowTitle = cleanTitle(name[:idx])
+		p.Title = strings.TrimLeft(cleanTitle(name[idx+len(m[0]):]), " -–_")
+		p.Year = findYear(name)
+		return p, true
+	}
+	return Parsed{}, false
+}
+
+// parseSeasonFolderTV detects "Season 01/03 - Pilot.mkv" style layouts where a
+// season directory provides the season number and the filename provides the
+// episode number.
+func parseSeasonFolderTV(name string, folders []string) Parsed {
+	var p Parsed
+	for i := len(folders) - 1; i >= 0; i-- {
+		if m := reSeasonDir.FindStringSubmatch(folders[i]); m != nil {
+			p.Season = atoiSafe(m[1])
+			p.IsTV = true
+			if mm := reLeadingNum.FindStringSubmatch(name); mm != nil {
+				p.Episode = atoiSafe(mm[1])
+				p.Title = cleanTitle(name[len(mm[0]):])
+			} else if mm := reEpisodePre.FindStringSubmatch(name); mm != nil {
+				p.Episode = atoiSafe(mm[1])
+				p.Title = cleanTitle(name[len(mm[0]):])
+			} else {
+				p.Title = cleanTitle(name)
+			}
+			if i > 0 {
+				p.ShowTitle = stripYear(cleanTitle(folders[i-1]), findYear(folders[i-1]))
+			}
+			break
+		}
+	}
+	return p
+}
+
+// parseMovieTitle derives movie metadata when no TV pattern matched: the year
+// comes from the filename or the last folder, and the title from the cleaned
+// name with the year stripped.
+func parseMovieTitle(p Parsed, name string, folders []string) Parsed {
+	p.Year = findYear(name)
+	if p.Year == 0 && len(folders) > 0 {
+		p.Year = findYear(folders[len(folders)-1])
+	}
+	p.Title = stripYear(name, p.Year)
+	if p.Title == "" {
+		p.Title = bareYearTitle(name)
+	}
+	if p.Title == "" && len(folders) > 0 {
+		p.Title = stripYear(cleanTitle(folders[len(folders)-1]), p.Year)
+	}
+	return p
+}
+
+// enrichShowTitle backs the show title out of parent folders when the filename
+// did not yield one, then falls back to the cleaned filename. It also clears a
+// title equal to the show title and recovers the year from parent folders.
+func enrichShowTitle(p Parsed, name string, folders []string, inTVRoot bool) Parsed {
+	if len(folders) > 0 {
+		cand := stripYear(cleanTitle(folders[len(folders)-1]), findYear(folders[len(folders)-1]))
+		if reSeasonDir.MatchString(strings.ToLower(cand)) && len(folders) > 1 {
+			cand = stripYear(cleanTitle(folders[len(folders)-2]), findYear(folders[len(folders)-2]))
+		}
+		if cand != "" && (p.ShowTitle == "" || inTVRoot) {
+			p.ShowTitle = cand
+		}
+	}
+	if p.ShowTitle == "" {
+		p.ShowTitle = stripYear(name, p.Year)
+	}
+	if p.Title == p.ShowTitle {
+		p.Title = ""
+	}
+	if p.Year == 0 {
+		for i := len(folders) - 1; i >= 0; i-- {
+			if y := findYear(folders[i]); y != 0 {
+				p.Year = y
+				break
+			}
+		}
+	}
+	return p
+}
+
 // Parse derives metadata from a media path relative to the library root,
 // using "Movies/" and "TV Shows/" layout conventions when present.
 func Parse(relPath string) Parsed {
@@ -232,83 +355,17 @@ func Parse(relPath string) Parsed {
 	inTVRoot := strings.Contains(strings.ToLower(topLevel), "tv")
 
 	var p Parsed
-
-	if m := reSeasonEp.FindStringSubmatch(name); m != nil {
-		p.IsTV = true
-		p.Season, _ = strconv.Atoi(m[1])
-		p.Episode, _ = strconv.Atoi(m[2])
-		idx := strings.Index(strings.ToLower(name), strings.ToLower(m[0]))
-		p.ShowTitle = cleanTitle(name[:idx])
-		p.Title = strings.TrimLeft(cleanTitle(name[idx+len(m[0]):]), " -–_")
-		p.Year = findYear(name)
-	} else if m := reSeasonEp2.FindStringSubmatch(name); m != nil {
-		p.IsTV = true
-		p.Season, _ = strconv.Atoi(m[1])
-		p.Episode, _ = strconv.Atoi(m[2])
-		idx := strings.Index(name, m[0])
-		p.ShowTitle = cleanTitle(name[:idx])
-		p.Title = strings.TrimLeft(cleanTitle(name[idx+len(m[0]):]), " -–_")
-		p.Year = findYear(name)
+	if tv, matched := parseEpisodePatterns(name); matched {
+		p = tv
 	} else {
-		// Season folder + leading episode number, e.g. "Season 01/03 - Pilot.mkv".
-		for i := len(folders) - 1; i >= 0; i-- {
-			if m := reSeasonDir.FindStringSubmatch(folders[i]); m != nil {
-				p.Season, _ = strconv.Atoi(m[1])
-				if mm := reLeadingNum.FindStringSubmatch(name); mm != nil {
-					p.IsTV = true
-					p.Episode, _ = strconv.Atoi(mm[1])
-					p.Title = cleanTitle(name[len(mm[0]):])
-				} else if mm := reEpisodePre.FindStringSubmatch(name); mm != nil {
-					p.IsTV = true
-					p.Episode, _ = strconv.Atoi(mm[1])
-					p.Title = cleanTitle(name[len(mm[0]):])
-				}
-				if i > 0 {
-					p.ShowTitle = stripYear(cleanTitle(folders[i-1]), findYear(folders[i-1]))
-				}
-				break
-			}
-		}
+		p = parseSeasonFolderTV(name, folders)
 	}
 
 	if !p.IsTV {
-		p.Year = findYear(name)
-		if p.Year == 0 && len(folders) > 0 {
-			p.Year = findYear(folders[len(folders)-1])
-		}
-		p.Title = stripYear(name, p.Year)
-		if p.Title == "" {
-			p.Title = bareYearTitle(name)
-		}
-		if p.Title == "" && len(folders) > 0 {
-			p.Title = stripYear(cleanTitle(folders[len(folders)-1]), p.Year)
-		}
+		p = parseMovieTitle(p, name, folders)
 	}
-
 	if p.IsTV {
-		if len(folders) > 0 {
-			cand := stripYear(cleanTitle(folders[len(folders)-1]), findYear(folders[len(folders)-1]))
-			if reSeasonDir.MatchString(strings.ToLower(cand)) && len(folders) > 1 {
-				cand = stripYear(cleanTitle(folders[len(folders)-2]), findYear(folders[len(folders)-2]))
-			}
-			if cand != "" && (p.ShowTitle == "" || inTVRoot) {
-				p.ShowTitle = cand
-			}
-		}
-		if p.ShowTitle == "" {
-			p.ShowTitle = stripYear(name, p.Year)
-		}
-		if p.Title == p.ShowTitle {
-			p.Title = ""
-		}
-		if p.Year == 0 {
-			for i := len(folders) - 1; i >= 0; i-- {
-				if y := findYear(folders[i]); y != 0 {
-					p.Year = y
-					break
-				}
-			}
-		}
+		p = enrichShowTitle(p, name, folders, inTVRoot)
 	}
 
 	p.Title = titleCase(strings.TrimSpace(p.Title))
