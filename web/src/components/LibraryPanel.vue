@@ -439,7 +439,7 @@ function elapsed(job: Job): string {
 }
 .stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
   gap: 12px;
   margin-bottom: 16px;
 }
@@ -463,6 +463,7 @@ function elapsed(job: Job): string {
 .panel {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 .panel-hint {
   font-family: var(--font-mono);
@@ -477,6 +478,7 @@ function elapsed(job: Job): string {
   font-size: 12px;
   line-height: 1.55;
   color: var(--faint);
+  overflow-wrap: anywhere;
 }
 .field-actions {
   display: flex;
@@ -524,6 +526,7 @@ function elapsed(job: Job): string {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 16px;
   padding: 11px 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
@@ -610,6 +613,7 @@ function elapsed(job: Job): string {
 }
 .queue-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   flex: none;
 }
@@ -667,5 +671,11 @@ function elapsed(job: Job): string {
   border-radius: 8px;
   font-size: 12.5px;
   color: #fca5a5;
+}
+
+@media (max-width: 480px) {
+  .stats {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
