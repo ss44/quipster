@@ -32,9 +32,8 @@ func TestCollector(t *testing.T) {
 	})
 
 	c := &events.Collector{
-		St:            st,
-		MeiliUp:       func() bool { return true },
-		CacheMaxBytes: 10 * 1024 * 1024 * 1024,
+		St:      st,
+		MeiliUp: func() bool { return true },
 	}
 
 	snap := c.Collect()
@@ -43,11 +42,6 @@ func TestCollector(t *testing.T) {
 	}
 	if !snap.MeiliUp {
 		t.Error("expected MeiliUp to be true")
-	}
-	// The cache quota is carried through unchanged so the library page can
-	// draw a usage bar against the configured limit.
-	if snap.CacheMaxBytes != 10*1024*1024*1024 {
-		t.Errorf("cacheMaxBytes = %d, want the configured quota", snap.CacheMaxBytes)
 	}
 }
 

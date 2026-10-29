@@ -240,6 +240,7 @@ import {
 } from '../api'
 import HardwareBadge from './diagnostics/HardwareBadge.vue'
 import MetricGauge from './diagnostics/MetricGauge.vue'
+import { fmtBytes } from '../lib/format'
 
 const system = ref<SystemInfo | null>(null)
 const gauge = ref<GaugeSnapshot | null>(null)
@@ -540,18 +541,6 @@ function usedPct(d: DiskMetric): number {
   return Math.min(100, Math.max(0, ((d.totalBytes - d.freeBytes) / d.totalBytes) * 100))
 }
 
-function fmtBytes(n: number): string {
-  if (!Number.isFinite(n) || n < 0) return '—'
-  if (n < 1024) return `${Math.round(n)} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let v = n / 1024
-  let i = 0
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(1)} ${units[i]}`
-}
 
 function fmtMs(ms: number): string {
   if (!ms) return '—'

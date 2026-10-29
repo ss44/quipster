@@ -228,7 +228,7 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	})
 	thumbSvc := &thumbs.Service{St: st, CacheDir: cfg.cacheDir, Hw: hw}
 	searchSvc := search.New(st, ix)
-	collector := &events.Collector{St: st, MeiliUp: ix.Healthy, CacheMaxBytes: lru.MaxBytes}
+	collector := &events.Collector{St: st, MeiliUp: ix.Healthy}
 	diag := diagnostics.New(st, hw, cfg.logs, ix.Healthy, version, cfg.dataDir, cfg.cacheDir, cfg.mediaDir)
 
 	runner := jobs.NewRunner(st, "worker")
@@ -251,18 +251,19 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	}
 
 	deps := api.Deps{
-		St:          st,
-		Search:      searchSvc,
-		Indexer:     ix,
-		Clips:       clipSvc,
-		Thumbs:      thumbSvc,
-		Events:      collector,
-		Runner:      runner,
-		MediaDir:    cfg.mediaDir,
-		WebFS:       web.Dist,
-		APIToken:    cfg.apiToken,
-		Diagnostics: diag,
-		Nodes:       nodeSvc,
+		St:            st,
+		Search:        searchSvc,
+		Indexer:       ix,
+		Clips:         clipSvc,
+		Thumbs:        thumbSvc,
+		Events:        collector,
+		Runner:        runner,
+		MediaDir:      cfg.mediaDir,
+		WebFS:         web.Dist,
+		APIToken:      cfg.apiToken,
+		CacheMaxBytes: lru.MaxBytes,
+		Diagnostics:   diag,
+		Nodes:         nodeSvc,
 	}
 	// MCP is served in two modes: streamable HTTP mounted at /mcp on API
 	// processes, and stdio for local single-process integrations (worker role

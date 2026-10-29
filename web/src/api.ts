@@ -149,8 +149,6 @@ export interface AdminSnapshot {
   mediaCounts: Record<string, number>
   lines: LineStats | null
   cacheBytes: number
-  /** Configured clip-cache quota in bytes; 0 means unlimited. */
-  cacheMaxBytes: number
   recentJobs: Job[] | null
   runningJobs: Job[] | null
   meiliUp: boolean
@@ -160,6 +158,8 @@ export interface AdminConfig {
   mediaDir: string
   folders: string[]
   available: string[]
+  /** Configured clip-cache quota in bytes (CACHE_MAX_GB); 0 means unlimited. */
+  cacheMaxBytes: number
 }
 
 export interface Metric {
