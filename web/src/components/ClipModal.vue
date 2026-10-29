@@ -25,7 +25,7 @@
               controls
               autoplay
               preload="auto"
-              @loadeddata="previewLoading = false"
+              @loadeddata="onPreviewLoaded"
               @error="onPreviewError"
             />
             <div v-if="previewLoading" class="preview-overlay">
@@ -98,6 +98,7 @@
           </p>
 
           <p v-if="clipError" class="error-msg">{{ clipError }}</p>
+          <p v-if="previewError" class="error-msg">{{ previewError }}</p>
 
           <div v-if="jobProgress !== null" class="progress">
             <div class="progress-labels">
@@ -161,6 +162,7 @@ const jobProgress = ref<number | null>(null)
 const jobLabel = ref('')
 const previewURL = ref('')
 const previewLoading = ref(false)
+const previewError = ref('')
 const posterURL = ref('')
 
 const cues = computed(() => detail.value?.cues ?? [])
@@ -200,6 +202,7 @@ async function onOpenClip(e: Event) {
   hit.value = next
   open.value = true
   clipError.value = ''
+  previewError.value = ''
   jobProgress.value = null
   try {
     detail.value = await api.chunk(next.chunkId)
@@ -217,9 +220,33 @@ function updatePreview() {
   previewURL.value = clipStreamURL(hit.value, selStart.value, selEnd.value, 'preview', false)
 }
 
-function onPreviewError() {
+// MediaError codes from the HTMLMediaElement spec. Only MEDIA_ERR_ABORTED is
+// recoverable: it is reported when a media load is cancelled, which happens
+// routinely here because the trim slider swaps the preview URL while the
+// previous load is still in flight.
+const MEDIA_ERR_ABORTED = 1
+
+function onPreviewLoaded() {
   previewLoading.value = false
-  clipError.value = 'Preview could not be played in this browser. Try downloading instead.'
+  // A successful load clears or prevents the warning: an earlier failure (for
+  // example an aborted request while the trim range was adjusted) must not
+  // outlive a preview that now plays correctly.
+  previewError.value = ''
+}
+
+function onPreviewError(e: Event) {
+  const el = e.target as HTMLVideoElement
+  // Ignore errors from a preview that has since been replaced. When the trim
+  // range changes, the discarded element's cancelled load emits an error that
+  // no longer describes the visible preview, and reacting to it would flag a
+  // preview that is about to load fine.
+  if (el.getAttribute('src') !== previewURL.value) return
+  previewLoading.value = false
+  // An aborted load is expected while trimming and recovers on its own with
+  // the next preview; only genuine failures (unsupported format, decode or
+  // network errors) warrant telling the user playback cannot be recovered.
+  if (el.error && el.error.code === MEDIA_ERR_ABORTED) return
+  previewError.value = 'Preview could not be played in this browser. Try downloading instead.'
 }
 
 function selectAll() {
