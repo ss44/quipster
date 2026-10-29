@@ -1,36 +1,5 @@
 <template>
-  <div class="search-wrap">
-    <v-menu
-      v-model="menuOpen"
-      :activator="fieldEl"
-      :close-on-content-click="false"
-      location="bottom"
-      offset="6"
-      :width="menuWidth"
-      content-class="search-menu"
-    >
-      <template #default>
-        <div class="menu-panel">
-          <button
-            v-for="(item, index) in suggestions"
-            :key="item.text"
-            type="button"
-            class="menu-item"
-            :class="{ hovered: index === active }"
-            @mousedown.prevent="choose(item.text)"
-            @mouseenter="active = index"
-          >
-            <span class="menu-text" v-html="item.textMarked || item.text" />
-          </button>
-          <p v-if="!suggestions.length" class="menu-empty">No matching lines</p>
-          <div class="menu-foot">
-            <span><kbd class="kbd">↵</kbd> search</span>
-            <span><kbd class="kbd">esc</kbd> close</span>
-          </div>
-        </div>
-      </template>
-    </v-menu>
-
+  <div ref="wrap" class="search-wrap">
     <v-text-field
       ref="field"
       v-model="query"
@@ -59,19 +28,43 @@
         <kbd v-if="!query" class="key-hint">/</kbd>
       </template>
     </v-text-field>
+
+    <Transition name="menu-fade">
+      <div v-if="menuOpen" class="search-menu">
+        <div class="menu-panel" role="listbox" aria-label="Search suggestions">
+          <button
+            v-for="(item, index) in suggestions"
+            :key="item.text"
+            type="button"
+            class="menu-item"
+            :class="{ hovered: index === active }"
+            role="option"
+            :aria-selected="index === active"
+            @mousedown.prevent="choose(item.text)"
+            @mouseenter="active = index"
+          >
+            <span class="menu-text" v-html="item.textMarked || item.text" />
+          </button>
+          <p v-if="!suggestions.length" class="menu-empty">No matching lines</p>
+          <div class="menu-foot" aria-hidden="true">
+            <span><kbd class="kbd">↵</kbd> search</span>
+            <span><kbd class="kbd">esc</kbd> close</span>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, type Suggestion } from '../api'
 
 const route = useRoute()
 const router = useRouter()
 const field = ref<{ $el?: HTMLElement } | null>(null)
-const fieldEl = computed(() => field.value?.$el as HTMLElement | undefined)
-const menuWidth = ref<number>()
+const wrap = ref<HTMLElement | null>(null)
 const query = ref('')
 const suggestions = ref<Suggestion[]>([])
 const menuOpen = ref(false)
@@ -110,7 +103,9 @@ function onInput(value: string | null) {
 }
 
 function onFocus() {
-  if (fieldEl.value) menuWidth.value = fieldEl.value.getBoundingClientRect().width
+  // The panel is anchored below the field by document layout instead of the
+  // overlay positioner, so reopening on focus can no longer cover the input,
+  // even when the on-screen keyboard shrinks the visual viewport.
   if (suggestions.value.length) menuOpen.value = true
 }
 
@@ -165,13 +160,26 @@ function onKey(event: KeyboardEvent) {
   }
 }
 
+// Taps outside the field's container dismiss the panel, mirroring the old
+// overlay's click-outside behavior. Taps inside it (notably on suggestion
+// items) must not dismiss anything, so touch selection keeps the input
+// focused instead of the panel stealing the touch.
+function onPointerDown(event: Event) {
+  const target = event.target as Node | null
+  if (menuOpen.value && wrap.value && target && !wrap.value.contains(target)) {
+    menuOpen.value = false
+  }
+}
+
 onMounted(() => {
   document.addEventListener('keydown', onKey)
+  document.addEventListener('pointerdown', onPointerDown)
   window.addEventListener('quipster:focus-search', focus)
 })
 
 onUnmounted(() => {
   document.removeEventListener('keydown', onKey)
+  document.removeEventListener('pointerdown', onPointerDown)
   window.removeEventListener('quipster:focus-search', focus)
   window.clearTimeout(timer)
 })
@@ -179,6 +187,7 @@ onUnmounted(() => {
 
 <style scoped>
 .search-wrap {
+  position: relative;
   width: 100%;
   max-width: 620px;
 }
@@ -218,6 +227,27 @@ onUnmounted(() => {
   border-radius: 4px;
   padding: 1px 5px;
   line-height: 16px;
+}
+/* Z-index contract: sticky header 20 < search-menu 60 < dialogs/snackbars
+   (Vuetify overlays, 2400+). The panel stays inside the header's stacking
+   context, so it paints above page content yet can never stack above the
+   input itself; being positioned by document layout, keyboard-driven visual
+   viewport changes cannot displace it over the field. */
+.search-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+}
+.menu-fade-enter-active,
+.menu-fade-leave-active {
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.menu-fade-enter-from,
+.menu-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 .menu-panel {
   background: var(--surface-2);
