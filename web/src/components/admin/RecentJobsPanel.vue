@@ -214,9 +214,11 @@ const filteredJobs = computed(() =>
 }
 .table-wrap {
   overflow-x: auto;
+  max-width: 100%;
 }
 .jobs-table {
   width: 100%;
+  min-width: max-content;
   border-collapse: collapse;
   font-size: 12px;
 }

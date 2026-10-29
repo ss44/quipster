@@ -35,6 +35,11 @@ body,
   height: 100%;
 }
 
+html, body {
+  max-width: 100%;
+  overflow-x: clip;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -84,6 +89,7 @@ body {
 .mono {
   font-family: var(--font-mono);
   font-size: 0.86em;
+  overflow-wrap: anywhere;
 }
 
 /* ---------- app shell ---------- */
