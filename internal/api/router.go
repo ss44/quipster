@@ -35,21 +35,24 @@ import (
 //
 //nolint:govet // field grouping favors readability over optimal alignment.
 type Deps struct {
-	WebFS       fs.FS
-	St          *store.Store
-	Search      *search.Service
-	Indexer     *indexer.Indexer
-	Clips       *clips.Service
-	Thumbs      *thumbs.Service
-	Events      *events.Collector
-	Runner      *jobs.Runner
-	ScanTicker  func() // enqueues a scan job if none active; called for POST /scan
-	MediaDir    string
-	SubsDir     string
-	APIToken    string
-	Diagnostics *diagnostics.Collector
-	MCP         http.Handler   // Model Context Protocol endpoint at /mcp; nil disables it
-	Nodes       *nodes.Service // nil disables the worker-node endpoints
+	WebFS      fs.FS
+	St         *store.Store
+	Search     *search.Service
+	Indexer    *indexer.Indexer
+	Clips      *clips.Service
+	Thumbs     *thumbs.Service
+	Events     *events.Collector
+	Runner     *jobs.Runner
+	ScanTicker func() // enqueues a scan job if none active; called for POST /scan
+	MediaDir   string
+	SubsDir    string
+	APIToken   string
+	// CacheMaxBytes is the configured clip-cache quota from CACHE_MAX_GB;
+	// zero means unlimited and is reported as such by the admin config.
+	CacheMaxBytes int64
+	Diagnostics   *diagnostics.Collector
+	MCP           http.Handler   // Model Context Protocol endpoint at /mcp; nil disables it
+	Nodes         *nodes.Service // nil disables the worker-node endpoints
 }
 
 // Router builds the application HTTP handler: standard middleware, public
@@ -567,9 +570,10 @@ func (d Deps) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{
-		"mediaDir":  d.MediaDir,
-		"folders":   folders,
-		"available": available,
+		"mediaDir":      d.MediaDir,
+		"folders":       folders,
+		"available":     available,
+		"cacheMaxBytes": d.CacheMaxBytes,
 	})
 }
 

@@ -21,6 +21,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { Metric } from '../../api'
+import { fmtBytes } from '../../lib/format'
 
 const props = withDefaults(
   defineProps<{
@@ -96,17 +97,6 @@ function clamp(v: number): number {
   return Math.max(0, Math.min(100, v))
 }
 
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${Math.round(n)} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let v = n / 1024
-  let i = 0
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(1)} ${units[i]}`
-}
 </script>
 
 <style scoped>

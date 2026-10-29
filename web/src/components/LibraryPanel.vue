@@ -16,40 +16,34 @@
     </header>
 
     <section class="stats">
-      <div class="stat">
-        <p class="stat-label">Library</p>
-        <p class="stat-value">{{ total.toLocaleString() }}<span class="stat-unit">files</span></p>
-        <p class="stat-sub">
-          {{ n('indexed').toLocaleString() }} searchable · {{ n('pending').toLocaleString() }} queued ·
-          {{ n('no_subs').toLocaleString() }} without subs
-          <span v-if="n('error')" class="stat-error">· {{ n('error') }} failed</span>
-        </p>
-      </div>
-      <div class="stat">
-        <p class="stat-label">Dialogue</p>
-        <p class="stat-value">{{ (snap?.lines?.cues ?? 0).toLocaleString() }}<span class="stat-unit">lines</span></p>
-        <p class="stat-sub">
-          {{ (snap?.lines?.chunksIndexed ?? 0).toLocaleString() }} of
-          {{ (snap?.lines?.chunks ?? 0).toLocaleString() }} chunks indexed
-        </p>
-        <div class="stat-progress"><div class="fill" :style="{ width: `${indexedPct}%` }"></div></div>
-      </div>
-      <div class="stat">
-        <p class="stat-label">Queue</p>
-        <p class="stat-value">{{ (snap?.queue?.queued ?? 0).toLocaleString() }}<span class="stat-unit">waiting</span></p>
-        <p class="stat-sub">
-          <span v-if="paused" class="paused-tag">Paused</span>
-          <template v-else>
-            {{ snap?.queue?.running ?? 0 }} running · {{ snap?.queue?.done ?? 0 }} done
-            <span v-if="snap?.queue?.error" class="stat-error">· {{ snap.queue.error }} failed</span>
-          </template>
-        </p>
-      </div>
-      <div class="stat">
-        <p class="stat-label">Clip cache</p>
-        <p class="stat-value">{{ fmtBytes(snap?.cacheBytes ?? 0) }}</p>
-        <p class="stat-sub">Clips, thumbnails and extracted subtitles, LRU-evicted.</p>
-      </div>
+      <StatCard label="Library" :value="total.toLocaleString()" unit="files" :progress="libraryProgress">
+        {{ n('indexed').toLocaleString() }} searchable · {{ n('pending').toLocaleString() }} queued ·
+        {{ n('no_subs').toLocaleString() }} without subs
+        <span v-if="n('error')" class="stat-error">· {{ n('error') }} failed</span>
+      </StatCard>
+      <StatCard
+        label="Dialogue"
+        :value="(snap?.lines?.cues ?? 0).toLocaleString()"
+        unit="lines"
+        :progress="dialogue.progress"
+      >
+        <span :class="{ 'stat-note': dialogue.state === 'keeping-up' }">{{ dialogue.sub }}</span>
+      </StatCard>
+      <StatCard
+        label="Queue"
+        :value="(snap?.queue?.queued ?? 0).toLocaleString()"
+        unit="waiting"
+        :progress="queueProgress"
+      >
+        <span v-if="paused" class="paused-tag">Paused</span>
+        <template v-else>
+          {{ snap?.queue?.running ?? 0 }} running · {{ snap?.queue?.done ?? 0 }} done
+          <span v-if="snap?.queue?.error" class="stat-error">· {{ snap.queue.error }} failed</span>
+        </template>
+      </StatCard>
+      <StatCard label="Clip cache" :value="fmtBytes(snap?.cacheBytes ?? 0)" :progress="cacheProgress">
+        Clips, thumbnails and extracted subtitles, LRU-evicted.
+      </StatCard>
     </section>
 
     <div class="admin-grid">
@@ -163,46 +157,7 @@
       </section>
     </div>
 
-    <section class="panel jobs">
-      <header class="panel-header">
-        <span>Recent jobs</span>
-      </header>
-      <div class="table-wrap">
-        <table class="jobs-table">
-          <thead>
-            <tr>
-              <th>Type</th>
-              <th>File</th>
-              <th>Status</th>
-              <th>Lines</th>
-              <th>Took</th>
-              <th>Created</th>
-              <th>Error</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="job in (snap?.recentJobs ?? [])" :key="job.id">
-              <td class="mono">{{ job.type }}</td>
-              <td>
-                <span class="file-title truncate">{{ job.mediaTitle || fileBase(job.mediaPath) || '—' }}</span>
-                <span class="file-path mono truncate">{{ fileBase(job.mediaPath) }}</span>
-              </td>
-              <td>
-                <span class="state"><span class="status-dot" :class="statusClass(job.status)"></span>{{ job.status }}</span>
-              </td>
-              <td class="mono">{{ job.mediaCues ? job.mediaCues : '—' }}</td>
-              <td class="mono">{{ fmtDur(job) }}</td>
-              <td class="mono">{{ fmtTime(job.createdAt) }}</td>
-              <td>
-                <span v-if="job.error" class="error-text truncate" :title="job.error">{{ job.error }}</span>
-                <span v-else class="faint">—</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-if="!snap?.recentJobs?.length" class="idle">No jobs yet — run a scan to populate the queue.</p>
-      </div>
-    </section>
+    <RecentJobsPanel :jobs="recentJobs" />
 
     <v-dialog v-model="confirmOpen" max-width="420">
       <div class="confirm-panel">
@@ -223,9 +178,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useNow } from '@vueuse/core'
 import { api, type AdminConfig, type AdminSnapshot, type Job } from '../api'
+import RecentJobsPanel from './admin/RecentJobsPanel.vue'
+import StatCard from './admin/StatCard.vue'
+import { fmtBytes } from '../lib/format'
+import { fileBase, jobElapsed } from '../lib/jobs'
+import { percent, type StatProgressModel } from '../lib/progress'
 
 const now = useNow({ interval: 1000 })
 
@@ -253,13 +213,91 @@ const dirty = computed(() => {
 })
 const scanPct = computed(() => {
   const scan = snap.value?.scan
-  if (!scan || !scan.filesSeen) return scan ? 5 : 0
-  return Math.min(100, Math.round((scan.filesDone / Math.max(scan.filesSeen, 1)) * 100))
+  if (!scan) return 0
+  if (!scan.filesSeen) return 5
+  return percent(scan.filesDone, scan.filesSeen)
 })
-const indexedPct = computed(() => {
-  const lines = snap.value?.lines
-  if (!lines || !lines.chunks) return 0
-  return Math.round((lines.chunksIndexed / lines.chunks) * 100)
+
+// --- stat card progress ------------------------------------------------------
+// Every card renders the same bottom-pinned footer (unit line + bar) so the
+// bars share one baseline across the row. `empty` means nothing is countable
+// yet: a bare track and a dash, never a completion claim. The queue is the one
+// deliberate exception — an empty queue is a clear work list, so it reads full.
+
+const pendingCount = computed(() => n('pending'))
+// Files that reached a terminal state: searchable, no subtitles, or failed.
+const processedCount = computed(() => n('indexed') + n('no_subs') + n('error'))
+const recentJobs = computed(() => snap.value?.recentJobs ?? [])
+
+// Work that can still add media rows or dialogue chunks: a scan, pending
+// probes, queued jobs, or a running probe/index job. Clip renders never touch
+// dialogue, so they must not read as indexing activity.
+const mediaWorkActive = computed(() => {
+  if (snap.value?.scan) return true
+  if (pendingCount.value > 0) return true
+  if ((snap.value?.queue?.queued ?? 0) > 0) return true
+  return (snap.value?.runningJobs ?? []).some((job) => job.type === 'probe' || job.type === 'index')
+})
+
+type DialogueState = 'empty' | 'waiting' | 'keeping-up' | 'settled'
+interface DialogueView {
+  state: DialogueState
+  sub: string
+  progress: StatProgressModel
+}
+
+// One model for the whole Dialogue card: the sub line and the bar derive from
+// the same state instead of re-testing parallel boolean flags.
+const dialogue = computed<DialogueView>(() => {
+  const chunks = snap.value?.lines?.chunks ?? 0
+  const indexed = snap.value?.lines?.chunksIndexed ?? 0
+  let state: DialogueState
+  if (!chunks) state = 'empty'
+  else if (indexed < chunks) state = 'waiting'
+  else state = mediaWorkActive.value ? 'keeping-up' : 'settled'
+
+  const label = `${indexed.toLocaleString()} of ${chunks.toLocaleString()} chunks indexed`
+  const sub = {
+    empty: 'No dialogue indexed yet',
+    waiting: `${(chunks - indexed).toLocaleString()} chunks waiting to be indexed`,
+    'keeping-up': 'index keeping up with processing',
+    settled: 'All chunks searchable',
+  }[state]
+
+  let progress: StatProgressModel
+  if (state === 'empty') progress = { label, pct: 0, empty: true }
+  else if (state === 'keeping-up') progress = { label, pct: percent(indexed, chunks), indeterminate: true }
+  else progress = { label, pct: percent(indexed, chunks) }
+
+  return { state, sub, progress }
+})
+
+const libraryProgress = computed<StatProgressModel>(() => {
+  if (!total.value) return { label: '0 of 0 files processed', pct: 0, empty: true }
+  return {
+    label: `${processedCount.value.toLocaleString()} of ${total.value.toLocaleString()} files processed`,
+    pct: percent(processedCount.value, total.value),
+  }
+})
+
+// The unit of work is one job reaching a terminal status: done or failed.
+// An empty queue renders full because there is nothing left to do.
+const queueProgress = computed<StatProgressModel>(() => {
+  const finished = (snap.value?.queue?.done ?? 0) + (snap.value?.queue?.error ?? 0)
+  const known = finished + (snap.value?.queue?.queued ?? 0) + (snap.value?.queue?.running ?? 0)
+  return {
+    label: `${finished.toLocaleString()} of ${known.toLocaleString()} jobs finished`,
+    pct: known ? percent(finished, known) : 100,
+  }
+})
+
+// The unit is one byte of the configured cache quota; CACHE_MAX_GB=0 means
+// unlimited, which is shown as usage without a fraction.
+const cacheProgress = computed<StatProgressModel>(() => {
+  const used = snap.value?.cacheBytes ?? 0
+  const quota = config.value?.cacheMaxBytes ?? 0
+  if (!quota) return { label: `${fmtBytes(used)} used · no limit`, pct: 0, empty: true }
+  return { label: `${fmtBytes(used)} of ${fmtBytes(quota)} used`, pct: percent(used, quota) }
 })
 
 let lastRawSnap = ''
@@ -370,63 +408,8 @@ async function doReprobe() {
   }
 }
 
-function statusClass(status: string): string {
-  switch (status) {
-    case 'done':
-      return 'ok'
-    case 'error':
-      return 'err'
-    case 'running':
-      return 'run'
-    default:
-      return ''
-  }
-}
-
-function fileBase(path: string): string {
-  if (!path) return ''
-  const parts = path.split('/')
-  return parts[parts.length - 1]
-}
-
 function elapsed(job: Job): string {
-  if (!job.startedAt) return ''
-  const end = job.finishedAt || now.value.getTime()
-  const ms = Math.max(0, end - job.startedAt)
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${Math.round(ms / 1000)}s`
-  return `${(ms / 60000).toFixed(1)}m`
-}
-
-function waitTime(job: Job): string {
-  const start = job.startedAt || now.value.getTime()
-  const ms = Math.max(0, start - job.createdAt)
-  if (ms < 60000) return `${Math.round(ms / 1000)}s`
-  return `${Math.round(ms / 60000)}m`
-}
-
-function fmtTime(ms: number): string {
-  if (!ms) return '—'
-  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
-
-function fmtDur(job: Job): string {
-  if (job.status === 'queued') return `wait: ${waitTime(job)}`
-  if (!job.startedAt) return '—'
-  if (!job.finishedAt && job.status !== 'running') return '—'
-  return elapsed(job)
-}
-
-function fmtBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let value = bytes / 1024
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit++
-  }
-  return `${value.toFixed(1)} ${units[unit]}`
+  return jobElapsed(job, now.value.getTime())
 }
 </script>
 
@@ -460,55 +443,11 @@ function fmtBytes(bytes: number): string {
   gap: 12px;
   margin-bottom: 16px;
 }
-.stat {
-  background: var(--surface-1);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 14px 16px;
-}
-.stat-label {
-  margin: 0 0 8px;
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--faint);
-}
-.stat-value {
-  margin: 0;
-  font-size: 24px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  line-height: 1.1;
-}
-.stat-unit {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--faint);
-  margin-left: 6px;
-  letter-spacing: 0;
-}
-.stat-sub {
-  margin: 6px 0 0;
-  font-size: 11.5px;
-  line-height: 1.5;
-  color: var(--muted);
-}
 .stat-error {
   color: #fca5a5;
 }
-.stat-progress {
-  height: 3px;
-  margin-top: 10px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.07);
-  overflow: hidden;
-}
-.stat-progress .fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 2px;
-  transition: width 0.4s ease;
+.stat-note {
+  color: var(--accent);
 }
 .admin-grid {
   display: grid;
@@ -668,72 +607,6 @@ function fmtBytes(bytes: number): string {
   margin: 8px 0;
   font-size: 12px;
   color: var(--faint);
-}
-.jobs {
-  margin-top: 0;
-}
-.table-wrap {
-  overflow-x: auto;
-}
-.jobs-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-.jobs-table th {
-  text-align: left;
-  padding: 9px 14px;
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--faint);
-  border-bottom: 1px solid var(--border);
-}
-.jobs-table td {
-  padding: 9px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
-  vertical-align: top;
-}
-.jobs-table tr:last-child td {
-  border-bottom: none;
-}
-.file-title {
-  display: block;
-  max-width: 280px;
-  color: var(--text);
-  font-size: 12px;
-}
-.file-path {
-  display: block;
-  max-width: 280px;
-  color: var(--faint);
-  font-size: 10.5px;
-}
-.state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  color: var(--muted);
-  text-transform: lowercase;
-}
-.error-text {
-  display: inline-block;
-  max-width: 230px;
-  color: #fca5a5;
-}
-.link-btn {
-  background: none;
-  border: none;
-  padding: 0;
-  font-size: 12px;
-  color: var(--muted);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-.link-btn:hover {
-  color: var(--text);
 }
 .queue-actions {
   display: flex;

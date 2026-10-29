@@ -100,8 +100,9 @@ func buildDeps(t *testing.T, st *store.Store, meiliURL string) Deps {
 		Events:  &events.Collector{St: st, MeiliUp: ix.Healthy},
 		Diagnostics: diagnostics.New(st, hardware.MonitorFor(hardware.Capabilities{}), nil, ix.Healthy,
 			"test", t.TempDir(), t.TempDir(), t.TempDir()),
-		Runner:   runner,
-		MediaDir: t.TempDir(),
+		Runner:        runner,
+		MediaDir:      t.TempDir(),
+		CacheMaxBytes: 10 << 30,
 		WebFS: fstest.MapFS{
 			"index.html":       &fstest.MapFile{Data: []byte("<html>index</html>")},
 			"app.js":           &fstest.MapFile{Data: []byte("console.log(1)")},
@@ -157,6 +158,29 @@ func seedChunks(t *testing.T, st *store.Store, id int64) {
 	}
 	if err := st.ReplaceChunks(id, chunks); err != nil {
 		t.Fatalf("ReplaceChunks: %v", err)
+	}
+}
+
+// seedIndexedChunks stores two quotable chunks and latches them as indexed so
+// quote/examples endpoints can surface them.
+func seedIndexedChunks(t *testing.T, st *store.Store, id int64) {
+	t.Helper()
+	if err := st.ReplaceChunks(id, []store.Chunk{
+		{MediaFileID: id, StartCueIdx: 0, EndCueIdx: 1, Text: "Show me the money!"},
+		{MediaFileID: id, StartCueIdx: 2, EndCueIdx: 3, Text: "the city never sleeps"},
+	}); err != nil {
+		t.Fatalf("ReplaceChunks: %v", err)
+	}
+	chunks, err := st.ChunksForMedia(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, 0, len(chunks))
+	for _, ch := range chunks {
+		ids = append(ids, ch.ID)
+	}
+	if err := st.MarkChunksIndexed(ids, 1); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -554,6 +578,9 @@ func TestAdminConfigGet(t *testing.T) {
 	body := decodeMap(t, rr)
 	if body["mediaDir"] != deps.MediaDir {
 		t.Errorf("mediaDir = %v", body["mediaDir"])
+	}
+	if body["cacheMaxBytes"] != float64(deps.CacheMaxBytes) {
+		t.Errorf("cacheMaxBytes = %v, want %d", body["cacheMaxBytes"], deps.CacheMaxBytes)
 	}
 	if folders, ok := body["folders"].([]any); !ok || len(folders) != 1 || folders[0] != "Shows" {
 		t.Errorf("folders = %v", body["folders"])

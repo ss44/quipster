@@ -158,6 +158,8 @@ export interface AdminConfig {
   mediaDir: string
   folders: string[]
   available: string[]
+  /** Configured clip-cache quota in bytes (CACHE_MAX_GB); 0 means unlimited. */
+  cacheMaxBytes: number
 }
 
 export interface Metric {
