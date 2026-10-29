@@ -330,23 +330,27 @@ const processedCount = computed(() => n('indexed') + n('no_subs') + n('error'))
 const workActive = computed(() => scanActive.value || queueActive.value || pendingCount.value > 0)
 
 // Library footer: the unit of work is one discovered media file reaching a
-// terminal status. Shown only while ingestion work is still open so a settled
-// library never implies more work is pending.
-const showLibraryFooter = computed(() => (pendingCount.value > 0 || scanActive.value) && total.value > 0)
+// terminal status. Shown whenever there is anything to convey — files exist
+// or ingestion is still open (pending media, active scan) — so the bar is
+// always visible while the library is in use. With no rows yet during a scan
+// walk the bar reads 0% instead of claiming completion.
+const libraryWorkOpen = computed(() => pendingCount.value > 0 || scanActive.value)
+const showLibraryFooter = computed(() => total.value > 0 || libraryWorkOpen.value)
 const libraryPct = computed(() =>
   total.value ? Math.min(100, Math.round((processedCount.value / total.value) * 100)) : 0,
 )
 
-// Queue footer: the unit of work is one job reaching done or error. Shown only
-// while jobs are queued or running so drained queues stay uncluttered; done
-// and error are both terminal outcomes of the same unit.
+// Queue footer: the unit of work is one job reaching done or error; done and
+// error are both terminal outcomes of the same unit. Shown whenever queue
+// stats exist, with an empty queue (0 of 0) rendered as a full bar because
+// there is nothing left to do.
 const queueDoneCount = computed(() => (snap.value?.queue?.done ?? 0) + (snap.value?.queue?.error ?? 0))
 const queueTotalCount = computed(
   () => queueDoneCount.value + (snap.value?.queue?.queued ?? 0) + (snap.value?.queue?.running ?? 0),
 )
-const showQueueFooter = computed(() => queueActive.value && queueTotalCount.value > 0)
+const showQueueFooter = computed(() => !!snap.value?.queue)
 const queuePct = computed(() =>
-  queueTotalCount.value ? Math.min(100, Math.round((queueDoneCount.value / queueTotalCount.value) * 100)) : 0,
+  queueTotalCount.value ? Math.min(100, Math.round((queueDoneCount.value / queueTotalCount.value) * 100)) : 100,
 )
 
 // Dialogue footer: the unit of work is one subtitle chunk pushed into
