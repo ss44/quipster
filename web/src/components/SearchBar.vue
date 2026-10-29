@@ -3,6 +3,12 @@
     <v-text-field
       ref="field"
       v-model="query"
+      role="combobox"
+      aria-haspopup="listbox"
+      aria-autocomplete="list"
+      aria-controls="search-suggestions"
+      :aria-expanded="menuOpen ? 'true' : 'false'"
+      :aria-activedescendant="activeDescendant"
       placeholder="Search dialogue across your library…"
       variant="solo"
       flat
@@ -14,7 +20,7 @@
       @keydown.enter.prevent="submit"
       @keydown.down.prevent="move(1)"
       @keydown.up.prevent="move(-1)"
-      @keydown.esc="close"
+      @keydown.esc="closeMenu"
       @update:model-value="onInput"
       @focus="onFocus"
     >
@@ -31,24 +37,29 @@
 
     <Transition name="menu-fade">
       <div v-if="menuOpen" class="search-menu">
-        <div class="menu-panel" role="listbox" aria-label="Search suggestions">
+        <div id="search-suggestions" class="menu-panel" role="listbox" aria-label="Search suggestions">
           <button
-            v-for="(item, index) in suggestions"
-            :key="item.text"
+            v-for="(row, index) in rows"
+            :id="optionId(index)"
+            :key="row.kind === 'raw' ? '__raw__' : row.text"
             type="button"
-            class="menu-item"
-            :class="{ hovered: index === active }"
             role="option"
+            class="menu-item"
+            :class="{ 'active-row': index === active, 'raw-row': row.kind === 'raw' }"
             :aria-selected="index === active"
-            @mousedown.prevent="choose(item.text)"
-            @mouseenter="active = index"
+            @mousedown.prevent
+            @click="activate(row)"
           >
-            <span class="menu-text" v-html="item.textMarked || item.text" />
+            <span v-if="row.kind === 'raw'" class="menu-text">
+              Search for <strong>“{{ row.text }}”</strong>
+            </span>
+            <span v-else class="menu-text" v-html="row.textMarked || row.text" />
           </button>
           <p v-if="!suggestions.length" class="menu-empty">No matching lines</p>
           <div class="menu-foot" aria-hidden="true">
-            <span><kbd class="kbd">↵</kbd> search</span>
-            <span><kbd class="kbd">esc</kbd> close</span>
+            <span><kbd class="kbd">↵</kbd> search as typed</span>
+            <span><kbd class="kbd">↑↓</kbd> browse, <kbd class="kbd">↵</kbd> open</span>
+            <span><kbd class="kbd">esc</kbd> dismiss</span>
           </div>
         </div>
       </div>
@@ -57,7 +68,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, type Suggestion } from '../api'
 
@@ -68,8 +79,31 @@ const wrap = ref<HTMLElement | null>(null)
 const query = ref('')
 const suggestions = ref<Suggestion[]>([])
 const menuOpen = ref(false)
+// Index into `rows`: the only writer is keyboard navigation, and every reset
+// lands back on 0 — the raw query row. Hovering is pure CSS styling, so a
+// passive menu-open state can never promote a suggestion into the submit path.
 const active = ref(0)
 let timer: number | undefined
+
+type SuggestionRow = { kind: 'raw'; text: string } | { kind: 'suggestion'; text: string; textMarked: string }
+
+// The menu always leads with a row for the literal query the user typed, so
+// the raw freeform search stays one Enter/click away even while suggestions
+// are listed below it.
+const rows = computed<SuggestionRow[]>(() => {
+  const raw = query.value.trim()
+  const list: SuggestionRow[] = raw ? [{ kind: 'raw', text: raw }] : []
+  for (const s of suggestions.value) list.push({ kind: 'suggestion', text: s.text, textMarked: s.textMarked })
+  return list
+})
+
+function optionId(index: number): string {
+  return `search-opt-${index}`
+}
+
+const activeDescendant = computed(() =>
+  menuOpen.value && rows.value.length ? optionId(active.value) : undefined,
+)
 
 watch(
   () => route.query.q,
@@ -91,39 +125,72 @@ function onInput(value: string | null) {
     return
   }
   timer = window.setTimeout(async () => {
+    // A late reply must never surface for a query the user already moved past
+    // or a field they already left, so re-check before and after the fetch.
+    const stale = () => text !== query.value.trim() || !fieldFocused()
+    if (stale()) return
     try {
       const res = await api.suggest(text)
+      if (stale()) return
       suggestions.value = res.suggestions ?? []
       menuOpen.value = suggestions.value.length > 0
+      active.value = 0
     } catch {
+      if (stale()) return
       suggestions.value = []
       menuOpen.value = false
     }
   }, 150)
 }
 
+function fieldFocused(): boolean {
+  const input = field.value?.$el?.querySelector('input')
+  return !!input && document.activeElement === input
+}
+
 function onFocus() {
   // The panel is anchored below the field by document layout instead of the
   // overlay positioner, so reopening on focus can no longer cover the input,
-  // even when the on-screen keyboard shrinks the visual viewport.
+  // even when the on-screen keyboard shrinks the visual viewport. Re-focusing
+  // also starts a fresh selection so Enter means "search as typed" until the
+  // user navigates the list again.
+  active.value = 0
   if (suggestions.value.length) menuOpen.value = true
 }
 
 function move(delta: number) {
-  if (!menuOpen.value || !suggestions.value.length) return
-  const count = suggestions.value.length
-  active.value = (active.value + delta + count) % count
+  if (!rows.value.length) return
+  // Arrow keys re-open a dismissed list and are the only way to move the
+  // highlight onto a suggestion, making the following Enter an explicit pick.
+  if (!menuOpen.value) {
+    active.value = 0
+    menuOpen.value = true
+    return
+  }
+  active.value = (active.value + delta + rows.value.length) % rows.value.length
 }
 
-function choose(value: string) {
-  void go(value)
+function activate(row: SuggestionRow) {
+  if (row.kind === 'raw') {
+    submitRaw()
+    return
+  }
+  void go(row.text)
 }
 
 function submit() {
-  if (menuOpen.value && suggestions.value[active.value]) {
-    void go(suggestions.value[active.value].text)
+  // Enter activates the keyboard-highlighted row. The raw query row leads the
+  // list at index 0 and the highlight resets there on every input, focus and
+  // re-open, so a passive menu-open state always submits what was typed.
+  const row = menuOpen.value ? rows.value[active.value] : undefined
+  if (row) {
+    activate(row)
     return
   }
+  submitRaw()
+}
+
+function submitRaw() {
   const value = query.value.trim()
   if (value) void go(value)
 }
@@ -138,9 +205,10 @@ async function go(value: string) {
   blur()
 }
 
-function close() {
+function closeMenu() {
+  // Dismissing the list must not cost the user their text or caret, so the
+  // menu alone is closed and the field keeps focus for continued typing.
   menuOpen.value = false
-  blur()
 }
 
 function blur() {
@@ -267,13 +335,23 @@ onUnmounted(() => {
   border-radius: 7px;
   cursor: pointer;
 }
-.menu-item.hovered {
+.menu-item.active-row,
+.menu-item:hover {
   background: rgba(255, 255, 255, 0.06);
+}
+.menu-item.raw-row {
+  border-bottom: 1px solid var(--border);
+  border-radius: 7px 7px 2px 2px;
+  margin-bottom: 3px;
 }
 .menu-text {
   font-size: 13px;
   line-height: 1.45;
   color: #d9dce1;
+}
+.menu-text strong {
+  color: var(--text);
+  font-weight: 600;
 }
 .menu-empty {
   margin: 0;
@@ -283,7 +361,9 @@ onUnmounted(() => {
 }
 .menu-foot {
   display: flex;
+  flex-wrap: wrap;
   gap: 14px;
+  row-gap: 2px;
   padding: 7px 10px 4px;
   border-top: 1px solid var(--border);
   margin-top: 4px;

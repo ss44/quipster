@@ -20,7 +20,7 @@ const suggestions: Suggestion[] = [
 
 let wrapper: VueWrapper | null = null
 
-async function mountBar(): Promise<Router> {
+async function mountBar(initialRoute = '/'): Promise<Router> {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -28,7 +28,7 @@ async function mountBar(): Promise<Router> {
       { path: '/search', name: 'search', component: { template: '<div />' } },
     ],
   })
-  await router.push('/')
+  await router.push(initialRoute)
   await router.isReady()
   wrapper = mount(SearchBar, {
     attachTo: document.body,
@@ -41,7 +41,11 @@ function input(): ReturnType<VueWrapper['find']> {
   return wrapper!.find('input')
 }
 
+// Typing requires a focused field in production, and the component only
+// surfaces suggestions for a focused field (late replies after blur must not
+// re-open the panel), so the helper focuses first.
 async function type(value: string) {
+  ;(input().element as HTMLInputElement).focus()
   await input().setValue(value)
 }
 
@@ -59,6 +63,12 @@ async function openMenu() {
 async function settle() {
   await flushPromises()
   await vi.advanceTimersByTimeAsync(250)
+}
+
+// The option list leads with a row for the literal query (index 0), so
+// suggestions start at index 1.
+function menuItems() {
+  return wrapper!.findAll('.menu-item')
 }
 
 beforeEach(() => {
@@ -132,12 +142,15 @@ describe('SearchBar suggestion flow', () => {
     expect(wrapper!.find('.search-menu').exists()).toBe(false)
   })
 
-  it('shows the returned suggestions as options', async () => {
+  it('shows the returned suggestions as options below the raw query row', async () => {
     await mountBar()
     await openMenu()
-    const items = wrapper!.findAll('.menu-item')
-    expect(items).toHaveLength(2)
-    expect(items[0].text()).toContain('hello there')
+    const items = menuItems()
+    expect(items).toHaveLength(3)
+    expect(items[0].text()).toContain('Search for')
+    expect(items[0].text()).toContain('he')
+    expect(items[1].text()).toContain('hello there')
+    expect(items[2].text()).toContain('help me')
   })
 
   it('closes the panel when the suggest request fails', async () => {
@@ -151,12 +164,14 @@ describe('SearchBar suggestion flow', () => {
 })
 
 describe('SearchBar dismissing the panel', () => {
-  it('closes on escape', async () => {
+  it('closes on escape while keeping the text and caret focus', async () => {
     await mountBar()
     await openMenu()
     await input().trigger('keydown', { key: 'Escape' })
     await settle()
     expect(wrapper!.find('.search-menu').exists()).toBe(false)
+    expect((input().element as HTMLInputElement).value).toBe('he')
+    expect(document.activeElement).toBe(input().element)
   })
 
   it('closes when the pointer goes down outside the search container', async () => {
@@ -170,7 +185,7 @@ describe('SearchBar dismissing the panel', () => {
   it('stays open for pointer downs inside the search container', async () => {
     await mountBar()
     await openMenu()
-    const item = wrapper!.findAll('.menu-item')[0].element
+    const item = menuItems()[0].element
     item.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
     await flushPromises()
     expect(wrapper!.find('.search-menu').exists()).toBe(true)
@@ -182,20 +197,27 @@ describe('SearchBar dismissing the panel', () => {
     await input().trigger('keydown', { key: 'Escape' })
     await settle()
     expect(wrapper!.find('.search-menu').exists()).toBe(false)
-    ;(input().element as HTMLInputElement).focus()
+    // Escape keeps the caret in the field (issue #29), so refocusing means
+    // leaving and returning: blur, then focus again.
+    const el = input().element as HTMLInputElement
+    el.blur()
+    el.focus()
     await flushPromises()
     expect(wrapper!.find('.search-menu').exists()).toBe(true)
   })
 })
 
 describe('SearchBar selection and navigation', () => {
-  it('keeps taps in the field working: pressing a suggestion prevents default and navigates', async () => {
+  it('keeps taps in the field working: activating a suggestion prevents default on press and navigates', async () => {
     const router = await mountBar()
     await openMenu()
-    const item = wrapper!.findAll('.menu-item')[0].element
+    const item = menuItems()[1].element
     const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
     item.dispatchEvent(down)
     expect(down.defaultPrevented).toBe(true)
+    // Activation happens on click, not mousedown, so a keyboard-focused
+    // option also activates with Enter (which fires click, not mousedown).
+    item.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await settle()
     expect(router.currentRoute.value.query.q).toBe('hello there')
     expect(wrapper!.find('.search-menu').exists()).toBe(false)
@@ -205,20 +227,22 @@ describe('SearchBar selection and navigation', () => {
     await mountBar()
     await openMenu()
     await input().trigger('keydown', { key: 'ArrowDown' })
-    expect(wrapper!.findAll('.menu-item')[1].classes()).toContain('hovered')
+    expect(menuItems()[1].classes()).toContain('active-row')
     await input().trigger('keydown', { key: 'ArrowDown' })
-    expect(wrapper!.findAll('.menu-item')[0].classes()).toContain('hovered')
+    expect(menuItems()[2].classes()).toContain('active-row')
+    await input().trigger('keydown', { key: 'ArrowDown' })
+    expect(menuItems()[0].classes()).toContain('active-row')
     await input().trigger('keydown', { key: 'ArrowUp' })
-    expect(wrapper!.findAll('.menu-item')[1].classes()).toContain('hovered')
+    expect(menuItems()[2].classes()).toContain('active-row')
   })
 
-  it('commits the active option on enter', async () => {
+  it('commits the active option on enter after explicit keyboard navigation', async () => {
     const router = await mountBar()
     await openMenu()
     await input().trigger('keydown', { key: 'ArrowDown' })
     await input().trigger('keydown', { key: 'Enter' })
     await flushPromises()
-    expect(router.currentRoute.value.query.q).toBe('help me')
+    expect(router.currentRoute.value.query.q).toBe('hello there')
   })
 
   it('submits the typed query when the panel is closed', async () => {
@@ -227,6 +251,115 @@ describe('SearchBar selection and navigation', () => {
     await input().trigger('keydown', { key: 'Enter' })
     await flushPromises()
     expect(router.currentRoute.value.query.q).toBe('wire')
+    expect(wrapper!.find('.search-menu').exists()).toBe(false)
+  })
+})
+
+describe('SearchBar raw query submission (issue #29)', () => {
+  it('submits the raw typed query on enter while the suggestion menu is open', async () => {
+    const router = await mountBar()
+    await openMenu()
+    expect(wrapper!.find('.search-menu').exists()).toBe(true)
+
+    await input().trigger('keydown', { key: 'Enter' })
+    await settle()
+
+    expect(router.currentRoute.value.query.q).toBe('he')
+  })
+
+  it('does not navigate when the query is empty', async () => {
+    const router = await mountBar()
+    await input().trigger('keydown', { key: 'Enter' })
+    await settle()
+    expect(router.currentRoute.value.query.q).toBeUndefined()
+  })
+
+  it('keeps the active search mode when submitting a raw query', async () => {
+    const router = await mountBar('/?mode=semantic')
+    await openMenu()
+    await input().trigger('keydown', { key: 'Enter' })
+    await settle()
+    expect(router.currentRoute.value.query).toMatchObject({ q: 'he', mode: 'semantic' })
+  })
+
+  it('returns to the raw query row after arrowing past the last suggestion', async () => {
+    const router = await mountBar()
+    await openMenu()
+    for (let i = 0; i < 3; i++) await input().trigger('keydown', { key: 'ArrowDown' })
+    expect(menuItems()[0].classes()).toContain('active-row')
+    await input().trigger('keydown', { key: 'Enter' })
+    await settle()
+    expect(router.currentRoute.value.query.q).toBe('he')
+  })
+
+  it('never lets a pointer hover move the keyboard selection', async () => {
+    const router = await mountBar()
+    await openMenu()
+    menuItems()[2].element.dispatchEvent(new MouseEvent('mouseenter'))
+    expect(menuItems()[0].classes()).toContain('active-row')
+    await input().trigger('keydown', { key: 'Enter' })
+    await settle()
+    expect(router.currentRoute.value.query.q).toBe('he')
+  })
+
+  it('submits the raw query when the pinned row is clicked', async () => {
+    const router = await mountBar()
+    await openMenu()
+    menuItems()[0].element.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle()
+    expect(router.currentRoute.value.query.q).toBe('he')
+  })
+
+  it('re-opens a dismissed menu with the arrow keys without losing the query', async () => {
+    const router = await mountBar()
+    await openMenu()
+    await input().trigger('keydown', { key: 'Escape' })
+    await settle()
+    await input().trigger('keydown', { key: 'ArrowDown' })
+    await settle()
+    expect(wrapper!.find('.search-menu').exists()).toBe(true)
+    expect(menuItems()[0].classes()).toContain('active-row')
+    await input().trigger('keydown', { key: 'Enter' })
+    await settle()
+    expect(router.currentRoute.value.query.q).toBe('he')
+  })
+
+  it('exposes combobox and listbox semantics while the menu is open', async () => {
+    await mountBar()
+    await openMenu()
+    const el = input().element as HTMLInputElement
+    expect(el.getAttribute('role')).toBe('combobox')
+    expect(el.getAttribute('aria-expanded')).toBe('true')
+    expect(el.getAttribute('aria-activedescendant')).toBe('search-opt-0')
+    expect(wrapper!.find('[role="listbox"]').attributes('id')).toBe('search-suggestions')
+    expect(wrapper!.findAll('[role="option"]')).toHaveLength(3)
+  })
+
+  it('ignores stale suggestion responses once the query moved on', async () => {
+    await mountBar()
+    suggestMock.mockImplementation((q: string) =>
+      q === 'he'
+        ? new Promise((resolve) => setTimeout(() => resolve({ suggestions }), 300))
+        : Promise.resolve({ suggestions: [] }),
+    )
+    await type('he')
+    await vi.advanceTimersByTimeAsync(150) // first request goes out
+    await type('he extra') // query moved on; second request scheduled
+    await vi.advanceTimersByTimeAsync(300) // second reply lands, stale first reply resolves
+    await flushPromises()
+    expect(suggestMock).toHaveBeenCalledTimes(2)
+    // The stale reply carried suggestions, yet the panel stays closed.
+    expect(wrapper!.find('.search-menu').exists()).toBe(false)
+  })
+
+  it('does not re-open the menu from a response after the field lost focus', async () => {
+    await mountBar()
+    suggestMock.mockResolvedValue({ suggestions })
+    await type('he')
+    ;(input().element as HTMLInputElement).blur()
+    await vi.advanceTimersByTimeAsync(150)
+    await flushPromises()
+    expect(suggestMock).not.toHaveBeenCalled()
     expect(wrapper!.find('.search-menu').exists()).toBe(false)
   })
 })
