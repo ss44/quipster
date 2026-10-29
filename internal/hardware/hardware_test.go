@@ -1,6 +1,9 @@
 package hardware
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestPipelinePerBackend(t *testing.T) {
 	//nolint:govet // field grouping favors readability over optimal alignment.
@@ -212,5 +215,57 @@ func TestDetectWithSelectionDisabled(t *testing.T) {
 	caps, sel := DetectWithSelection("/nonexistent/ffmpeg")
 	if caps.Available() || sel.Available || sel.Requested != "none" {
 		t.Errorf("disabled detect = %+v %+v", caps, sel)
+	}
+}
+
+func TestDetectUnknownHWACCELFallsBackToProbing(t *testing.T) {
+	t.Setenv("HWACCEL", "bogus")
+	// An unrecognized value must not be treated as a forced backend: probing
+	// all backends runs and, with no ffmpeg, ends on the CPU pipeline.
+	if c := Detect("/nonexistent/ffmpeg"); c.Available() {
+		t.Errorf("unknown HWACCEL: got %q, want cpu-only", c.Backend)
+	}
+}
+
+func TestProbeBackendMissingBinary(t *testing.T) {
+	if _, ok := probeBackend("/nonexistent/ffmpeg", BackendNvenc); ok {
+		t.Error("probe must fail when ffmpeg is missing")
+	}
+}
+
+func TestProbeBackendVaapiNeedsRenderNode(t *testing.T) {
+	dev := vaapiDevice()
+	if dev != "" && !strings.HasPrefix(dev, "/dev/dri/renderD") {
+		t.Errorf("vaapiDevice = %q, want a /dev/dri render node", dev)
+	}
+	// The vaapi probe requires a render node, so without one it must fail
+	// before invoking ffmpeg at all. Skip the assertion on machines that do
+	// expose a GPU node, where the synthetic encode decides the outcome.
+	if dev == "" {
+		if _, ok := probeBackend("ffmpeg", BackendVaapi); ok {
+			t.Error("vaapi probe must fail without a render node")
+		}
+	}
+}
+
+func TestStatsNilReceiversAndCounters(t *testing.T) {
+	var s Stats
+	s.RecordHW()
+	s.RecordCPU()
+	s.RecordFallback("", 0)
+	snap := s.Snapshot()
+	if snap.HWEncodes != 1 || snap.CPURenders != 1 || snap.Fallbacks != 1 {
+		t.Errorf("stats = %+v", snap)
+	}
+	if snap.LastFallbackNote != "" {
+		t.Errorf("empty note must not overwrite lastFallbackNote: %q", snap.LastFallbackNote)
+	}
+
+	var nilStats *Stats
+	nilStats.RecordHW()
+	nilStats.RecordCPU()
+	nilStats.RecordFallback("x", 5)
+	if got := nilStats.Snapshot(); got != (StatsSnapshot{}) {
+		t.Errorf("nil stats snapshot = %+v, want zero", got)
 	}
 }
