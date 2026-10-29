@@ -106,7 +106,9 @@ describe('ClipModal preview warning (issue #32)', () => {
   })
 
   afterEach(() => {
-    wrapper.unmount()
+    // Guarded: if beforeEach failed, there is nothing mounted to unmount and
+    // the original failure must not be masked by a teardown error.
+    wrapper?.unmount()
     document.body.innerHTML = ''
   })
 

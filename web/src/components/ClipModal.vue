@@ -98,7 +98,9 @@
           </p>
 
           <p v-if="clipError" class="error-msg">{{ clipError }}</p>
-          <p v-if="previewError" class="error-msg">{{ previewError }}</p>
+          <p v-if="previewFailed" class="error-msg">
+            Preview could not be played in this browser. Try downloading instead.
+          </p>
 
           <div v-if="jobProgress !== null" class="progress">
             <div class="progress-labels">
@@ -162,8 +164,14 @@ const jobProgress = ref<number | null>(null)
 const jobLabel = ref('')
 const previewURL = ref('')
 const previewLoading = ref(false)
-const previewError = ref('')
+const previewFailed = ref(false)
 const posterURL = ref('')
+
+// MediaError codes from the HTMLMediaElement spec. Only MEDIA_ERR_ABORTED is
+// recoverable: it is reported when a media load is cancelled, which happens
+// routinely here because the trim slider swaps the preview URL while the
+// previous load is still in flight.
+const MEDIA_ERR_ABORTED = 1
 
 const cues = computed(() => detail.value?.cues ?? [])
 const selStart = computed(() => cues.value[Math.min(sel.value[0], cues.value.length - 1)]?.start ?? 0)
@@ -202,7 +210,7 @@ async function onOpenClip(e: Event) {
   hit.value = next
   open.value = true
   clipError.value = ''
-  previewError.value = ''
+  previewFailed.value = false
   jobProgress.value = null
   try {
     detail.value = await api.chunk(next.chunkId)
@@ -220,18 +228,12 @@ function updatePreview() {
   previewURL.value = clipStreamURL(hit.value, selStart.value, selEnd.value, 'preview', false)
 }
 
-// MediaError codes from the HTMLMediaElement spec. Only MEDIA_ERR_ABORTED is
-// recoverable: it is reported when a media load is cancelled, which happens
-// routinely here because the trim slider swaps the preview URL while the
-// previous load is still in flight.
-const MEDIA_ERR_ABORTED = 1
-
 function onPreviewLoaded() {
   previewLoading.value = false
   // A successful load clears or prevents the warning: an earlier failure (for
   // example an aborted request while the trim range was adjusted) must not
   // outlive a preview that now plays correctly.
-  previewError.value = ''
+  previewFailed.value = false
 }
 
 function onPreviewError(e: Event) {
@@ -246,7 +248,7 @@ function onPreviewError(e: Event) {
   // the next preview; only genuine failures (unsupported format, decode or
   // network errors) warrant telling the user playback cannot be recovered.
   if (el.error && el.error.code === MEDIA_ERR_ABORTED) return
-  previewError.value = 'Preview could not be played in this browser. Try downloading instead.'
+  previewFailed.value = true
 }
 
 function selectAll() {
