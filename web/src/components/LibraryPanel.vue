@@ -24,15 +24,32 @@
           {{ n('no_subs').toLocaleString() }} without subs
           <span v-if="n('error')" class="stat-error">· {{ n('error') }} failed</span>
         </p>
+        <div v-if="showLibraryFooter" class="stat-footer">
+          <div class="stat-progress-meta">
+            <span>{{ processedCount.toLocaleString() }} of {{ total.toLocaleString() }} files processed</span>
+            <span class="mono">{{ libraryPct }}%</span>
+          </div>
+          <div class="stat-progress"><div class="fill" :style="{ width: `${libraryPct}%` }"></div></div>
+        </div>
       </div>
       <div class="stat">
         <p class="stat-label">Dialogue</p>
         <p class="stat-value">{{ (snap?.lines?.cues ?? 0).toLocaleString() }}<span class="stat-unit">lines</span></p>
         <p class="stat-sub">
-          {{ (snap?.lines?.chunksIndexed ?? 0).toLocaleString() }} of
-          {{ (snap?.lines?.chunks ?? 0).toLocaleString() }} chunks indexed
+          <template v-if="dialogueChunks">
+            {{ dialogueIndexed.toLocaleString() }} of
+            {{ dialogueChunks.toLocaleString() }} chunks indexed
+            <span v-if="dialogueKeepingUp" class="stat-note">· index keeping up with processing</span>
+          </template>
+          <template v-else>No dialogue indexed yet</template>
         </p>
-        <div class="stat-progress"><div class="fill" :style="{ width: `${indexedPct}%` }"></div></div>
+        <div v-if="showDialogueFooter" class="stat-progress">
+          <div
+            class="fill"
+            :class="{ indeterminate: dialogueKeepingUp }"
+            :style="dialogueKeepingUp ? {} : { width: `${dialoguePct}%` }"
+          ></div>
+        </div>
       </div>
       <div class="stat">
         <p class="stat-label">Queue</p>
@@ -44,6 +61,13 @@
             <span v-if="snap?.queue?.error" class="stat-error">· {{ snap.queue.error }} failed</span>
           </template>
         </p>
+        <div v-if="showQueueFooter" class="stat-footer">
+          <div class="stat-progress-meta">
+            <span>{{ queueDoneCount.toLocaleString() }} of {{ queueTotalCount.toLocaleString() }} jobs done</span>
+            <span class="mono">{{ queuePct }}%</span>
+          </div>
+          <div class="stat-progress"><div class="fill" :style="{ width: `${queuePct}%` }"></div></div>
+        </div>
       </div>
       <div class="stat">
         <p class="stat-label">Clip cache</p>
@@ -166,7 +190,41 @@
     <section class="panel jobs">
       <header class="panel-header">
         <span>Recent jobs</span>
+        <span class="panel-hint">{{ filteredJobs.length }} shown</span>
       </header>
+      <div class="jobs-filters">
+        <div class="filter-row" role="group" aria-label="Filter jobs by status">
+          <span class="filter-label">Status</span>
+          <button
+            v-for="opt in statusOptions"
+            :key="opt.value"
+            type="button"
+            class="filter-chip"
+            :class="{ active: statusFilter === opt.value }"
+            :aria-pressed="statusFilter === opt.value"
+            @click="statusFilter = opt.value"
+          >
+            <span v-if="opt.dot" class="status-dot" :class="opt.dot"></span>
+            {{ opt.label }}
+            <span class="chip-count">{{ opt.count }}</span>
+          </button>
+        </div>
+        <div class="filter-row" role="group" aria-label="Filter jobs by type">
+          <span class="filter-label">Type</span>
+          <button
+            v-for="opt in typeOptions"
+            :key="opt.value"
+            type="button"
+            class="filter-chip"
+            :class="{ active: activeTypeFilter === opt.value }"
+            :aria-pressed="activeTypeFilter === opt.value"
+            @click="typeFilter = opt.value"
+          >
+            {{ opt.label }}
+            <span class="chip-count">{{ opt.count }}</span>
+          </button>
+        </div>
+      </div>
       <div class="table-wrap">
         <table class="jobs-table">
           <thead>
@@ -181,7 +239,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="job in (snap?.recentJobs ?? [])" :key="job.id">
+            <tr v-for="job in filteredJobs" :key="job.id">
               <td class="mono">{{ job.type }}</td>
               <td>
                 <span class="file-title truncate">{{ job.mediaTitle || fileBase(job.mediaPath) || '—' }}</span>
@@ -200,7 +258,8 @@
             </tr>
           </tbody>
         </table>
-        <p v-if="!snap?.recentJobs?.length" class="idle">No jobs yet — run a scan to populate the queue.</p>
+        <p v-if="!recentJobs.length" class="idle">No jobs yet — run a scan to populate the queue.</p>
+        <p v-else-if="!filteredJobs.length" class="idle">No jobs match the current filter.</p>
       </div>
     </section>
 
@@ -256,11 +315,107 @@ const scanPct = computed(() => {
   if (!scan || !scan.filesSeen) return scan ? 5 : 0
   return Math.min(100, Math.round((scan.filesDone / Math.max(scan.filesSeen, 1)) * 100))
 })
-const indexedPct = computed(() => {
-  const lines = snap.value?.lines
-  if (!lines || !lines.chunks) return 0
-  return Math.round((lines.chunksIndexed / lines.chunks) * 100)
+
+// --- background work visibility --------------------------------------------
+// The scan snapshot only exists while a scan is running (RunningScan returns
+// status='running' rows), so its presence means the walker is active.
+const scanActive = computed(() => !!snap.value?.scan)
+const queueActive = computed(
+  () => (snap.value?.queue?.queued ?? 0) + (snap.value?.queue?.running ?? 0) > 0,
+)
+// Media still awaiting their probe; their outcome is the library's open work.
+const pendingCount = computed(() => n('pending'))
+// Files that reached a terminal state: searchable, no subtitles, or failed.
+const processedCount = computed(() => n('indexed') + n('no_subs') + n('error'))
+const workActive = computed(() => scanActive.value || queueActive.value || pendingCount.value > 0)
+
+// Library footer: the unit of work is one discovered media file reaching a
+// terminal status. Shown only while ingestion work is still open so a settled
+// library never implies more work is pending.
+const showLibraryFooter = computed(() => (pendingCount.value > 0 || scanActive.value) && total.value > 0)
+const libraryPct = computed(() =>
+  total.value ? Math.min(100, Math.round((processedCount.value / total.value) * 100)) : 0,
+)
+
+// Queue footer: the unit of work is one job reaching done or error. Shown only
+// while jobs are queued or running so drained queues stay uncluttered; done
+// and error are both terminal outcomes of the same unit.
+const queueDoneCount = computed(() => (snap.value?.queue?.done ?? 0) + (snap.value?.queue?.error ?? 0))
+const queueTotalCount = computed(
+  () => queueDoneCount.value + (snap.value?.queue?.queued ?? 0) + (snap.value?.queue?.running ?? 0),
+)
+const showQueueFooter = computed(() => queueActive.value && queueTotalCount.value > 0)
+const queuePct = computed(() =>
+  queueTotalCount.value ? Math.min(100, Math.round((queueDoneCount.value / queueTotalCount.value) * 100)) : 0,
+)
+
+// Dialogue footer: the unit of work is one subtitle chunk pushed into
+// Meilisearch. A solid 100% bar only appears once the library is settled;
+// while probes and scans keep producing chunks, an indeterminate strip signals
+// the index is keeping up instead of claiming completion. With no chunks at
+// all the footer is hidden because 0/0 progress means nothing.
+const dialogueChunks = computed(() => snap.value?.lines?.chunks ?? 0)
+const dialogueIndexed = computed(() => snap.value?.lines?.chunksIndexed ?? 0)
+const dialoguePartial = computed(() => dialogueChunks.value > 0 && dialogueIndexed.value < dialogueChunks.value)
+const dialogueCaughtUp = computed(() => dialogueChunks.value > 0 && dialogueIndexed.value >= dialogueChunks.value)
+const dialogueKeepingUp = computed(() => dialogueCaughtUp.value && workActive.value)
+const showDialogueFooter = computed(() => dialoguePartial.value || dialogueCaughtUp.value)
+const dialoguePct = computed(() =>
+  dialogueChunks.value ? Math.min(100, Math.round((dialogueIndexed.value / dialogueChunks.value) * 100)) : 0,
+)
+
+// --- recent jobs filtering ---------------------------------------------------
+// Filters operate on the snapshot's recent window; chips carry live counts so
+// empty results are expected before clicking rather than surprising.
+type JobStatusFilter = 'all' | 'queued' | 'running' | 'done' | 'error'
+const recentJobs = computed(() => snap.value?.recentJobs ?? [])
+const statusFilter = ref<JobStatusFilter>('all')
+const typeFilter = ref('all')
+
+interface FilterOption<V = string> {
+  value: V
+  label: string
+  dot?: string
+  count: number
+}
+
+const statusOptions = computed<FilterOption<JobStatusFilter>[]>(() => {
+  const counts = new Map<string, number>()
+  for (const j of recentJobs.value) counts.set(j.status, (counts.get(j.status) ?? 0) + 1)
+  const count = (value: JobStatusFilter) =>
+    value === 'all' ? recentJobs.value.length : (counts.get(value) ?? 0)
+  return [
+    { value: 'all', label: 'All', count: count('all') },
+    { value: 'queued', label: 'Queued', count: count('queued') },
+    { value: 'running', label: 'Running', dot: 'run', count: count('running') },
+    { value: 'done', label: 'Done', dot: 'ok', count: count('done') },
+    { value: 'error', label: 'Failed', dot: 'err', count: count('error') },
+  ]
 })
+
+const typeOptions = computed<FilterOption[]>(() => {
+  const counts = new Map<string, number>()
+  for (const j of recentJobs.value) counts.set(j.type, (counts.get(j.type) ?? 0) + 1)
+  const types = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  return [
+    { value: 'all', label: 'All', count: recentJobs.value.length },
+    ...types.map(([type, n]) => ({ value: type, label: type, count: n })),
+  ]
+})
+
+// A type chip disappears when its jobs roll out of the recent window; fall
+// back to "all" rather than silently filtering everything away.
+const activeTypeFilter = computed(() =>
+  typeOptions.value.some((o) => o.value === typeFilter.value) ? typeFilter.value : 'all',
+)
+
+const filteredJobs = computed(() =>
+  recentJobs.value.filter(
+    (j) =>
+      (statusFilter.value === 'all' || j.status === statusFilter.value) &&
+      (activeTypeFilter.value === 'all' || j.type === activeTypeFilter.value),
+  ),
+)
 
 let lastRawSnap = ''
 
@@ -497,6 +652,20 @@ function fmtBytes(bytes: number): string {
 .stat-error {
   color: #fca5a5;
 }
+.stat-note {
+  color: var(--accent);
+}
+.stat-footer {
+  margin-top: 10px;
+}
+.stat-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 5px;
+  font-size: 10.5px;
+  color: var(--faint);
+}
 .stat-progress {
   height: 3px;
   margin-top: 10px;
@@ -509,6 +678,28 @@ function fmtBytes(bytes: number): string {
   background: var(--accent);
   border-radius: 2px;
   transition: width 0.4s ease;
+}
+/* Indeterminate strip: sliding shimmer instead of a fake 100% fill while
+   the index keeps up with still-running media processing. */
+.stat-progress .fill.indeterminate {
+  width: 40%;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  transition: none;
+  animation: stat-sweep 1.4s ease-in-out infinite;
+}
+@keyframes stat-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stat-progress .fill.indeterminate {
+    animation: none;
+    opacity: 0.55;
+  }
 }
 .admin-grid {
   display: grid;
@@ -671,6 +862,61 @@ function fmtBytes(bytes: number): string {
 }
 .jobs {
   margin-top: 0;
+}
+.jobs-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.filter-label {
+  flex: none;
+  width: 42px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.filter-chip:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.filter-chip.active {
+  color: var(--text);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+.filter-chip .status-dot {
+  flex: none;
+}
+.chip-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--faint);
+}
+.filter-chip.active .chip-count {
+  color: var(--accent);
 }
 .table-wrap {
   overflow-x: auto;
