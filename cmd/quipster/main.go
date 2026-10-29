@@ -228,7 +228,7 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	})
 	thumbSvc := &thumbs.Service{St: st, CacheDir: cfg.cacheDir, Hw: hw}
 	searchSvc := search.New(st, ix)
-	collector := &events.Collector{St: st, MeiliUp: ix.Healthy}
+	collector := &events.Collector{St: st, MeiliUp: ix.Healthy, CacheMaxBytes: lru.MaxBytes}
 	diag := diagnostics.New(st, hw, cfg.logs, ix.Healthy, version, cfg.dataDir, cfg.cacheDir, cfg.mediaDir)
 
 	runner := jobs.NewRunner(st, "worker")

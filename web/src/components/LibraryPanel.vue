@@ -24,7 +24,7 @@
           {{ n('no_subs').toLocaleString() }} without subs
           <span v-if="n('error')" class="stat-error">· {{ n('error') }} failed</span>
         </p>
-        <div v-if="showLibraryFooter" class="stat-footer">
+        <div class="stat-footer">
           <div class="stat-progress-meta">
             <span>{{ processedCount.toLocaleString() }} of {{ total.toLocaleString() }} files processed</span>
             <span class="mono">{{ libraryPct }}%</span>
@@ -36,19 +36,23 @@
         <p class="stat-label">Dialogue</p>
         <p class="stat-value">{{ (snap?.lines?.cues ?? 0).toLocaleString() }}<span class="stat-unit">lines</span></p>
         <p class="stat-sub">
-          <template v-if="dialogueChunks">
-            {{ dialogueIndexed.toLocaleString() }} of
-            {{ dialogueChunks.toLocaleString() }} chunks indexed
-            <span v-if="dialogueKeepingUp" class="stat-note">· index keeping up with processing</span>
-          </template>
-          <template v-else>No dialogue indexed yet</template>
+          <span v-if="!dialogueChunks">No dialogue indexed yet</span>
+          <span v-else-if="dialogueKeepingUp" class="stat-note">index keeping up with processing</span>
+          <span v-else-if="dialoguePartial">{{ dialogueWaiting.toLocaleString() }} chunks waiting to be indexed</span>
+          <span v-else>All chunks searchable</span>
         </p>
-        <div v-if="showDialogueFooter" class="stat-progress">
-          <div
-            class="fill"
-            :class="{ indeterminate: dialogueKeepingUp }"
-            :style="dialogueKeepingUp ? {} : { width: `${dialoguePct}%` }"
-          ></div>
+        <div class="stat-footer">
+          <div class="stat-progress-meta">
+            <span>{{ dialogueIndexed.toLocaleString() }} of {{ dialogueChunks.toLocaleString() }} chunks indexed</span>
+            <span class="mono">{{ dialoguePct }}%</span>
+          </div>
+          <div class="stat-progress">
+            <div
+              class="fill"
+              :class="{ indeterminate: dialogueKeepingUp }"
+              :style="dialogueKeepingUp ? {} : { width: `${dialoguePct}%` }"
+            ></div>
+          </div>
         </div>
       </div>
       <div class="stat">
@@ -61,7 +65,7 @@
             <span v-if="snap?.queue?.error" class="stat-error">· {{ snap.queue.error }} failed</span>
           </template>
         </p>
-        <div v-if="showQueueFooter" class="stat-footer">
+        <div class="stat-footer">
           <div class="stat-progress-meta">
             <span>{{ queueDoneCount.toLocaleString() }} of {{ queueTotalCount.toLocaleString() }} jobs done</span>
             <span class="mono">{{ queuePct }}%</span>
@@ -73,6 +77,15 @@
         <p class="stat-label">Clip cache</p>
         <p class="stat-value">{{ fmtBytes(snap?.cacheBytes ?? 0) }}</p>
         <p class="stat-sub">Clips, thumbnails and extracted subtitles, LRU-evicted.</p>
+        <div class="stat-footer">
+          <div class="stat-progress-meta">
+            <span v-if="cacheMaxBytes">{{ fmtBytes(cacheUsedBytes) }} of {{ fmtBytes(cacheMaxBytes) }} used</span>
+            <span v-else>{{ fmtBytes(cacheUsedBytes) }} used · no limit</span>
+            <span v-if="cacheMaxBytes" class="mono">{{ cachePct }}%</span>
+            <span v-else class="mono">—</span>
+          </div>
+          <div class="stat-progress"><div class="fill" :style="{ width: `${cachePct}%` }"></div></div>
+        </div>
       </div>
     </section>
 
@@ -329,43 +342,51 @@ const pendingCount = computed(() => n('pending'))
 const processedCount = computed(() => n('indexed') + n('no_subs') + n('error'))
 const workActive = computed(() => scanActive.value || queueActive.value || pendingCount.value > 0)
 
-// Library footer: the unit of work is one discovered media file reaching a
-// terminal status. Shown whenever there is anything to convey — files exist
-// or ingestion is still open (pending media, active scan) — so the bar is
-// always visible while the library is in use. With no rows yet during a scan
-// walk the bar reads 0% instead of claiming completion.
-const libraryWorkOpen = computed(() => pendingCount.value > 0 || scanActive.value)
-const showLibraryFooter = computed(() => total.value > 0 || libraryWorkOpen.value)
-const libraryPct = computed(() =>
-  total.value ? Math.min(100, Math.round((processedCount.value / total.value) * 100)) : 0,
-)
+// Every stat card carries the same bottom-pinned footer (unit line + bar) so
+// the bars line up across the row regardless of how the sub lines wrap.
 
-// Queue footer: the unit of work is one job reaching done or error; done and
-// error are both terminal outcomes of the same unit. Shown whenever queue
-// stats exist, with an empty queue (0 of 0) rendered as a full bar because
-// there is nothing left to do.
-const queueDoneCount = computed(() => (snap.value?.queue?.done ?? 0) + (snap.value?.queue?.error ?? 0))
-const queueTotalCount = computed(
-  () => queueDoneCount.value + (snap.value?.queue?.queued ?? 0) + (snap.value?.queue?.running ?? 0),
-)
-const showQueueFooter = computed(() => !!snap.value?.queue)
-const queuePct = computed(() =>
-  queueTotalCount.value ? Math.min(100, Math.round((queueDoneCount.value / queueTotalCount.value) * 100)) : 100,
-)
+// Library footer: the unit of work is one discovered media file reaching a
+// terminal status. With no rows yet the bar stays at 0% while a scan walks
+// and reads 100% only when an empty library is idle (nothing to process).
+const libraryWorkOpen = computed(() => pendingCount.value > 0 || scanActive.value)
+const libraryPct = computed(() => {
+  if (!total.value) return libraryWorkOpen.value ? 0 : 100
+  return Math.min(100, Math.round((processedCount.value / total.value) * 100))
+})
 
 // Dialogue footer: the unit of work is one subtitle chunk pushed into
 // Meilisearch. A solid 100% bar only appears once the library is settled;
 // while probes and scans keep producing chunks, an indeterminate strip signals
 // the index is keeping up instead of claiming completion. With no chunks at
-// all the footer is hidden because 0/0 progress means nothing.
+// all the bar stays empty because a full bar there would be meaningless.
 const dialogueChunks = computed(() => snap.value?.lines?.chunks ?? 0)
 const dialogueIndexed = computed(() => snap.value?.lines?.chunksIndexed ?? 0)
+const dialogueWaiting = computed(() => Math.max(0, dialogueChunks.value - dialogueIndexed.value))
 const dialoguePartial = computed(() => dialogueChunks.value > 0 && dialogueIndexed.value < dialogueChunks.value)
-const dialogueCaughtUp = computed(() => dialogueChunks.value > 0 && dialogueIndexed.value >= dialogueChunks.value)
-const dialogueKeepingUp = computed(() => dialogueCaughtUp.value && workActive.value)
-const showDialogueFooter = computed(() => dialoguePartial.value || dialogueCaughtUp.value)
+const dialogueKeepingUp = computed(
+  () => dialogueChunks.value > 0 && dialogueIndexed.value >= dialogueChunks.value && workActive.value,
+)
 const dialoguePct = computed(() =>
   dialogueChunks.value ? Math.min(100, Math.round((dialogueIndexed.value / dialogueChunks.value) * 100)) : 0,
+)
+
+// Queue footer: the unit of work is one job reaching done or error; done and
+// error are both terminal outcomes of the same unit. An empty queue (0 of 0)
+// renders as a full bar because there is nothing left to do.
+const queueDoneCount = computed(() => (snap.value?.queue?.done ?? 0) + (snap.value?.queue?.error ?? 0))
+const queueTotalCount = computed(
+  () => queueDoneCount.value + (snap.value?.queue?.queued ?? 0) + (snap.value?.queue?.running ?? 0),
+)
+const queuePct = computed(() =>
+  queueTotalCount.value ? Math.min(100, Math.round((queueDoneCount.value / queueTotalCount.value) * 100)) : 100,
+)
+
+// Clip cache footer: the unit is one byte of configured cache quota. Without
+// a configured limit (CACHE_MAX_GB=0) usage is shown without a fill fraction.
+const cacheUsedBytes = computed(() => snap.value?.cacheBytes ?? 0)
+const cacheMaxBytes = computed(() => snap.value?.cacheMaxBytes ?? 0)
+const cachePct = computed(() =>
+  cacheMaxBytes.value ? Math.min(100, Math.round((cacheUsedBytes.value / cacheMaxBytes.value) * 100)) : 0,
 )
 
 // --- recent jobs filtering ---------------------------------------------------
@@ -624,6 +645,10 @@ function fmtBytes(bytes: number): string {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 14px 16px;
+  /* Column flex lets the footer stick to the card bottom so every bar in
+     the row sits on the same line regardless of sub-line wrapping. */
+  display: flex;
+  flex-direction: column;
 }
 .stat-label {
   margin: 0 0 8px;
@@ -660,7 +685,8 @@ function fmtBytes(bytes: number): string {
   color: var(--accent);
 }
 .stat-footer {
-  margin-top: 10px;
+  margin-top: auto;
+  padding-top: 12px;
 }
 .stat-progress-meta {
   display: flex;
@@ -672,10 +698,12 @@ function fmtBytes(bytes: number): string {
 }
 .stat-progress {
   height: 3px;
-  margin-top: 10px;
   border-radius: 2px;
   background: rgba(255, 255, 255, 0.07);
   overflow: hidden;
+}
+.stat-footer .stat-progress {
+  margin-top: 0;
 }
 .stat-progress .fill {
   height: 100%;

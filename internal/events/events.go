@@ -24,7 +24,10 @@ type Snapshot struct {
 	Recent      []store.Job      `json:"recentJobs"`
 	Running     []store.Job      `json:"runningJobs"`
 	CacheBytes  int64            `json:"cacheBytes"`
-	MeiliUp     bool             `json:"meiliUp"`
+	// CacheMaxBytes is the configured clip-cache quota in bytes; zero means
+	// unlimited, so the UI shows usage without a fill fraction.
+	CacheMaxBytes int64 `json:"cacheMaxBytes"`
+	MeiliUp       bool  `json:"meiliUp"`
 }
 
 // Collector gathers a Snapshot from the store on demand and serves it as SSE.
@@ -34,8 +37,11 @@ type Collector struct {
 	notifyCh chan struct{}
 	state    []byte
 	users    int
-	once     sync.Once
-	mu       sync.Mutex
+	// CacheMaxBytes is the fixed cache quota from configuration; the value
+	// never changes at runtime because it comes from environment config.
+	CacheMaxBytes int64
+	once          sync.Once
+	mu            sync.Mutex
 }
 
 // Collect builds a snapshot of current scan/queue/media state. Individual
@@ -55,6 +61,7 @@ func (c *Collector) Collect() *Snapshot {
 	if cb, err := c.St.CacheBytes("clip", "thumb", "sub"); err == nil {
 		snap.CacheBytes = cb
 	}
+	snap.CacheMaxBytes = c.CacheMaxBytes
 	if ls, err := c.St.LineStats(); err == nil {
 		snap.Lines = ls
 	}
