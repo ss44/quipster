@@ -51,26 +51,23 @@
 
 ## Screenshots
 
-Captured from a live instance — see **[SCREENSHOTS.md](SCREENSHOTS.md)** for the full gallery and
-feature close-ups. Inline images are downsized WebP previews; click any of them for the full
-1920×1080 PNG.
+See **[SCREENSHOTS.md](SCREENSHOTS.md)** for the full gallery. Click any image for the full 1080p PNG.
 
 | Home page | Search results |
 |---|---|
 | [<img src="docs/screenshots/thumbs/home.webp" width="640" height="360" alt="Home page" loading="lazy">](docs/screenshots/home.png) | [<img src="docs/screenshots/thumbs/search_results.webp" width="640" height="360" alt="Search results" loading="lazy">](docs/screenshots/search_results.png) |
-| The landing view doubles as a search launcher: example quotes pulled from your own library and `/` focuses the search box. | Every spoken line is indexed. Hits show the frame thumbnail, the matched dialogue with highlighted terms, context, and exact timecodes. |
+| Landing view. `/` focuses search. | Every spoken line is indexed: frame, highlighted match, context, timecodes. |
 
 | Clip studio | Admin · Library |
 |---|---|
 | [<img src="docs/screenshots/thumbs/clip_modal.webp" width="640" height="360" alt="Clip studio" loading="lazy">](docs/screenshots/clip_modal.png) | [<img src="docs/screenshots/thumbs/admin_library.webp" width="640" height="360" alt="Admin library" loading="lazy">](docs/screenshots/admin_library.png) |
-| Clicking a hit opens the clip studio on the exact moment: preview the cut, trim by subtitle lines, then copy a link or download. | Library stats, folder selection, scan/reindex/re-probe operations, queue control, and a live feed of ingestion jobs. |
+| Preview the cut, trim by subtitle lines, copy link or download. | Stats, folder selection, scan/reindex/re-probe, queue control, live job feed. |
 
 <p align="center">
   <a href="docs/screenshots/admin_nodes.png"><img src="docs/screenshots/thumbs/admin_nodes.webp" width="640" height="360" alt="Worker nodes" loading="lazy"></a>
 </p>
 <p align="center">
-  <sub><strong>Admin · Nodes</strong> — worker nodes claim probe and clip jobs over HTTP; each row shows
-  live status, current work, and throughput.</sub>
+  <sub><strong>Admin · Nodes</strong> — worker nodes claim probe/clip jobs over HTTP. Live status and progress per node.</sub>
 </p>
 
 ## Demo
