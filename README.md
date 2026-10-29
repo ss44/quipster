@@ -530,7 +530,7 @@ Host-mounted Samba traffic may not appear in container network counters or local
 use host network rates and CIFS statistics for the mounted share rather than treating zero
 container network I/O as proof the app is idle. Low CPU alone does not prove an I/O bottleneck.
 
-### `failed to create mount source path ... mkdir /mnt/plex-library: file exists`
+### `failed to create mount source path ... mkdir /mnt/media-library: file exists`
 
 Docker's daemon runs as root and cannot see or enter FUSE mounts (sshfs/rclone) created by your
 user session — by default only the mounting user may access them. Docker then tries to create the
@@ -539,14 +539,14 @@ root (not a subfolder) and use the library-folders setting:
 
 ```sh
 sudo sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
-fusermount -u /mnt/plex-library
-sshfs -o ro,allow_other,default_permissions bigrig:/media/plex-storage-new /mnt/plex-library
+fusermount -u /mnt/media-library
+sshfs -o ro,allow_other,default_permissions nas.example:/media/storage /mnt/media-library
 ```
 
 Persist it system-wide (requires the `allow_other` line above), e.g. in `/etc/fstab`:
 
 ```ini
-bigrig:/media/plex-storage-new /mnt/plex-library fuse.sshfs ro,allow_other,default_permissions,IdentityFile=/home/shinda/.ssh/id_rsa,_netdev,nofail,x-systemd.automount 0 0
+nas.example:/media/storage /mnt/media-library fuse.sshfs ro,allow_other,default_permissions,IdentityFile=~/.ssh/id_ed25519,_netdev,nofail,x-systemd.automount 0 0
 ```
 
 A kernel NFS mount is preferable to sshfs for throughput if the server exports it. The compose
