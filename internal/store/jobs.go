@@ -129,9 +129,43 @@ func (s *Store) EnqueueUniqueJobs(specs []JobSpec) (int, error) {
 	return created, nil
 }
 
+// hasQueuedJob reports whether a claim could succeed without taking SQLite's
+// single writer lock. Workers poll continuously, so an empty poll must not open
+// a write transaction; WAL readers run alongside the active writer while a
+// BEGIN IMMEDIATE would serialize behind it.
+func (s *Store) hasQueuedJob(ctx context.Context, types []string) (bool, error) {
+	if len(types) == 0 {
+		return false, nil
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(types)), ",")
+	args := make([]any, 0, len(types))
+	for _, t := range types {
+		args = append(args, t)
+	}
+	//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length types slice; values are parameterized.
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM jobs WHERE status='queued' AND type IN (`+ph+`) LIMIT 1`, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ClaimJob atomically claims the next queued job of the given types using a
-// single BEGIN IMMEDIATE transaction with RETURNING.
+// single BEGIN IMMEDIATE transaction with RETURNING. A cheap read-first check
+// avoids opening a write transaction when the queue has no eligible work.
 func (s *Store) ClaimJob(ctx context.Context, workerID string, types []string) (*Job, error) {
+	ok, err := s.hasQueuedJob(ctx, types)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return nil, err

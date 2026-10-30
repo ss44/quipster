@@ -187,6 +187,16 @@ func (r *Runner) handleRunError(j *store.Job, err error) {
 			return
 		}
 	}
+	// Any job canceled by pause, stop or shutdown is a suspension, not a
+	// failure: requeue it without spending an attempt. DeadlineExceeded is
+	// excluded because a job that exhausted its own timeout is a real failure.
+	if errors.Is(err, context.Canceled) {
+		log.Printf("[jobs] job %d (%s) canceled, requeueing without an attempt", j.ID, j.Type)
+		if rerr := r.st.RequeueJobSoft(j.ID, "canceled"); rerr != nil {
+			log.Printf("[jobs] soft requeue error job %d: %v", j.ID, rerr)
+		}
+		return
+	}
 	if j.Attempts < r.maxAttempts {
 		log.Printf("[jobs] job %d (%s) attempt %d failed, requeueing: %v", j.ID, j.Type, j.Attempts, err)
 		if rerr := r.st.RequeueJob(j.ID, err.Error()); rerr != nil {

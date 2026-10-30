@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -485,5 +486,23 @@ func TestReindexAllNoChunks(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("ReindexAll = %d, want 0", n)
+	}
+}
+
+// TestIndexMediaContextCanceled verifies indexing honors the job context
+// before touching Meilisearch, so a paused/stopped queue cannot start new work.
+func TestIndexMediaContextCanceled(t *testing.T) {
+	f := newFakeMeili(t)
+	st := newTestStore(t)
+	id, _ := seedMedia(t, st)
+	ix := New(st, f.url(), "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := ix.IndexMediaContext(ctx, id)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("IndexMediaContext error = %v, want context.Canceled", err)
+	}
+	if got := f.calls("POST", "/indexes/"+IndexName+"/documents"); got != 0 {
+		t.Errorf("canceled indexing must not upload documents, got %d calls", got)
 	}
 }
