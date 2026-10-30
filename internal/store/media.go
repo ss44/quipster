@@ -4,9 +4,15 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"time"
 )
 
 // MediaFile is one media row with its probe metadata and lifecycle status.
+//
+// Archive lifecycle fields are orthogonal to Status: archiving freezes the
+// row's processing status exactly as it was, and restoring resumes it without
+// any reconstruction. Archived is exposed to clients so the admin UI can badge
+// rows; MissingAt and Deindexed are internal latches and stay out of JSON.
 type MediaFile struct {
 	Title            string  `json:"title"`
 	Path             string  `json:"path"`
@@ -17,33 +23,40 @@ type MediaFile struct {
 	ShowTitle        string  `json:"showTitle"`
 	VideoCodec       string  `json:"videoCodec"`
 	AudioCodec       string  `json:"audioCodec"`
+	ID               int64   `json:"id"`
+	Mtime            int64   `json:"mtime"`
+	AddedAt          int64   `json:"addedAt"`
+	SizeBytes        int64   `json:"sizeBytes"`
+	ArchivedAt       int64   `json:"archivedAt"`
+	MissingAt        int64   `json:"-"`
+	DurationSec      float64 `json:"durationSec"`
+	StartTime        float64 `json:"startTime"`
 	Width            int     `json:"width"`
 	Year             int     `json:"year"`
 	Height           int     `json:"height"`
 	Season           int     `json:"season"`
 	Episode          int     `json:"episode"`
-	Mtime            int64   `json:"mtime"`
-	ID               int64   `json:"id"`
-	DurationSec      float64 `json:"durationSec"`
-	AddedAt          int64   `json:"addedAt"`
-	StartTime        float64 `json:"startTime"`
 	AudioStreamIndex int     `json:"audioStreamIndex"`
-	SizeBytes        int64   `json:"sizeBytes"`
+	Archived         bool    `json:"archived"`
+	Deindexed        bool    `json:"-"`
 }
 
 const mediaCols = `id, path, container, size_bytes, duration_sec, width, height, video_codec, audio_codec,
 	title, year, show_title, season, episode, mtime, status, error, added_at, start_time,
-	audio_stream_index, audio_lang`
+	audio_stream_index, audio_lang, archived, archived_at, missing_at, deindexed`
 
 func scanMedia(row interface{ Scan(...any) error }) (*MediaFile, error) {
 	var m MediaFile
+	var archived, deindexed int64
 	err := row.Scan(&m.ID, &m.Path, &m.Container, &m.SizeBytes, &m.DurationSec, &m.Width, &m.Height,
 		&m.VideoCodec, &m.AudioCodec, &m.Title, &m.Year, &m.ShowTitle, &m.Season, &m.Episode,
 		&m.Mtime, &m.Status, &m.Error, &m.AddedAt, &m.StartTime,
-		&m.AudioStreamIndex, &m.AudioLang)
+		&m.AudioStreamIndex, &m.AudioLang, &archived, &m.ArchivedAt, &m.MissingAt, &deindexed)
 	if err != nil {
 		return nil, err
 	}
+	m.Archived = archived > 0
+	m.Deindexed = deindexed > 0
 	return &m, nil
 }
 
@@ -232,14 +245,25 @@ type MediaListPage struct {
 
 // ListMedia lists media rows newest-title first, optionally filtered by a
 // LIKE search on title, show title, and path.
-func (s *Store) ListMedia(limit, offset int, q string) (*MediaListPage, error) {
-	countQ := `SELECT COUNT(*) FROM media_files`
-	listQ := `SELECT ` + mediaCols + ` FROM media_files ORDER BY title, show_title, season, episode LIMIT ? OFFSET ?`
+//
+// archived selects the archive slice: "1" lists only archived rows, "any"
+// lists everything, and every other value (including empty) lists active rows
+// only, so ordinary library views never surface archived content.
+func (s *Store) ListMedia(limit, offset int, q, archived string) (*MediaListPage, error) {
+	where := "archived = 0"
+	switch archived {
+	case "1":
+		where = "archived = 1"
+	case "any":
+		where = "1 = 1"
+	}
+	countQ := `SELECT COUNT(*) FROM media_files WHERE ` + where
+	listQ := `SELECT ` + mediaCols + ` FROM media_files WHERE ` + where + ` ORDER BY title, show_title, season, episode LIMIT ? OFFSET ?`
 	args := []any{}
 	if q != "" {
 		like := "%" + q + "%"
-		countQ = `SELECT COUNT(*) FROM media_files WHERE (title LIKE ? OR show_title LIKE ? OR path LIKE ?)`
-		listQ = `SELECT ` + mediaCols + ` FROM media_files WHERE (title LIKE ? OR show_title LIKE ? OR path LIKE ?) ORDER BY title, show_title, season, episode LIMIT ? OFFSET ?`
+		countQ = `SELECT COUNT(*) FROM media_files WHERE ` + where + ` AND (title LIKE ? OR show_title LIKE ? OR path LIKE ?)`
+		listQ = `SELECT ` + mediaCols + ` FROM media_files WHERE ` + where + ` AND (title LIKE ? OR show_title LIKE ? OR path LIKE ?) ORDER BY title, show_title, season, episode LIMIT ? OFFSET ?`
 		args = append(args, like, like, like)
 	}
 	var total int64
@@ -262,33 +286,271 @@ func (s *Store) ListMedia(limit, offset int, q string) (*MediaListPage, error) {
 	return page, rows.Err()
 }
 
-// DeleteMissingUnder removes media rows under base whose paths are not in keep.
-func (s *Store) DeleteMissingUnder(base string, keep map[string]bool) ([]int64, error) {
+// ArchiveMissingUnder implements scan pruning without deletion. Rows under
+// base that the scan did not see are partitioned by the archive grace window:
+// first-time absences only latch missing_at, absences inside the grace window
+// are left untouched, and absences older than the grace window are archived.
+// Archived rows are skipped entirely so repeated scans of a long-gone share
+// stay free. Rows that ARE in keep are never touched.
+//
+// The UPDATE statements deliberately avoid rewriting status: an archived row
+// keeps its pre-archive processing status frozen, so a later restore resumes
+// the exact prior lifecycle without reconstruction.
+//
+// Returns the ids archived in this pass (which the caller turns into
+// de-index jobs) and the number of rows that merely latched missing_at.
+func (s *Store) ArchiveMissingUnder(base string, keep map[string]bool, grace time.Duration, now time.Time) (archived []int64, newlyMissing int, err error) {
 	base = strings.TrimSuffix(base, "/")
-	rows, err := s.db.Query(`SELECT id, path FROM media_files WHERE path LIKE ?`, base+"/%")
+	rows, err := s.db.Query(`SELECT id, path, archived, missing_at FROM media_files WHERE path LIKE ?`, base+"/%")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	var remove []int64
+	var latch, archive []int64
 	for rows.Next() {
 		var id int64
 		var p string
-		if err := rows.Scan(&id, &p); err != nil {
+		var isArchived, missingAt int64
+		if err := rows.Scan(&id, &p, &isArchived, &missingAt); err != nil {
 			closeRows(rows)
-			return nil, err
+			return nil, 0, err
 		}
-		if !keep[p] {
-			remove = append(remove, id)
+		if keep[p] || isArchived > 0 {
+			continue
 		}
+		if missingAt == 0 {
+			latch = append(latch, id)
+			continue
+		}
+		if now.UnixMilli()-missingAt >= grace.Milliseconds() {
+			archive = append(archive, id)
+		}
+		// Inside the grace window: keep running the clock from the first
+		// observation; refreshing missing_at here would make the window
+		// indeterminate for shares that flap every scan.
 	}
 	closeRows(rows)
 	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	nowMs := now.UnixMilli()
+	if err := updateIDsBatched(s.db, `UPDATE media_files SET missing_at=? WHERE id IN (`, nowMs, latch); err != nil {
+		return archived, 0, err
+	}
+	if err := updateIDsBatched(s.db, `UPDATE media_files SET archived=1, archived_at=?, deindexed=0 WHERE id IN (`, nowMs, archive); err != nil {
+		return archived, len(latch), err
+	}
+	return archive, len(latch), nil
+}
+
+// RestoreSeenUnder re-activates rows for paths the scan saw again. It is the
+// mirror of ArchiveMissingUnder and is safe to run even after an incomplete
+// walk: a seen path was genuinely observed, so clearing its absence state
+// cannot hide a real disappearance.
+//
+// Restoring an archived row clears the archive flags and always resets the
+// chunk index flags so the normal index job re-adds its documents. The reset
+// is unconditional because deindexed is not a reliable record of what Meili
+// still holds: a de-index job that crashed after deleting documents but before
+// MarkMediaDeindexed leaves deindexed=0 with the documents gone, and restored
+// rows have no boot reconciliation pass. The cost is at most one redundant
+// reindex per restore; the alternative is a permanently dark row in search.
+func (s *Store) RestoreSeenUnder(base string, keep map[string]bool) (needsReindex []int64, restored int, err error) {
+	base = strings.TrimSuffix(base, "/")
+	rows, err := s.db.Query(`SELECT id, path, archived FROM media_files
+		WHERE path LIKE ? AND (missing_at != 0 OR archived = 1)`, base+"/%")
+	if err != nil {
+		return nil, 0, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var p string
+		var isArchived int64
+		if scanErr := rows.Scan(&id, &p, &isArchived); scanErr != nil {
+			closeRows(rows)
+			return nil, 0, scanErr
+		}
+		if keep[p] {
+			ids = append(ids, id)
+		}
+	}
+	closeRows(rows)
+	if err = rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	reindex, n, rerr := s.restoreMediaIDs(ids)
+	return reindex, n, rerr
+}
+
+// RestoreMedia re-activates one media row (admin action). A row that is not
+// archived is a no-op; restoring a row whose file is still absent is allowed
+// and safe: search re-activates from stored captions immediately, clip
+// requests fail until the file exists again, and a still-absent file is
+// simply archived again after the grace window on a later scan.
+func (s *Store) RestoreMedia(id int64) (needsReindex, restored bool, err error) {
+	reindex, n, err := s.restoreMediaIDs([]int64{id})
+	if err != nil {
+		return false, false, err
+	}
+	return len(reindex) > 0, n > 0, nil
+}
+
+// restoreMediaIDs applies the restore transition to the given ids in bounded
+// batches. Returns the ids that need an index job re-enqueued, plus how many
+// rows were actually archived before this call.
+//
+// Every restored row is marked for re-indexing, not just the ones with
+// deindexed=1: a de-index job can have deleted the Meili documents and then
+// crashed before MarkMediaDeindexed, leaving a restored row with deindexed=0
+// and no documents. Re-activating such a row without reindexing would leave it
+// permanently dark in search, and restored rows have no boot reconciliation
+// pass. The cost is at most one redundant reindex per restore; the alternative
+// is a permanently dark row in search.
+func (s *Store) restoreMediaIDs(ids []int64) (needsReindex []int64, restored int, err error) {
+	if len(ids) == 0 {
+		return nil, 0, nil
+	}
+	ph := placeholders(len(ids))
+	args := idArgs(ids)
+	//nolint:gosec // the concatenated part is a "?" placeholder list sized by len(ids); values are parameterized.
+	rows, err := s.db.Query(`SELECT id FROM media_files WHERE id IN (`+ph+`) AND archived=1`, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	var archivedIDs []int64
+	for rows.Next() {
+		var id int64
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			closeRows(rows)
+			return nil, 0, scanErr
+		}
+		archivedIDs = append(archivedIDs, id)
+	}
+	closeRows(rows)
+	if err = rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	// Make the normal index job re-add every chunk from the retained captions.
+	// The index job re-uses the doc-id scheme, so the re-add is a plain upload
+	// per chunk: no probe, no extraction, no re-read of the media file.
+	if len(archivedIDs) > 0 {
+		if cerr := clearChunkFlagsBatched(s.db, archivedIDs); cerr != nil {
+			return nil, 0, cerr
+		}
+	}
+	needsReindex = archivedIDs
+	restored, err = s.clearArchiveFlagsBatched(archivedIDs)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Clear stale absence latches on rows that were missing but never archived.
+	if lerr := updateIDsBatched(s.db, `UPDATE media_files SET missing_at=? WHERE archived=0 AND id IN (`, 0, ids); lerr != nil {
+		return nil, 0, lerr
+	}
+	return needsReindex, restored, nil
+}
+
+// clearArchiveFlagsBatched re-activates archived rows in bounded batches and
+// returns how many rows transitioned.
+func (s *Store) clearArchiveFlagsBatched(ids []int64) (int, error) {
+	const batch = 400
+	restored := 0
+	for start := 0; start < len(ids); start += batch {
+		end := min(start+batch, len(ids))
+		chunk := ids[start:end]
+		ph := placeholders(len(chunk))
+		args := idArgs(chunk)
+		//nolint:gosec // only a parameter placeholder list is concatenated; ids are bound values.
+		res, err := s.db.Exec(`UPDATE media_files
+			SET archived=0, archived_at=0, missing_at=0, deindexed=0
+			WHERE id IN (`+ph+`) AND archived=1`, args...)
+		if err != nil {
+			return restored, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return restored, err
+		}
+		restored += int(n)
+	}
+	return restored, nil
+}
+
+// MarkMediaDeindexed latches that a media's Meili documents were removed. The
+// archived=1 guard keeps a de-index that raced a restore from latching a
+// stale flag onto a re-activated row.
+func (s *Store) MarkMediaDeindexed(id int64) error {
+	_, err := s.db.Exec(`UPDATE media_files SET deindexed=1 WHERE id=? AND archived=1`, id)
+	return err
+}
+
+// ArchivedPendingDeindex lists archived media whose Meili documents have not
+// been confirmed removed, for boot-time reconciliation.
+func (s *Store) ArchivedPendingDeindex() ([]int64, error) {
+	rows, err := s.db.Query(`SELECT id FROM media_files WHERE archived=1 AND deindexed=0 ORDER BY id`)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.DeleteMediaIDs(remove); err != nil {
-		return remove, err
+	defer closeRows(rows)
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
 	}
-	return remove, nil
+	return out, rows.Err()
+}
+
+// updateIDsBatched runs one statement per chunk of ids, staying well inside
+// SQLite's variable limit so large prunes and restores collapse into a
+// handful of transactions. The prefix must end with "IN (" and is completed
+// with the placeholder list.
+func updateIDsBatched(db *sql.DB, prefix string, arg any, ids []int64) error {
+	const batch = 400
+	for start := 0; start < len(ids); start += batch {
+		end := min(start+batch, len(ids))
+		chunk := ids[start:end]
+		ph := placeholders(len(chunk))
+		args := append([]any{arg}, idArgs(chunk)...)
+		//nolint:gosec // only a parameter placeholder list is concatenated; ids are bound values.
+		if _, err := db.Exec(prefix+ph+`)`, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// clearChunkFlagsBatched resets chunk index flags for many media files in
+// bounded batches (restore path).
+func clearChunkFlagsBatched(db *sql.DB, mediaIDs []int64) error {
+	const batch = 400
+	for start := 0; start < len(mediaIDs); start += batch {
+		end := min(start+batch, len(mediaIDs))
+		chunk := mediaIDs[start:end]
+		ph := placeholders(len(chunk))
+		args := idArgs(chunk)
+		//nolint:gosec // only a parameter placeholder list is concatenated; ids are bound values.
+		if _, err := db.Exec(`UPDATE chunks SET indexed_at=0 WHERE media_file_id IN (`+ph+`)`, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// placeholders builds "?,?" repeated n times.
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// idArgs converts ids to driver arguments.
+func idArgs(ids []int64) []any {
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	return args
 }
 
 // DeleteMediaIDs removes media rows in bounded batches. A single DELETE per id
@@ -313,9 +575,11 @@ func (s *Store) DeleteMediaIDs(ids []int64) error {
 	return nil
 }
 
-// MediaStatusCounts returns the number of media rows per status.
+// MediaStatusCounts returns the number of media rows per status. The archive
+// count is reported under the "archived" key so the admin dashboard can show
+// hidden inventory without a second query.
 func (s *Store) MediaStatusCounts() (map[string]int64, error) {
-	rows, err := s.db.Query(`SELECT status, COUNT(*) FROM media_files GROUP BY status`)
+	rows, err := s.db.Query(`SELECT status, COUNT(*) FROM media_files WHERE archived=0 GROUP BY status`)
 	if err != nil {
 		return nil, err
 	}
@@ -329,10 +593,22 @@ func (s *Store) MediaStatusCounts() (map[string]int64, error) {
 		}
 		out[st] = n
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var archivedCount int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM media_files WHERE archived=1`).Scan(&archivedCount); err != nil {
+		return nil, err
+	}
+	out["archived"] = archivedCount
+	return out, nil
 }
 
-// MediaIDsByStatus lists media ids matching any of the given statuses.
+// MediaIDsByStatus lists media ids matching any of the given statuses. Rows
+// that are archived or currently inside an absence grace window are excluded:
+// re-probing an archived row would mutate its frozen status, and probing a
+// file known to be missing only manufactures error rows that outlive the
+// grace window.
 func (s *Store) MediaIDsByStatus(statuses ...string) ([]int64, error) {
 	ph := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
 	args := make([]any, 0, len(statuses))
@@ -340,7 +616,8 @@ func (s *Store) MediaIDsByStatus(statuses ...string) ([]int64, error) {
 		args = append(args, st)
 	}
 	//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length statuses slice; values are parameterized.
-	rows, err := s.db.Query(`SELECT id FROM media_files WHERE status IN (`+ph+`)`, args...)
+	rows, err := s.db.Query(`SELECT id FROM media_files
+		WHERE status IN (`+ph+`) AND archived=0 AND missing_at=0`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -356,13 +633,35 @@ func (s *Store) MediaIDsByStatus(statuses ...string) ([]int64, error) {
 	return out, rows.Err()
 }
 
+// CountMissingByStatus counts non-archived rows matching the given statuses
+// that are inside an absence grace window (missing_at set). MediaIDsByStatus
+// deliberately excludes those rows; this count lets callers surface the skip
+// so a re-probe over a flapping share is not mistaken for a silent no-op.
+func (s *Store) CountMissingByStatus(statuses ...string) (int, error) {
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
+	args := make([]any, 0, len(statuses))
+	for _, st := range statuses {
+		args = append(args, st)
+	}
+	//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length statuses slice; values are parameterized.
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM media_files
+		WHERE status IN (`+ph+`) AND archived=0 AND missing_at!=0`, args...).Scan(&n)
+	return n, err
+}
+
 // TitleMatches lists indexed media whose title or show title contains the
-// query substring (LIKE-based fallback for files without subtitles).
+// query substring (LIKE-based fallback for files without subtitles). Archived
+// rows never match, even though their frozen status still reads 'indexed'.
 func (s *Store) TitleMatches(q string, limit int) ([]MediaFile, error) {
 	like := "%" + q + "%"
 	//nolint:gosec // mediaCols is a fixed constant column list; all query values are parameterized.
 	rows, err := s.db.Query(`SELECT `+mediaCols+` FROM media_files
-		WHERE (title LIKE ? OR show_title LIKE ?) AND status IN ('indexed','no_subs') ORDER BY title LIMIT ?`, like, like, limit)
+		WHERE (title LIKE ? OR show_title LIKE ?) AND status IN ('indexed','no_subs') AND archived=0
+		ORDER BY title LIMIT ?`, like, like, limit)
 	if err != nil {
 		return nil, err
 	}

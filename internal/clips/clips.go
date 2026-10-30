@@ -131,6 +131,10 @@ type Request struct {
 	PadMs   int
 }
 
+// ErrMediaArchived is returned when a clip is requested for an archived media
+// file. Callers map it to HTTP 404 rather than treating it as a bad request.
+var ErrMediaArchived = errors.New("media is archived")
+
 // Validate checks clip parameters against SQLite and caps.
 func (s *Service) Validate(r Request) (*store.MediaFile, float64, error) {
 	switch r.Mode {
@@ -152,6 +156,12 @@ func (s *Service) Validate(r Request) (*store.MediaFile, float64, error) {
 	}
 	if m == nil {
 		return nil, 0, fmt.Errorf("media %d not found", r.MediaID)
+	}
+	// Archived media are not renderable: the video bytes are gone from disk,
+	// and the row is hidden from serving until it is restored. Check the
+	// sentinel with errors.Is, not string matching.
+	if m.Archived {
+		return nil, 0, fmt.Errorf("media %d %w", r.MediaID, ErrMediaArchived)
 	}
 	if m.DurationSec > 0 {
 		if r.Start < 0 {
@@ -572,6 +582,15 @@ func (s *Service) JobHandler() func(ctx context.Context, j *store.Job, progress 
 		}
 		if r.PadMs <= 0 {
 			r.PadMs = s.cfg.DefaultPadMs
+		}
+		// Media archived between request and render: finish quietly instead of
+		// burning retries on a render that must not happen. If the media is
+		// restored later, the client simply re-requests the clip. Unknown
+		// media still falls through to the normal validation error.
+		if m, err := s.st.GetMedia(payload.MediaID); err != nil {
+			return err
+		} else if m != nil && m.Archived {
+			return nil
 		}
 		_, _, err := s.RunWithProgress(ctx, r, progress)
 		return err

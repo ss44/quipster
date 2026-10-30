@@ -28,7 +28,10 @@ type request struct {
 // per-test failure knobs so error paths can be exercised without a live
 // Meilisearch instance.
 type fakeMeili struct {
-	srv           *httptest.Server
+	srv *httptest.Server
+	// onDelete, when set, runs synchronously while a deletion request is in
+	// flight, simulating state changes that race the delete (e.g. a restore).
+	onDelete      func()
 	tasks         map[int64]meili.Task
 	docs          map[string]map[string]any
 	requests      []request
@@ -48,8 +51,11 @@ type fakeMeili struct {
 	failAdd       bool
 	failDelete    bool
 	addTasksFail  bool
-	failEmbedder  bool
-	failEmbTask   bool
+	// deleteTasksFail makes the enqueued deletion task itself fail, distinct
+	// from failDelete which fails the HTTP call that enqueues it.
+	deleteTasksFail bool
+	failEmbedder    bool
+	failEmbTask     bool
 }
 
 // respWriter funnels all fake-server JSON writes through checked calls so the
@@ -293,13 +299,16 @@ func (f *fakeMeili) handleAddDocuments(rw *respWriter, body []byte) {
 
 func (f *fakeMeili) handleDeleteDocuments(rw *respWriter) {
 	f.mu.Lock()
-	fail := f.failDelete
+	fail, taskFail := f.failDelete, f.deleteTasksFail
 	f.mu.Unlock()
 	if fail {
 		rw.fail(http.StatusInternalServerError, "internal", "delete documents failed")
 		return
 	}
-	uid := f.enqueue("documentDeletion", false)
+	if f.onDelete != nil {
+		f.onDelete()
+	}
+	uid := f.enqueue("documentDeletion", taskFail)
 	f.writeTaskInfo(rw, uid)
 }
 

@@ -33,7 +33,7 @@ func (s *Store) PopularExamples(candidates []string) ([]string, error) {
 		FROM candidates k
 		JOIN chunks c ON c.text LIKE k.pattern ESCAPE '\'
 		JOIN media_files m ON m.id = c.media_file_id
-		WHERE m.status = 'indexed' AND c.indexed_at != 0 AND TRIM(c.text) != ''
+		WHERE m.status = 'indexed' AND m.archived = 0 AND c.indexed_at != 0 AND TRIM(c.text) != ''
 		GROUP BY k.text
 		ORDER BY COUNT(*) DESC, k.text`
 	rows, err := s.db.Query(q, args...)

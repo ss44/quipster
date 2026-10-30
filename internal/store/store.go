@@ -100,7 +100,11 @@ func (s *Store) migrate() error {
 			audio_stream_index INTEGER NOT NULL DEFAULT 0,
 			audio_lang TEXT NOT NULL DEFAULT '',
 			optimization_flags TEXT NOT NULL DEFAULT '',
-			optimization_checked INTEGER NOT NULL DEFAULT 0
+			optimization_checked INTEGER NOT NULL DEFAULT 0,
+			archived INTEGER NOT NULL DEFAULT 0,
+			archived_at INTEGER NOT NULL DEFAULT 0,
+			missing_at INTEGER NOT NULL DEFAULT 0,
+			deindexed INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_media_status ON media_files(status)`,
 		`CREATE TABLE IF NOT EXISTS subtitle_tracks (
@@ -204,6 +208,10 @@ func (s *Store) migrate() error {
 		{"audio_lang", "TEXT NOT NULL DEFAULT ''"},
 		{"optimization_flags", "TEXT NOT NULL DEFAULT ''"},
 		{"optimization_checked", "INTEGER NOT NULL DEFAULT 0"},
+		{"archived", "INTEGER NOT NULL DEFAULT 0"},
+		{"archived_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"missing_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"deindexed", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, m := range migrations {
 		var n int
@@ -215,6 +223,12 @@ func (s *Store) migrate() error {
 				return fmt.Errorf("migrate %s: %w", m.name, err)
 			}
 		}
+	}
+	// The archive index references columns that only exist after the ALTER
+	// pass above on databases created before archival existed, so it must be
+	// created here rather than in the table-statement list.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_archived ON media_files(archived, deindexed, missing_at)`); err != nil {
+		return fmt.Errorf("migrate idx_media_archived: %w", err)
 	}
 	return nil
 }

@@ -33,17 +33,23 @@ const (
 	defaultScanTimeout = 2 * time.Hour
 	progressInterval   = 2 * time.Second
 	probeEnqueueBatch  = 1000
+	// defaultArchiveGrace keeps a transient share outage (reboot, remount,
+	// network blip) from archiving anything: the file must stay absent across
+	// this window before the archive decision runs on a later scan.
+	defaultArchiveGrace = 48 * time.Hour
 )
 
 // Result summarizes one scan walk: how many files were seen, added,
-// changed, and removed.
+// changed, latched missing, archived, and restored.
 type Result struct {
 	ScanID     int64
 	Seen       int
 	Walked     int
 	Added      int
 	Changed    int
-	Removed    int
+	Latched    int
+	Archived   int
+	Restored   int
 	Probes     int
 	Errors     int
 	WalkErrors int
@@ -51,9 +57,15 @@ type Result struct {
 
 // Options tunes a scan run. Timeout is applied by JobHandler; BatchSize
 // controls how many file-system entries are committed per transaction.
+// ArchiveEnabled and ArchiveGrace shape the prune pass: Enabled=false skips
+// archive decisions entirely, and Grace is how long a file must stay absent
+// across scans before it is archived.
 type Options struct {
-	Timeout   time.Duration
-	BatchSize int
+	now            func() time.Time
+	Timeout        time.Duration
+	ArchiveGrace   time.Duration
+	BatchSize      int
+	ArchiveEnabled bool
 }
 
 // Option customizes a scan handler.
@@ -70,6 +82,19 @@ func WithBatchSize(n int) Option {
 	return func(o *Options) {
 		if n > 0 {
 			o.BatchSize = n
+		}
+	}
+}
+
+// WithArchivePolicy configures the prune pass. Disabling archival skips the
+// whole pass (no latch, no archive, and never a deletion); grace is the
+// absence duration across scans before a file is archived. A non-positive
+// grace archives on the second consecutive missing observation.
+func WithArchivePolicy(enabled bool, grace time.Duration) Option {
+	return func(o *Options) {
+		o.ArchiveEnabled = enabled
+		if grace >= 0 {
+			o.ArchiveGrace = grace
 		}
 	}
 }
@@ -105,17 +130,27 @@ func CleanRoots(roots []string) ([]string, error) {
 }
 
 // Run walks the media root (or only the configured roots), upserts media rows
-// and enqueues probe jobs for new or changed files. With prune=true, media rows
-// outside the configured folders are removed (Meili cleanup via onDeleted).
-func Run(ctx context.Context, mediaRoot string, roots []string, prune bool, st *store.Store, onDeleted func(ids []int64)) (*Result, error) {
-	return runWithOptions(ctx, mediaRoot, roots, prune, st, onDeleted, Options{BatchSize: defaultBatchSize})
+// and enqueues probe jobs for new or changed files. With prune=true, media
+// rows outside the configured folders are archived (never deleted) after the
+// configured grace window; onArchived receives the archived ids so Meili
+// de-indexing can run as background jobs.
+func Run(ctx context.Context, mediaRoot string, roots []string, prune bool, st *store.Store, onArchived func(ids []int64)) (*Result, error) {
+	return runWithOptions(ctx, mediaRoot, roots, prune, st, onArchived, Options{
+		BatchSize: defaultBatchSize, ArchiveEnabled: true, ArchiveGrace: defaultArchiveGrace,
+	})
 }
 
 // runWithOptions is the testable scan entry point. Probe enqueueing is
 // deliberately deferred until the walk completes: probing the first media
 // file while the walker is still traversing the library makes every stat and
 // SQLite write contend with a full-file read from the same network share.
-func runWithOptions(ctx context.Context, mediaRoot string, roots []string, prune bool, st *store.Store, onDeleted func(ids []int64), opts Options) (res *Result, err error) {
+func runWithOptions(ctx context.Context, mediaRoot string, roots []string, prune bool, st *store.Store, onArchived func(ids []int64), opts Options) (res *Result, err error) {
+	if opts.now == nil {
+		opts.now = time.Now
+	}
+	// ArchiveGrace is used exactly as configured: zero means "archive on the
+	// second consecutive missing observation". The 48h default belongs to the
+	// Run/JobHandler constructors, not here, so explicit policies survive.
 	res = &Result{}
 	scanLabel := mediaRoot
 	if len(roots) > 0 {
@@ -145,6 +180,9 @@ func runWithOptions(ctx context.Context, mediaRoot string, roots []string, prune
 	if batchSize <= 0 {
 		batchSize = defaultBatchSize
 	}
+	if !opts.ArchiveEnabled {
+		log.Printf("[scan] #%d archiving disabled: files missing from disk are neither archived nor deleted", scanID)
+	}
 	// Recover media whose previous scan wrote the row but died before it could
 	// enqueue its probe. This is best-effort: the walk should still run if the
 	// recovery query is temporarily unavailable.
@@ -164,15 +202,18 @@ func runWithOptions(ctx context.Context, mediaRoot string, roots []string, prune
 		return res, walkErr
 	}
 	batch.Flush()
-	pruneOrLog(st, mediaRoot, walkRoots, keep, prune, res, scanID, onDeleted)
+
+	restoreAfterWalk(ctx, st, mediaRoot, walkRoots, keep, res, scanID)
+
+	archiveOrLog(st, mediaRoot, walkRoots, keep, prune, res, scanID, opts, onArchived)
 
 	probes, perr := enqueueProbes(ctx, st, batch.probeIDs)
 	res.Probes = probes
 	if perr != nil {
 		log.Printf("[scan] #%d enqueue probe jobs after %d file(s): %v", scanID, probes, perr)
 	}
-	log.Printf("[scan] #%d complete roots=%v prune=%v walked=%d seen=%d changed=%d removed=%d probes=%d errors=%d walk_errors=%d elapsed=%s",
-		scanID, roots, prune, res.Walked, res.Seen, res.Changed, res.Removed, res.Probes, res.Errors, res.WalkErrors,
+	log.Printf("[scan] #%d complete roots=%v prune=%v walked=%d seen=%d changed=%d latched=%d archived=%d restored=%d probes=%d errors=%d walk_errors=%d elapsed=%s",
+		scanID, roots, prune, res.Walked, res.Seen, res.Changed, res.Latched, res.Archived, res.Restored, res.Probes, res.Errors, res.WalkErrors,
 		time.Since(started).Round(time.Second))
 	return res, nil
 }
@@ -205,44 +246,93 @@ func walkAll(ctx context.Context, mediaRoot string, roots []string, st *store.St
 	return nil
 }
 
-// pruneOrLog removes rows for files that were not seen, but only when the walk
-// completed without a single read/stat error. A partial tree is not evidence
-// that the unvisited files disappeared.
-func pruneOrLog(st *store.Store, mediaRoot string, walkRoots []string, keep map[string]bool, prune bool, res *Result, scanID int64, onDeleted func([]int64)) {
+// archiveOrLog decides archive transitions for files that were not seen, but
+// only when the walk completed without a single read/stat error. A partial
+// tree is not evidence that the unvisited files disappeared — that guard is
+// what keeps a flaky share from archiving half the library.
+func archiveOrLog(st *store.Store, mediaRoot string, walkRoots []string, keep map[string]bool, prune bool, res *Result, scanID int64, opts Options, onArchived func([]int64)) {
 	if res.WalkErrors > 0 {
-		log.Printf("[scan] #%d skipping prune: %d walk error(s) left the tree incomplete", scanID, res.WalkErrors)
+		log.Printf("[scan] #%d skipping archive decisions: %d walk error(s) left the tree incomplete", scanID, res.WalkErrors)
 		return
 	}
-	removedIDs := deleteMissing(st, mediaRoot, walkRoots, keep, prune)
-	res.Removed = len(removedIDs)
-	if onDeleted != nil && len(removedIDs) > 0 {
-		onDeleted(removedIDs)
+	if !opts.ArchiveEnabled {
+		return
+	}
+	archivedIDs, latched := archiveMissing(st, mediaRoot, walkRoots, keep, prune, opts)
+	res.Archived = len(archivedIDs)
+	res.Latched = latched
+	if onArchived != nil && len(archivedIDs) > 0 {
+		onArchived(archivedIDs)
 	}
 }
 
-// deleteMissing limits deletion to walked folders unless pruning was requested.
-func deleteMissing(st *store.Store, mediaRoot string, walkRoots []string, keep map[string]bool, prune bool) []int64 {
+// archiveMissing limits archive decisions to walked folders unless pruning
+// was requested, mirroring the old per-root prune scoping. Returns the ids
+// archived in this pass and how many rows merely latched their first absence.
+func archiveMissing(st *store.Store, mediaRoot string, walkRoots []string, keep map[string]bool, prune bool, opts Options) (archived []int64, latched int) {
+	now := opts.now()
 	if prune {
-		ids, err := st.DeleteMissingUnder(mediaRoot, keep)
+		ids, n, err := st.ArchiveMissingUnder(mediaRoot, keep, opts.ArchiveGrace, now)
 		if err != nil {
-			log.Printf("[scan] delete missing: %v", err)
+			log.Printf("[scan] archive missing: %v", err)
 		}
-		return ids
+		return ids, n
 	}
-	var removedIDs []int64
 	for _, relRoot := range walkRoots {
 		base := mediaRoot
 		if relRoot != "" {
 			base = filepath.Join(mediaRoot, filepath.FromSlash(relRoot))
 		}
-		ids, err := st.DeleteMissingUnder(base, keep)
+		ids, n, err := st.ArchiveMissingUnder(base, keep, opts.ArchiveGrace, now)
 		if err != nil {
-			log.Printf("[scan] delete missing under %s: %v", base, err)
+			log.Printf("[scan] archive missing under %s: %v", base, err)
 			continue
 		}
-		removedIDs = append(removedIDs, ids...)
+		archived = append(archived, ids...)
+		latched += n
 	}
-	return removedIDs
+	return archived, latched
+}
+
+// restoreSeen re-activates rows for paths the walk observed again, scoped to
+// the same walked bases the archive pass uses. This runs even after a partial
+// walk: a seen path was genuinely seen, so clearing its absence latch is
+// always sound, and it is what makes a share that returns recover with zero
+// work.
+func restoreSeen(st *store.Store, mediaRoot string, walkRoots []string, keep map[string]bool) (needsReindex []int64, restored int) {
+	for _, relRoot := range walkRoots {
+		base := mediaRoot
+		if relRoot != "" {
+			base = filepath.Join(mediaRoot, filepath.FromSlash(relRoot))
+		}
+		reindex, n, err := st.RestoreSeenUnder(base, keep)
+		if err != nil {
+			log.Printf("[scan] restore seen under %s: %v", base, err)
+			continue
+		}
+		restored += n
+		needsReindex = append(needsReindex, reindex...)
+	}
+	return needsReindex, restored
+}
+
+// restoreAfterWalk applies the restore pass after a completed walk and
+// re-queues index jobs for restored media whose documents had been de-indexed.
+// Restores run before any archive decision: a path that is back is back,
+// regardless of whether other parts of the tree were unreadable, and the
+// re-queued index jobs use standard priority so a restore burst re-indexes at
+// normal pace, ahead of the background archive trickle.
+func restoreAfterWalk(ctx context.Context, st *store.Store, mediaRoot string, walkRoots []string, keep map[string]bool, res *Result, scanID int64) {
+	reindexIDs, restored := restoreSeen(st, mediaRoot, walkRoots, keep)
+	res.Restored = restored
+	if len(reindexIDs) == 0 {
+		return
+	}
+	if n, ierr := enqueueIndexJobs(ctx, st, reindexIDs); ierr != nil {
+		log.Printf("[scan] #%d enqueue index jobs for %d restored media: %v", scanID, len(reindexIDs), ierr)
+	} else {
+		log.Printf("[scan] #%d re-queued %d index job(s) for restored media", scanID, n)
+	}
 }
 
 // isIgnored checks if a directory entry should be skipped or passed over during walk.
@@ -490,6 +580,21 @@ func enqueueProbes(ctx context.Context, st *store.Store, ids []int64) (int, erro
 	return enqueueProbeSpecs(ctx, st, specs)
 }
 
+// enqueueIndexJobs enqueues index jobs for restored media at standard
+// priority so a restore burst re-indexes at normal pace, ahead of the
+// background archive trickle.
+func enqueueIndexJobs(ctx context.Context, st *store.Store, ids []int64) (int, error) {
+	specs := make([]store.JobSpec, 0, len(ids))
+	for _, id := range ids {
+		payload, err := json.Marshal(map[string]any{"mediaId": id})
+		if err != nil {
+			return 0, fmt.Errorf("marshal index payload %d: %w", id, err)
+		}
+		specs = append(specs, store.JobSpec{Type: "index", Payload: string(payload), Priority: 1})
+	}
+	return enqueueProbeSpecs(ctx, st, specs)
+}
+
 // recoverPendingProbes re-enqueues probes for media that were left pending by
 // an interrupted or crashed scan. It recovers the whole pending set in bounded
 // batches; deduplication keeps active probe jobs from being duplicated.
@@ -511,8 +616,13 @@ func (r *Result) Done() int { return r.Seen }
 // JobHandler adapts Run to the job runner. Payload carries {"roots": ["movies","tv"],
 // "prune": true}; roots are validated relative to the media root. The progress
 // callback is unused because scan progress is already latched in the scans table.
-func JobHandler(baseRoot string, st *store.Store, onDeleted func(ids []int64), opts ...Option) func(context.Context, *store.Job, func(float64)) error {
-	cfg := Options{Timeout: defaultScanTimeout, BatchSize: defaultBatchSize}
+func JobHandler(baseRoot string, st *store.Store, onArchived func(ids []int64), opts ...Option) func(context.Context, *store.Job, func(float64)) error {
+	cfg := Options{
+		Timeout:        defaultScanTimeout,
+		BatchSize:      defaultBatchSize,
+		ArchiveEnabled: true,
+		ArchiveGrace:   defaultArchiveGrace,
+	}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -541,7 +651,7 @@ func JobHandler(baseRoot string, st *store.Store, onDeleted func(ids []int64), o
 			ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
 			defer cancel()
 		}
-		_, err = runWithOptions(ctx, baseRoot, roots, payload.Prune, st, onDeleted, cfg)
+		_, err = runWithOptions(ctx, baseRoot, roots, payload.Prune, st, onArchived, cfg)
 		return err
 	}
 }

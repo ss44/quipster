@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -155,7 +156,7 @@ func TestClosedStoreErrors(t *testing.T) {
 	require.Error(t, s.MarkIndexed(1))
 	_, err = s.EverIndexed(1)
 	require.Error(t, err)
-	_, err = s.ListMedia(1, 0, "")
+	_, err = s.ListMedia(1, 0, "", "")
 	require.Error(t, err)
 	_, err = s.MediaStatusCounts()
 	require.Error(t, err)
@@ -163,7 +164,14 @@ func TestClosedStoreErrors(t *testing.T) {
 	require.Error(t, err)
 	_, err = s.TitleMatches("x", 1)
 	require.Error(t, err)
-	_, err = s.DeleteMissingUnder("/x", nil)
+	_, _, err = s.ArchiveMissingUnder("/x", nil, 0, time.Now())
+	require.Error(t, err)
+	_, _, err = s.RestoreSeenUnder("/x", nil)
+	require.Error(t, err)
+	_, _, err = s.RestoreMedia(1)
+	require.Error(t, err)
+	require.Error(t, s.MarkMediaDeindexed(1))
+	_, err = s.ArchivedPendingDeindex()
 	require.Error(t, err)
 
 	// Scans.

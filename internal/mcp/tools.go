@@ -484,7 +484,7 @@ func (s *Server) listMedia(_ context.Context, _ *mcpsdk.CallToolRequest, in list
 	}
 	perPage = min(perPage, 50)
 	page := max(in.Page, 1)
-	res, err := s.deps.St.ListMedia(perPage, (page-1)*perPage, strings.TrimSpace(in.Query))
+	res, err := s.deps.St.ListMedia(perPage, (page-1)*perPage, strings.TrimSpace(in.Query), "")
 	if err != nil {
 		return nil, listMediaOut{}, err
 	}

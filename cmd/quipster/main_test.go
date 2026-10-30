@@ -120,6 +120,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 		longCutSec:     20,
 		scanTimeout:    2 * time.Hour,
 		extractTimeout: 10 * time.Minute,
+		archiveEnabled: true,
+		archiveGrace:   48 * time.Hour,
 		mcpRateLimit:   120,
 	}
 	if got := loadConfig(); got != want {
@@ -177,6 +179,8 @@ func TestLoadConfigOverrides(t *testing.T) {
 		"MAX_CLIP_SEC":     "300",
 		"CACHE_MAX_GB":     "2.5",
 		"LONG_CUT_SEC":     "30",
+		"ARCHIVE_ENABLED":  "0",
+		"ARCHIVE_GRACE":    "2h",
 	}
 	for k, v := range values {
 		t.Setenv(k, v)
@@ -200,6 +204,8 @@ func TestLoadConfigOverrides(t *testing.T) {
 		longCutSec:     30,
 		scanTimeout:    2 * time.Hour,
 		extractTimeout: 10 * time.Minute,
+		archiveEnabled: false,
+		archiveGrace:   2 * time.Hour,
 		mcpRateLimit:   120,
 	}
 	if got := loadConfig(); got != want {

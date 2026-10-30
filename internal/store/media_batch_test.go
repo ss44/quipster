@@ -37,7 +37,7 @@ func TestUpsertMediaBatch(t *testing.T) {
 	assert.Equal(t, ids, ids3)
 	assert.Equal(t, []bool{false, true, false}, changed3)
 
-	page, err := s.ListMedia(10, 0, "")
+	page, err := s.ListMedia(10, 0, "", "")
 	require.NoError(t, err)
 	assert.EqualValues(t, 3, page.Total)
 }

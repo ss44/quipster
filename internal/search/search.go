@@ -5,6 +5,7 @@ package search
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	meili "github.com/meilisearch/meilisearch-go"
@@ -212,6 +213,12 @@ func (s *Service) resolveMode(resp *Response, q, mode string) float64 {
 // back to its SQLite chunk, media row and cue span. It returns the set of
 // media ids that already surfaced as chunk hits so the title fallback can skip
 // duplicates.
+//
+// Archived media are dropped before any chunk lookup: the SQLite archived
+// flag is committed before de-indexing runs, so this gate is what keeps a
+// slow or failing de-index from leaking archived content into results. The
+// stray document itself is repaired lazily by re-enqueueing an
+// archive_deindex job, which lets search traffic reconcile the index.
 func (s *Service) appendHits(resp *Response, res *meili.SearchResponse) (map[int64]bool, error) {
 	seenMedia := map[int64]bool{}
 	for _, h := range res.Hits {
@@ -223,16 +230,23 @@ func (s *Service) appendHits(resp *Response, res *meili.SearchResponse) (map[int
 		if !ok {
 			continue
 		}
+		m, err := s.st.GetMedia(mediaID)
+		if err != nil {
+			return nil, err
+		}
+		if m == nil {
+			continue // stale doc (media row gone)
+		}
+		if m.Archived {
+			s.requeueArchiveDeindex(mediaID)
+			continue // hidden; see the reconciliation note above
+		}
 		ch, err := s.st.GetChunkByKey(mediaID, startIdx, endIdx)
 		if err != nil {
 			return nil, err
 		}
 		if ch == nil {
 			continue // stale doc (media re-probed or deleted)
-		}
-		m, err := s.st.GetMedia(mediaID)
-		if err != nil || m == nil {
-			continue
 		}
 		span, before, after, err := s.st.CuesInRange(mediaID, startIdx, endIdx)
 		if err != nil {
@@ -261,6 +275,17 @@ func (s *Service) appendHits(resp *Response, res *meili.SearchResponse) (map[int
 		})
 	}
 	return seenMedia, nil
+}
+
+// requeueArchiveDeindex lazily repairs a Meili document that still exists for
+// an archived media. The enqueue is unique and failure-tolerant: search must
+// never fail because reconciliation could not run, and boot-time
+// reconciliation covers anything this misses.
+func (s *Service) requeueArchiveDeindex(mediaID int64) {
+	payload := fmt.Sprintf(`{"mediaId":%d}`, mediaID)
+	if _, _, err := s.st.EnqueueUniqueJob("archive_deindex", payload, -1); err != nil {
+		log.Printf("[search] requeue archive deindex for media %d: %v", mediaID, err)
+	}
 }
 
 // appendTitleMatches enriches the response with LIKE-based title matches for

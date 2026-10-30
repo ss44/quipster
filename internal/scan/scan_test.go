@@ -95,13 +95,13 @@ func TestRunAndJobHandler(t *testing.T) {
 		}
 	}
 
-	deletedIDs := []int64{}
-	onDeleted := func(ids []int64) {
-		deletedIDs = append(deletedIDs, ids...)
+	archivedIDs := []int64{}
+	onArchived := func(ids []int64) {
+		archivedIDs = append(archivedIDs, ids...)
 	}
 
 	// 1. Run full scan
-	res, err := Run(context.Background(), mediaRoot, []string{"movies", "tv"}, true, st, onDeleted)
+	res, err := Run(context.Background(), mediaRoot, []string{"movies", "tv"}, true, st, onArchived)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
@@ -112,13 +112,14 @@ func TestRunAndJobHandler(t *testing.T) {
 		t.Errorf("Run Changed = %d, want 2", res.Changed)
 	}
 
-	// 2. Remove file to trigger prune logic
+	// 2. Remove file to trigger the archive pass. The default grace window
+	// only latches an absence on the first scan, so run the handler twice with
+	// a zero grace policy: first pass latches, second pass archives.
 	if rerr := os.Remove(filepath.Join(mediaRoot, filepath.FromSlash("movies/The Matrix (1999).mkv"))); rerr != nil {
 		t.Fatal(rerr)
 	}
 
-	// Prune=true via JobHandler
-	handler := JobHandler(mediaRoot, st, onDeleted)
+	handler := JobHandler(mediaRoot, st, onArchived, WithArchivePolicy(true, 0))
 	job := &store.Job{
 		Payload: `{"roots": ["movies"], "prune": true}`,
 	}
@@ -126,9 +127,15 @@ func TestRunAndJobHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JobHandler failed: %v", err)
 	}
-
-	if len(deletedIDs) == 0 {
-		t.Errorf("Expected some deleted IDs after pruning, got none")
+	if len(archivedIDs) != 0 {
+		t.Errorf("first missing observation must only latch, got archived ids %v", archivedIDs)
+	}
+	err = handler(context.Background(), job, func(float64) {})
+	if err != nil {
+		t.Fatalf("JobHandler second pass failed: %v", err)
+	}
+	if len(archivedIDs) == 0 {
+		t.Errorf("Expected archived IDs after the grace window elapsed, got none")
 	}
 
 	// 3. Test with prune=false via JobHandler

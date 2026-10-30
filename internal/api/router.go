@@ -128,6 +128,7 @@ func Router(d Deps) http.Handler {
 		r.Put("/api/admin/config", d.handleConfigPut)
 		r.Post("/api/admin/reindex", d.handleReindex)
 		r.Post("/api/admin/reprobe", d.handleReprobe)
+		r.Post("/api/admin/media/{id}/restore", d.handleMediaRestore)
 		r.Post("/api/admin/queue/pause", d.handleQueuePause)
 		r.Post("/api/admin/queue/resume", d.handleQueueResume)
 		r.Post("/api/admin/queue/clear", d.handleQueueClear)
@@ -268,12 +269,61 @@ func (d Deps) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	if perPage < 1 || perPage > 100 {
 		perPage = 50
 	}
-	res, err := d.St.ListMedia(perPage, (page-1)*perPage, strings.TrimSpace(r.URL.Query().Get("q")))
+	res, err := d.St.ListMedia(perPage, (page-1)*perPage, strings.TrimSpace(r.URL.Query().Get("q")), r.URL.Query().Get("archived"))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, res)
+}
+
+// handleMediaRestore re-activates an archived media row. Restoring a row
+// queues an index job to re-add its Meili documents from the retained
+// captions; the response reports whether that reindex was queued. A failed
+// enqueue is surfaced as a warning field so the admin UI can offer a manual
+// reindex instead of silently returning HTTP 200.
+func (d Deps) handleMediaRestore(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	m, err := d.St.GetMedia(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if m == nil {
+		writeErr(w, http.StatusNotFound, "media not found")
+		return
+	}
+	if !m.Archived {
+		writeJSON(w, map[string]any{"restored": false, "reindexQueued": false})
+		return
+	}
+	needsReindex, _, err := d.St.RestoreMedia(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	reindexQueued := false
+	warning := ""
+	if needsReindex {
+		payload := fmt.Sprintf(`{"mediaId":%d}`, id)
+		if _, queued, qerr := d.St.EnqueueUniqueJob("index", payload, 1); qerr != nil {
+			// The row is already re-activated; the index rebuild is covered by
+			// boot-time reconciliation if this enqueue fails.
+			log.Printf("[api] enqueue index job for restored media %d: %v", id, qerr)
+			warning = "media restored but the reindex job could not be queued; run /api/admin/reindex if it does not reappear in search"
+		} else {
+			reindexQueued = queued
+		}
+	}
+	if warning == "" {
+		writeJSON(w, map[string]any{"restored": true, "reindexQueued": reindexQueued})
+		return
+	}
+	writeJSON(w, map[string]any{"restored": true, "reindexQueued": reindexQueued, "warning": warning})
 }
 
 func (d Deps) handleMedia(w http.ResponseWriter, r *http.Request) {
@@ -444,6 +494,12 @@ func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {
 	}
 	m, _, verr := d.Clips.Validate(req)
 	if verr != nil {
+		// Archived media is not renderable and is treated as absent rather
+		// than as a bad request, so stale UI links fail cleanly.
+		if errors.Is(verr, clips.ErrMediaArchived) {
+			writeErr(w, http.StatusNotFound, "media not found")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, verr.Error())
 		return
 	}
@@ -665,12 +721,19 @@ func (d Deps) handleQueueClear(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleReprobe re-runs probe (metadata/audio/subtitle selection) for media
-// that already finished, e.g. after a pipeline improvement.
+// that already finished, e.g. after a pipeline improvement. Rows inside an
+// absence grace window are skipped so a flapping share does not manufacture
+// error rows; the response reports how many were skipped so the admin knows
+// the re-probe was not a silent no-op.
 func (d Deps) handleReprobe(w http.ResponseWriter, _ *http.Request) {
 	ids, err := d.St.MediaIDsByStatus("indexed", "no_subs", "error")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	skippedMissing, err := d.St.CountMissingByStatus("indexed", "no_subs", "error")
+	if err != nil {
+		log.Printf("[api] count missing media for reprobe: %v", err)
 	}
 	n := 0
 	for _, id := range ids {
@@ -679,7 +742,7 @@ func (d Deps) handleReprobe(w http.ResponseWriter, _ *http.Request) {
 			n++
 		}
 	}
-	writeJSON(w, map[string]any{"enqueued": n})
+	writeJSON(w, map[string]any{"enqueued": n, "skippedMissing": skippedMissing})
 }
 
 // handleQueueStop pauses the queue, aborts in-flight jobs and clears queued work.
