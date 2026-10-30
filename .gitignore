@@ -11,3 +11,4 @@ web/dist/*
 coverage.out
 coverage.html
 /quipster
+node_modules/
