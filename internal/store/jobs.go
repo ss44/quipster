@@ -9,6 +9,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Job is one row of the processing queue, optionally enriched with media
@@ -144,7 +145,13 @@ func (s *Store) ClaimJob(ctx context.Context, workerID string, types []string) (
 		return nil, err
 	}
 	rollback := func() {
-		if _, rbErr := conn.ExecContext(ctx, "ROLLBACK"); rbErr != nil {
+		// The rollback must not depend on the caller's context: a canceled
+		// request would skip ROLLBACK and return this pooled connection with
+		// an open write transaction, holding the database's single writer
+		// slot indefinitely.
+		rbCtx, rbCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer rbCancel()
+		if _, rbErr := conn.ExecContext(rbCtx, "ROLLBACK"); rbErr != nil {
 			log.Printf("store: job rollback: %v", rbErr)
 		}
 	}

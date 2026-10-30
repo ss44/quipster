@@ -22,12 +22,21 @@ func (s *Store) ReplaceChunks(mediaFileID int64, chunks []Chunk) error {
 		return err
 	}
 	defer rollbackTx(tx)
-	if _, err := tx.Exec(`DELETE FROM chunks WHERE media_file_id=?`, mediaFileID); err != nil {
+	if _, derr := tx.Exec(`DELETE FROM chunks WHERE media_file_id=?`, mediaFileID); derr != nil {
+		return derr
+	}
+	// Both statements are prepared once: per-row re-preparation would stretch
+	// this exclusive write transaction (see the idx_cues_media_idx migration).
+	insert, err := tx.Prepare(`INSERT INTO chunks (media_file_id, start_cue_idx, end_cue_idx, text) VALUES (?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	relink, err := tx.Prepare(`UPDATE cues SET chunk_id=? WHERE media_file_id=? AND idx BETWEEN ? AND ?`)
+	if err != nil {
 		return err
 	}
 	for _, ch := range chunks {
-		res, err := tx.Exec(`INSERT INTO chunks (media_file_id, start_cue_idx, end_cue_idx, text) VALUES (?,?,?,?)`,
-			mediaFileID, ch.StartCueIdx, ch.EndCueIdx, ch.Text)
+		res, err := insert.Exec(mediaFileID, ch.StartCueIdx, ch.EndCueIdx, ch.Text)
 		if err != nil {
 			return err
 		}
@@ -35,8 +44,7 @@ func (s *Store) ReplaceChunks(mediaFileID int64, chunks []Chunk) error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE cues SET chunk_id=? WHERE media_file_id=? AND idx BETWEEN ? AND ?`,
-			chunkID, mediaFileID, ch.StartCueIdx, ch.EndCueIdx); err != nil {
+		if _, err := relink.Exec(chunkID, mediaFileID, ch.StartCueIdx, ch.EndCueIdx); err != nil {
 			return err
 		}
 	}
