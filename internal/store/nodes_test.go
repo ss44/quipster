@@ -168,6 +168,59 @@ func TestRequeueStaleNodeJobs(t *testing.T) {
 	assert.Equal(t, "queued", status)
 }
 
+// TestRequeueMissingNodeJobs verifies heartbeat reconciliation: running jobs
+// the node stopped reporting are requeued, while reported jobs and claims
+// younger than the grace cutoff are left alone.
+func TestRequeueMissingNodeJobs(t *testing.T) {
+	st := openTest(t)
+	node, err := st.UpsertNode("n", "fp", "dev", "sec")
+	require.NoError(t, err)
+	require.NoError(t, st.ApproveNode(node.ID, "tok"))
+
+	reported, err := st.EnqueueJob("probe", `{"mediaId":1}`, 1)
+	require.NoError(t, err)
+	orphaned, err := st.EnqueueJob("probe", `{"mediaId":2}`, 1)
+	require.NoError(t, err)
+	fresh, err := st.EnqueueJob("probe", `{"mediaId":3}`, 1)
+	require.NoError(t, err)
+	claim := func(want int64) {
+		t.Helper()
+		j, cerr := st.ClaimJob(t.Context(), NodeWorkerID(node.ID), []string{"probe"})
+		require.NoError(t, cerr)
+		require.NotNil(t, j)
+		assert.Equal(t, want, j.ID)
+	}
+	claim(reported)
+	claim(orphaned)
+	claim(fresh)
+
+	// Make the fresh claim newer than the cutoff, mimicking a job queued after
+	// the last heartbeat window.
+	future := nowMillis() + 60_000
+	_, err = st.DB().Exec(`UPDATE jobs SET started_at=? WHERE id=?`, future, fresh)
+	require.NoError(t, err)
+
+	requeued, err := st.RequeueMissingNodeJobs(node.ID, []int64{reported}, nowMillis()+1_000, "node no longer reports job")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), requeued, "only the unreported, older claim is requeued")
+
+	status, owner, err := st.JobOwner(reported)
+	require.NoError(t, err)
+	assert.Equal(t, "running", status)
+	assert.Equal(t, NodeWorkerID(node.ID), owner)
+	status, _, err = st.JobOwner(orphaned)
+	require.NoError(t, err)
+	assert.Equal(t, "queued", status)
+	status, _, err = st.JobOwner(fresh)
+	require.NoError(t, err)
+	assert.Equal(t, "running", status, "fresh claim is inside the grace window")
+
+	// An unknown node releases nothing even when it reports no jobs.
+	requeued, err = st.RequeueMissingNodeJobs(node.ID+999, nil, nowMillis()+120_000, "node no longer reports job")
+	require.NoError(t, err)
+	assert.Zero(t, requeued)
+}
+
 // TestRunningNodeJobs verifies the dashboard query only returns node claims.
 func TestRunningNodeJobs(t *testing.T) {
 	st := openTest(t)
