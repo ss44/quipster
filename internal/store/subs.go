@@ -66,12 +66,17 @@ func (s *Store) ReplaceCues(mediaFileID, trackID int64, cues []Cue) error {
 		return err
 	}
 	defer rollbackTx(tx)
-	if _, err := tx.Exec(`DELETE FROM cues WHERE media_file_id=?`, mediaFileID); err != nil {
+	if _, derr := tx.Exec(`DELETE FROM cues WHERE media_file_id=?`, mediaFileID); derr != nil {
+		return derr
+	}
+	// One prepared insert for the whole swap: per-row re-preparation would
+	// stretch this exclusive write transaction (see idx_cues_media_idx).
+	stmt, err := tx.Prepare(`INSERT INTO cues (media_file_id, track_id, idx, start_sec, end_sec, text) VALUES (?,?,?,?,?,?)`)
+	if err != nil {
 		return err
 	}
 	for _, c := range cues {
-		if _, err := tx.Exec(`INSERT INTO cues (media_file_id, track_id, idx, start_sec, end_sec, text) VALUES (?,?,?,?,?,?)`,
-			mediaFileID, trackID, c.Idx, c.StartSec, c.EndSec, c.Text); err != nil {
+		if _, err := stmt.Exec(mediaFileID, trackID, c.Idx, c.StartSec, c.EndSec, c.Text); err != nil {
 			return err
 		}
 	}

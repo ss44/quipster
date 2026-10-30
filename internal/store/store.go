@@ -133,6 +133,11 @@ func (s *Store) migrate() error {
 			chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cues_media_start ON cues(media_file_id, start_sec)`,
+		// The chunk relink in ReplaceChunks filters cues by idx ranges; without
+		// this index each per-chunk UPDATE scans every cue of the media file
+		// inside one write transaction, starving all other writers (job and
+		// node claims, heartbeats) until they exhaust the busy timeout.
+		`CREATE INDEX IF NOT EXISTS idx_cues_media_idx ON cues(media_file_id, idx)`,
 		`CREATE INDEX IF NOT EXISTS idx_cues_chunk ON cues(chunk_id)`,
 		`CREATE TABLE IF NOT EXISTS jobs (
 			id INTEGER PRIMARY KEY,
