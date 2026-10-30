@@ -51,17 +51,24 @@
 
 ## Screenshots
 
-*Coming soon — screenshots of the landing page, search results, clip studio, and admin console will be added from a seeded demo library.*
+See **[SCREENSHOTS.md](SCREENSHOTS.md)** for the full gallery. Click any image for the full 1080p PNG.
 
-<!--
-| Search results | Clip studio |
+| Home page | Search results |
 |---|---|
-| ![Search results](docs/assets/screenshots/search.png) | ![Clip studio](docs/assets/screenshots/clip-studio.png) |
+| [<img src="docs/screenshots/thumbs/home.webp" width="640" height="360" alt="Home page" loading="lazy">](docs/screenshots/home.png) | [<img src="docs/screenshots/thumbs/search_results.webp" width="640" height="360" alt="Search results" loading="lazy">](docs/screenshots/search_results.png) |
+| Landing view. `/` focuses search. | Every spoken line is indexed: frame, highlighted match, context, timecodes. |
 
-| Landing page | Admin console |
+| Clip studio | Admin · Library |
 |---|---|
-| ![Landing page](docs/assets/screenshots/landing.png) | ![Admin console](docs/assets/screenshots/admin.png) |
--->
+| [<img src="docs/screenshots/thumbs/clip_modal.webp" width="640" height="360" alt="Clip studio" loading="lazy">](docs/screenshots/clip_modal.png) | [<img src="docs/screenshots/thumbs/admin_library.webp" width="640" height="360" alt="Admin library" loading="lazy">](docs/screenshots/admin_library.png) |
+| Preview the cut, trim by subtitle lines, copy link or download. | Stats, folder selection, scan/reindex/re-probe, queue control, live job feed. |
+
+<p align="center">
+  <a href="docs/screenshots/admin_nodes.png"><img src="docs/screenshots/thumbs/admin_nodes.webp" width="640" height="360" alt="Worker nodes" loading="lazy"></a>
+</p>
+<p align="center">
+  <sub><strong>Admin · Nodes</strong> — worker nodes claim probe/clip jobs over HTTP. Live status and progress per node.</sub>
+</p>
 
 ## Demo
 
