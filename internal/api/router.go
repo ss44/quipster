@@ -55,6 +55,30 @@ type Deps struct {
 	Nodes         *nodes.Service // nil disables the worker-node endpoints
 }
 
+// streamingPaths are long-lived server-sent event endpoints. The request
+// timeout middleware must not wrap them: it would sever every stream at the
+// deadline, forcing browsers to reconnect and briefly showing stale state.
+var streamingPaths = map[string]struct{}{
+	"/api/admin/events":             {},
+	"/api/admin/diagnostics/stream": {},
+}
+
+// timeoutExceptStreams applies d to ordinary requests but leaves streaming
+// endpoints open for the lifetime of the client connection.
+func timeoutExceptStreams(d time.Duration) func(http.Handler) http.Handler {
+	timed := middleware.Timeout(d)
+	return func(next http.Handler) http.Handler {
+		limited := timed(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := streamingPaths[r.URL.Path]; ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+			limited.ServeHTTP(w, r)
+		})
+	}
+}
+
 // Router builds the application HTTP handler: standard middleware, public
 // read endpoints, token-guarded admin endpoints and, when a web filesystem is
 // configured, the SPA fallback. middleware.RealIP is deliberately omitted
@@ -64,7 +88,7 @@ func Router(d Deps) http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(5 * time.Minute))
+	r.Use(timeoutExceptStreams(5 * time.Minute))
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("X-Content-Type-Options", "nosniff")

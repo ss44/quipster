@@ -184,6 +184,34 @@ func (s *Store) RequeueStaleNodeJobs(cutoffMillis int64, note string) (int64, er
 	return res.RowsAffected()
 }
 
+// RequeueMissingNodeJobs returns running jobs leased to nodeID that the node
+// did not include in its latest heartbeat. A node reports every in-flight job
+// on each heartbeat, so absence means the lease was orphaned — typically by a
+// node restart or a lost claim response. Jobs claimed at or after
+// claimedBeforeMillis are skipped so a freshly leased job is not requeued
+// before its first heartbeat has had a chance to report it. The claim attempt
+// is refunded, mirroring RequeueStaleNodeJobs.
+func (s *Store) RequeueMissingNodeJobs(nodeID int64, reported []int64, claimedBeforeMillis int64, note string) (int64, error) {
+	args := make([]any, 0, 3+len(reported))
+	args = append(args, note, NodeWorkerID(nodeID), claimedBeforeMillis)
+	query := `UPDATE jobs SET status='queued', worker_id='', error=?,
+			attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END
+		WHERE status='running' AND worker_id=? AND started_at < ?`
+	if len(reported) > 0 {
+		ph := strings.TrimSuffix(strings.Repeat("?,", len(reported)), ",")
+		//nolint:gosec // the concatenated part is a "?" placeholder list built from the reported slice; ids are parameterized.
+		query += ` AND id NOT IN (` + ph + `)`
+		for _, id := range reported {
+			args = append(args, id)
+		}
+	}
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // RequeueNodeJobs returns all running jobs of one node to the queue; used
 // when an operator deletes a node so its leases cannot outlive it.
 func (s *Store) RequeueNodeJobs(nodeID int64, note string) (int64, error) {

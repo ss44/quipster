@@ -387,7 +387,9 @@ func (s *Service) Heartbeat(nodeID int64, jobs []JobProgress) (*Beat, error) {
 		return nil, err
 	}
 	worker := store.NodeWorkerID(nodeID)
+	reported := make([]int64, 0, len(jobs))
 	for _, jp := range jobs {
+		reported = append(reported, jp.ID)
 		if jp.Progress < 0 || jp.Progress > 1 {
 			continue
 		}
@@ -401,6 +403,20 @@ func (s *Service) Heartbeat(nodeID int64, jobs []JobProgress) (*Beat, error) {
 		if err := s.st.SetJobProgress(jp.ID, jp.Progress); err != nil {
 			log.Printf("[nodes] progress job %d node %d: %v", jp.ID, nodeID, err)
 		}
+	}
+	// Reconcile orphaned leases: the node lists every in-flight job it owns,
+	// so a running claim it no longer reports is stale (restart or lost claim
+	// response). The grace window covers a claim whose first heartbeat has not
+	// been observed yet.
+	grace := 3 * s.cfg.Heartbeat
+	if grace < s.cfg.OfflineAfter {
+		grace = s.cfg.OfflineAfter
+	}
+	cutoff := time.Now().Add(-grace).UnixMilli()
+	if n, err := s.st.RequeueMissingNodeJobs(nodeID, reported, cutoff, "node no longer reports job"); err != nil {
+		log.Printf("[nodes] heartbeat reconcile node %d: %v", nodeID, err)
+	} else if n > 0 {
+		log.Printf("[nodes] heartbeat requeued %d orphaned job(s) from node %d", n, nodeID)
 	}
 	beat := &Beat{}
 	if paused, err := s.st.GetQueuePaused(); err == nil {

@@ -242,6 +242,59 @@ func TestHeartbeatOwnershipAndState(t *testing.T) {
 	assert.True(t, beat.Paused)
 }
 
+// TestHeartbeatRequeuesOrphanedClaims verifies a readable failure mode: when
+// a node restarts or loses a claim response it keeps heartbeating but no longer
+// reports the old job, so the server must return that lease to the queue.
+func TestHeartbeatRequeuesOrphanedClaims(t *testing.T) {
+	svc, st := newTestService(t)
+	node, _ := approvedNode(t, svc, "n1", "fp1")
+	other, _ := approvedNode(t, svc, "n2", "fp2")
+	id := addMedia(t, st, "/srv/media/movie.mkv")
+
+	orphan, err := st.EnqueueJob("probe", `{"mediaId":`+itoa(id)+`}`, 1)
+	require.NoError(t, err)
+	reported, err := st.EnqueueJob("probe", `{"mediaId":`+itoa(id)+`}`, 1)
+	require.NoError(t, err)
+	fresh, err := st.EnqueueJob("probe", `{"mediaId":`+itoa(id)+`}`, 1)
+	require.NoError(t, err)
+	foreign, err := st.EnqueueJob("probe", `{"mediaId":`+itoa(id)+`}`, 1)
+	require.NoError(t, err)
+
+	claim := func(worker string, want int64) {
+		t.Helper()
+		j, cerr := st.ClaimJob(t.Context(), worker, []string{"probe"})
+		require.NoError(t, cerr)
+		require.NotNil(t, j)
+		assert.Equal(t, want, j.ID)
+	}
+	claim(store.NodeWorkerID(node.ID), orphan)
+	claim(store.NodeWorkerID(node.ID), reported)
+	claim(store.NodeWorkerID(node.ID), fresh)
+	claim(store.NodeWorkerID(other.ID), foreign)
+
+	// Age the orphan past the reconciliation grace window. The reported job is
+	// equally old but must survive because the heartbeat still lists it.
+	old := time.Now().Add(-time.Minute).UnixMilli()
+	_, err = st.DB().Exec(`UPDATE jobs SET started_at=? WHERE id IN (?,?)`, old, orphan, reported)
+	require.NoError(t, err)
+
+	_, err = svc.Heartbeat(node.ID, []JobProgress{{ID: reported, Progress: 0.5}})
+	require.NoError(t, err)
+
+	j, err := st.JobByID(orphan)
+	require.NoError(t, err)
+	assert.Equal(t, "queued", j.Status, "unreported lease must be requeued")
+	j, err = st.JobByID(reported)
+	require.NoError(t, err)
+	assert.Equal(t, "running", j.Status, "reported lease must stay claimed")
+	j, err = st.JobByID(fresh)
+	require.NoError(t, err)
+	assert.Equal(t, "running", j.Status, "fresh claim is inside the grace window")
+	j, err = st.JobByID(foreign)
+	require.NoError(t, err)
+	assert.Equal(t, "running", j.Status, "another node's lease is untouched")
+}
+
 func TestCompleteDoneAndError(t *testing.T) {
 	svc, st := newTestService(t)
 	node, _ := approvedNode(t, svc, "n1", "fp1")
