@@ -1,3 +1,5 @@
+name: Build Weekly Releases
+
 # Weekly automated release: tags the current default branch, publishes a
 # versioned GHCR image, and opens a GitHub release with generated notes.
 # There is no version file anywhere — the git tag itself is the version,
