@@ -39,6 +39,12 @@ func (p *Pipeline) JobHandler() func(context.Context, *store.Job, func(float64))
 		if m == nil {
 			return nil
 		}
+		// Archived rows are frozen: probing must never mutate their status,
+		// and the file is gone from disk anyway. If the media is restored the
+		// scan enqueues whatever work it needs at that point.
+		if m.Archived {
+			return nil
+		}
 		o, cerr := p.Compute(ctx, ComputeOptions{
 			MediaID:     m.ID,
 			MediaPath:   m.Path,

@@ -104,6 +104,7 @@ func Router(d Deps) http.Handler {
 		r.Put("/api/admin/config", d.handleConfigPut)
 		r.Post("/api/admin/reindex", d.handleReindex)
 		r.Post("/api/admin/reprobe", d.handleReprobe)
+		r.Post("/api/admin/media/{id}/restore", d.handleMediaRestore)
 		r.Post("/api/admin/queue/pause", d.handleQueuePause)
 		r.Post("/api/admin/queue/resume", d.handleQueueResume)
 		r.Post("/api/admin/queue/clear", d.handleQueueClear)
@@ -244,12 +245,54 @@ func (d Deps) handleMediaList(w http.ResponseWriter, r *http.Request) {
 	if perPage < 1 || perPage > 100 {
 		perPage = 50
 	}
-	res, err := d.St.ListMedia(perPage, (page-1)*perPage, strings.TrimSpace(r.URL.Query().Get("q")))
+	res, err := d.St.ListMedia(perPage, (page-1)*perPage, strings.TrimSpace(r.URL.Query().Get("q")), r.URL.Query().Get("archived"))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, res)
+}
+
+// handleMediaRestore re-activates an archived media row. Restoring a row
+// whose Meili documents were already deleted queues an index job to re-add
+// them from the retained captions; the response reports whether that reindex
+// was queued.
+func (d Deps) handleMediaRestore(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	m, err := d.St.GetMedia(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if m == nil {
+		writeErr(w, http.StatusNotFound, "media not found")
+		return
+	}
+	if !m.Archived {
+		writeJSON(w, map[string]any{"restored": false, "reindexQueued": false})
+		return
+	}
+	needsReindex, _, err := d.St.RestoreMedia(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	reindexQueued := false
+	if needsReindex {
+		payload := fmt.Sprintf(`{"mediaId":%d}`, id)
+		if _, queued, qerr := d.St.EnqueueUniqueJob("index", payload, 1); qerr != nil {
+			// The row is already re-activated; the index rebuild is covered by
+			// boot-time reconciliation if this enqueue fails.
+			log.Printf("[api] enqueue index job for restored media %d: %v", id, qerr)
+		} else {
+			reindexQueued = queued
+		}
+	}
+	writeJSON(w, map[string]any{"restored": true, "reindexQueued": reindexQueued})
 }
 
 func (d Deps) handleMedia(w http.ResponseWriter, r *http.Request) {
@@ -420,6 +463,12 @@ func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {
 	}
 	m, _, verr := d.Clips.Validate(req)
 	if verr != nil {
+		// Archived media is not renderable and is treated as absent rather
+		// than as a bad request, so stale UI links fail cleanly.
+		if errors.Is(verr, clips.ErrMediaArchived) {
+			writeErr(w, http.StatusNotFound, "media not found")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, verr.Error())
 		return
 	}

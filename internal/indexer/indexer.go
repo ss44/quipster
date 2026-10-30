@@ -330,7 +330,10 @@ func (ix *Indexer) DeleteMedia(ids []int64) error {
 	return nil
 }
 
-// JobHandler runs index jobs.
+// JobHandler runs index jobs. Jobs for archived media are finished as no-ops:
+// the row's index state is frozen while archived, and MarkIndexed must never
+// mutate its status. A race between archive and a queued index job therefore
+// costs nothing and converges on the next restore or reconcile pass.
 func (ix *Indexer) JobHandler() func(ctx context.Context, j *store.Job, progress func(float64)) error {
 	return func(_ context.Context, j *store.Job, _ func(float64)) error {
 		var payload struct {
@@ -339,10 +342,76 @@ func (ix *Indexer) JobHandler() func(ctx context.Context, j *store.Job, progress
 		if err := json.Unmarshal([]byte(j.Payload), &payload); err != nil {
 			return fmt.Errorf("bad payload: %w", err)
 		}
+		m, err := ix.st.GetMedia(payload.MediaID)
+		if err != nil {
+			return err
+		}
+		if m == nil || m.Archived {
+			return nil
+		}
 		if err := ix.IndexMedia(payload.MediaID); err != nil {
 			return err
 		}
 		return ix.st.MarkIndexed(payload.MediaID)
+	}
+}
+
+// ArchiveJobHandler runs archive_deindex jobs: the lazy, lowest-priority
+// removal of a media's documents from Meili after a scan archived the row.
+// Each step is idempotent, and failures propagate so the runner retries and
+// the boot/query reconciliation passes can re-enqueue later.
+//
+// The archived re-check after the delete closes the restore race: if the row
+// was restored while the delete was in flight, the documents it still needs
+// were just removed, so the chunk flags are cleared and a standard-priority
+// index job re-adds them. Worst case is one redundant reindex; content is
+// never silently lost.
+func (ix *Indexer) ArchiveJobHandler() func(ctx context.Context, j *store.Job, progress func(float64)) error {
+	return func(_ context.Context, j *store.Job, _ func(float64)) error {
+		var payload struct {
+			MediaID int64 `json:"mediaId"`
+		}
+		if err := json.Unmarshal([]byte(j.Payload), &payload); err != nil {
+			return fmt.Errorf("bad payload: %w", err)
+		}
+		m, err := ix.st.GetMedia(payload.MediaID)
+		if err != nil {
+			return err
+		}
+		// Lazy cancellation: the row was restored before this job ran, or its
+		// documents were already confirmed removed.
+		if m == nil || !m.Archived || m.Deindexed {
+			return nil
+		}
+		filter := fmt.Sprintf(`mediaId = %d`, payload.MediaID)
+		task, derr := ix.client.Index(IndexName).DeleteDocumentsByFilter(filter, nil)
+		if derr != nil {
+			return fmt.Errorf("archive delete docs %d: %w", payload.MediaID, derr)
+		}
+		res, werr := ix.client.WaitForTask(task.TaskUID, 300*time.Millisecond)
+		if werr != nil {
+			return fmt.Errorf("archive delete wait %d: %w", payload.MediaID, werr)
+		}
+		if res.Status == meili.TaskStatusFailed {
+			return fmt.Errorf("archive delete failed %d: %s", payload.MediaID, res.Error)
+		}
+		after, gerr := ix.st.GetMedia(payload.MediaID)
+		if gerr != nil {
+			return gerr
+		}
+		if after == nil || !after.Archived {
+			// Restored mid-flight. Whatever the restore path decided about the
+			// index flags, the documents are now definitely gone from Meili:
+			// clear the flags and re-enqueue a normal index job to rebuild them.
+			if cerr := ix.st.ClearChunkIndexFlags(payload.MediaID); cerr != nil {
+				return cerr
+			}
+			if _, _, eerr := ix.st.EnqueueUniqueJob("index", fmt.Sprintf(`{"mediaId":%d}`, payload.MediaID), 1); eerr != nil {
+				return eerr
+			}
+			return nil
+		}
+		return ix.st.MarkMediaDeindexed(payload.MediaID)
 	}
 }
 

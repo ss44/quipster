@@ -2,6 +2,7 @@ package store
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -90,14 +91,14 @@ func TestMedia(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ever)
 
-	// ListMedia(limit, offset int, q string) (*MediaListPage, error)
-	page, err := db.ListMedia(10, 0, "")
+	// ListMedia(limit, offset int, q, archived string) (*MediaListPage, error)
+	page, err := db.ListMedia(10, 0, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, page)
 	require.Len(t, page.Items, 1)
 	assert.Equal(t, int64(1), page.Total)
 
-	page2, err := db.ListMedia(10, 0, "Show")
+	page2, err := db.ListMedia(10, 0, "Show", "")
 	require.NoError(t, err)
 	require.NotNil(t, page2)
 	require.Len(t, page2.Items, 1)
@@ -112,23 +113,32 @@ func TestMedia(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []int64{id1}, ids)
 
-	// DeleteMissingUnder(base string, keep map[string]bool) ([]int64, error)
+	// ArchiveMissingUnder(base string, keep map[string]bool, grace time.Duration, now time.Time)
 	id3, _, err := db.UpsertMedia("/foo/baz.mp4", "mp4", 2048, 2000, "Title2", 2021, 0, 0, "")
 	require.NoError(t, err)
 
-	// keep bar.mp4, drop baz.mp4
+	// keep bar.mp4, archive baz.mp4: first pass latches, second pass archives.
 	keep := map[string]bool{"/foo/bar.mp4": true}
-	removed, err := db.DeleteMissingUnder("/foo", keep)
+	now := time.UnixMilli(1_000_000)
+	archived, latched, err := db.ArchiveMissingUnder("/foo", keep, 0, now)
 	require.NoError(t, err)
-	assert.Equal(t, []int64{id3}, removed)
+	require.Empty(t, archived)
+	assert.Equal(t, 1, latched)
+
+	archived, latched, err = db.ArchiveMissingUnder("/foo", keep, 0, now)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{id3}, archived)
+	assert.Equal(t, 0, latched)
 
 	m, err = db.GetMedia(id3)
 	require.NoError(t, err)
-	assert.Nil(t, m) // baz.mp4 should be deleted
+	require.NotNil(t, m) // baz.mp4 is archived, not deleted
+	assert.True(t, m.Archived)
 
 	m, err = db.GetMedia(id1)
 	require.NoError(t, err)
 	require.NotNil(t, m) // bar.mp4 should still exist
+	assert.False(t, m.Archived)
 
 	// TitleMatches(q string, limit int)
 	matches, err := db.TitleMatches("Show", 10)

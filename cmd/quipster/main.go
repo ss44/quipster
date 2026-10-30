@@ -60,6 +60,8 @@ type config struct {
 	probeTimeout   time.Duration
 	scanTimeout    time.Duration
 	extractTimeout time.Duration
+	archiveEnabled bool
+	archiveGrace   time.Duration
 	logs           *logbuf.Buffer
 	mcpEnabled     bool
 	mcpStdio       bool
@@ -114,6 +116,8 @@ func loadConfig() config {
 		probeTimeout:   parseDuration(envStr("PROBE_TIMEOUT", "")),
 		scanTimeout:    parseDuration(envStr("SCAN_TIMEOUT", "2h")),
 		extractTimeout: parseDuration(envStr("EXTRACT_TIMEOUT", "10m")),
+		archiveEnabled: envBool("ARCHIVE_ENABLED", true),
+		archiveGrace:   parseDuration(envStr("ARCHIVE_GRACE", "48h")),
 		previewRes:     envStr("CLIP_PREVIEW_RES", ""),
 		accurateRes:    envStr("CLIP_ACCURATE_RES", ""),
 		cpuPreset:      envStr("CLIP_CPU_PRESET", ""),
@@ -158,19 +162,71 @@ func parseDuration(s string) time.Duration {
 // job runner. Worker pools stay I/O-tuned: subtitle extraction is NFS-bound,
 // so its pool size is the throughput lever.
 func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *indexer.Indexer, clipSvc *clips.Service, pipeline *probe.Pipeline) {
-	onDeleted := func(ids []int64) {
-		if err := ix.DeleteMedia(ids); err != nil {
-			log.Printf("delete media docs %v: %v", ids, err)
-		}
+	// Scans never delete media. onArchived hands archived ids to the lazy
+	// de-index queue: priority -1 jobs are claimed only when nothing else is
+	// queued, so a large archive backlog trickles strictly behind
+	// user-visible work and the scan itself never waits on Meili.
+	onArchived := func(ids []int64) {
+		enqueueArchiveDeindex(st, ids)
 	}
 	// A scan is metadata-only and must not compete with full-file subtitle
 	// extraction on a network share. The gate makes scans exclusive: in-flight
 	// probes are canceled and requeued, and new probes wait for the walk.
 	gate := jobs.NewGate(runner)
-	runner.Register("scan", 1, gate.Scan(scan.JobHandler(cfg.mediaDir, st, onDeleted, scan.WithTimeout(cfg.scanTimeout))))
+	runner.Register("scan", 1, gate.Scan(scan.JobHandler(cfg.mediaDir, st, onArchived,
+		scan.WithTimeout(cfg.scanTimeout),
+		scan.WithArchivePolicy(cfg.archiveEnabled, cfg.archiveGrace))))
 	runner.Register("probe", cfg.subWorkers, gate.Probe(pipeline.JobHandler()))
 	runner.Register("index", cfg.indexWorkers, ix.JobHandler())
 	runner.Register("clip", cfg.clipWorkers, clipSvc.JobHandler())
+	// De-indexing runs on a single dedicated worker so Meili pressure from the
+	// archive trickle stays flat regardless of backlog size.
+	runner.Register("archive_deindex", 1, ix.ArchiveJobHandler())
+}
+
+// enqueueArchiveDeindex enqueues one unique low-priority de-index job per
+// archived media, in bounded batches. Deduplication makes the call idempotent
+// across overlapping scans and reconcile passes.
+func enqueueArchiveDeindex(st *store.Store, ids []int64) {
+	if len(ids) == 0 {
+		return
+	}
+	const batch = 1000
+	enqueued := 0
+	for start := 0; start < len(ids); start += batch {
+		specs := make([]store.JobSpec, 0, min(batch, len(ids)-start))
+		for _, id := range ids[start:min(start+batch, len(ids))] {
+			specs = append(specs, store.JobSpec{
+				Type:     "archive_deindex",
+				Payload:  fmt.Sprintf(`{"mediaId":%d}`, id),
+				Priority: -1,
+			})
+		}
+		n, err := st.EnqueueUniqueJobs(specs)
+		if err != nil {
+			log.Printf("enqueue archive deindex jobs: %v", err)
+			break
+		}
+		enqueued += n
+	}
+	if enqueued > 0 {
+		log.Printf("queued %d archive de-index job(s)", enqueued)
+	}
+}
+
+// reconcileArchivedDeindex re-enqueues de-index jobs for rows archived before
+// a crash or Meili outage, closing the gap left by the runner's bounded
+// retries. Best-effort: the next query-time reconciliation pass also covers it.
+func reconcileArchivedDeindex(st *store.Store) {
+	ids, err := st.ArchivedPendingDeindex()
+	if err != nil {
+		log.Printf("archive reconcile: %v", err)
+		return
+	}
+	if len(ids) > 0 {
+		log.Printf("archive reconcile: %d archived media awaiting de-index", len(ids))
+		enqueueArchiveDeindex(st, ids)
+	}
 }
 
 // buildProbePipeline constructs the probe pipeline shared by the local job
@@ -349,6 +405,10 @@ func main() {
 
 	application := assembleApp(context.Background(), cfg, st, ix)
 	defer application.Stop()
+
+	// Repair any de-index backlog left by a crash or a Meili outage before
+	// serving traffic.
+	reconcileArchivedDeindex(st)
 
 	// Stdio mode replaces the HTTP server entirely: the process is launched
 	// by an MCP client as a subprocess and speaks MCP over stdin/stdout. It

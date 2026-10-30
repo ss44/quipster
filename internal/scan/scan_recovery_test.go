@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"quipster/internal/store"
 )
@@ -118,15 +119,18 @@ func TestPruneSkipsIncompleteWalk(t *testing.T) {
 	if res.WalkErrors == 0 {
 		t.Fatalf("expected an unreadable-directory walk error: %+v", res)
 	}
-	if res.Removed != 0 {
-		t.Fatalf("prune removed %d rows from an incomplete walk", res.Removed)
+	if res.Archived != 0 {
+		t.Fatalf("incomplete walk archived %d rows", res.Archived)
 	}
 	m, err := st.GetMedia(id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m == nil {
-		t.Fatal("incomplete walk pruned a media row")
+		t.Fatal("incomplete walk removed a media row")
+	}
+	if m.Archived {
+		t.Fatal("incomplete walk archived a media row")
 	}
 }
 
@@ -139,13 +143,17 @@ func TestPruneOrLogSkipsOnWalkErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := &Result{WalkErrors: 1}
-	pruneOrLog(st, root, []string{"movies"}, map[string]bool{}, true, res, 1, nil)
+	archiveOrLog(st, root, []string{"movies"}, map[string]bool{}, true, res, 1,
+		Options{ArchiveEnabled: true, ArchiveGrace: 0, now: func() time.Time { return time.Now() }}, nil)
 	m, err := st.GetMedia(id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m == nil {
-		t.Fatal("pruneOrLog removed a row despite walk errors")
+		t.Fatal("archiveOrLog removed a row despite walk errors")
+	}
+	if m.Archived {
+		t.Fatal("archiveOrLog archived a row despite walk errors")
 	}
 }
 

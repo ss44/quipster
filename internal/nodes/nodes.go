@@ -511,6 +511,14 @@ func (s *Service) ApplyProbeResult(nodeID, jobID int64, o *probe.Outcome, subFil
 		}
 		return false, nil
 	}
+	// Archived rows are frozen: a node racing an archive must not write probe
+	// results into the row. Drop the outcome and close the job.
+	if m.Archived {
+		if ferr := s.st.FinishJob(jobID, "done", "media archived; probe result dropped"); ferr != nil {
+			return true, ferr
+		}
+		return true, s.st.BumpNodeCounters(nodeID, false)
+	}
 	if aerr := s.Pipeline.Apply(m.ID, m.Path, o, subFile, log.Default()); aerr != nil {
 		return true, aerr
 	}

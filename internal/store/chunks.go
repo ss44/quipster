@@ -88,18 +88,20 @@ const chunkJoinCols = `c.id, c.media_file_id, c.start_cue_idx, c.end_cue_idx, c.
 	COALESCE((SELECT MIN(start_sec) FROM cues q WHERE q.media_file_id=c.media_file_id AND q.idx BETWEEN c.start_cue_idx AND c.end_cue_idx),0),
 	COALESCE((SELECT MAX(end_sec) FROM cues q WHERE q.media_file_id=c.media_file_id AND q.idx BETWEEN c.start_cue_idx AND c.end_cue_idx),0)`
 
-// PendingIndexChunks returns chunks not yet indexed, optionally scoped to one media file.
+// PendingIndexChunks returns chunks not yet indexed, optionally scoped to one
+// media file. Archived media are excluded so a stale index job can never
+// re-add documents for a hidden row; the row's index state stays frozen.
 func (s *Store) PendingIndexChunks(mediaFileID int64, limit int) ([]ChunkWithMedia, error) {
 	const filter = ` AND c.media_file_id = ?`
 	const orderLimit = ` ORDER BY c.media_file_id, c.start_cue_idx LIMIT ?`
 	args := []any{}
 	q := `SELECT ` + chunkJoinCols + `
 		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
-		WHERE c.indexed_at = 0` + orderLimit
+		WHERE c.indexed_at = 0 AND m.archived = 0` + orderLimit
 	if mediaFileID > 0 {
 		q = `SELECT ` + chunkJoinCols + `
 			FROM chunks c JOIN media_files m ON m.id = c.media_file_id
-			WHERE c.indexed_at = 0` + filter + orderLimit
+			WHERE c.indexed_at = 0 AND m.archived = 0` + filter + orderLimit
 		args = append(args, mediaFileID)
 	}
 	args = append(args, limit)
@@ -149,11 +151,13 @@ func (s *Store) EnsureAllChunksStale() error {
 	return err
 }
 
-// MediaIDsNeedingIndex lists media files with unindexed chunks, excluding error rows.
+// MediaIDsNeedingIndex lists media files with unindexed chunks, excluding
+// error rows. Archived rows are excluded so a full reindex never touches the
+// frozen index state of the archive.
 func (s *Store) MediaIDsNeedingIndex(limit int) ([]int64, error) {
 	rows, err := s.db.Query(`SELECT DISTINCT c.media_file_id FROM chunks c
 		JOIN media_files m ON m.id = c.media_file_id
-		WHERE c.indexed_at = 0 AND m.status != 'error' LIMIT ?`, limit)
+		WHERE c.indexed_at = 0 AND m.status != 'error' AND m.archived = 0 LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -170,14 +174,15 @@ func (s *Store) MediaIDsNeedingIndex(limit int) ([]int64, error) {
 }
 
 // RandomQuotes returns random indexed chunks for the landing page so the home
-// screen always shows dialog that actually exists in the library.
+// screen always shows dialog that actually exists in the library. Archived
+// rows are excluded even though their frozen status still reads 'indexed'.
 func (s *Store) RandomQuotes(limit int) ([]ChunkWithMedia, error) {
 	if limit <= 0 || limit > 12 {
 		limit = 6
 	}
 	rows, err := s.db.Query(`SELECT `+chunkJoinCols+`
 		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
-		WHERE c.indexed_at > 0 AND m.status = 'indexed'
+		WHERE c.indexed_at > 0 AND m.status = 'indexed' AND m.archived = 0
 		  AND length(c.text) BETWEEN 12 AND 220 AND TRIM(c.text) != ''
 		  AND substr(TRIM(c.text), 1, 1) != '['
 		ORDER BY RANDOM() LIMIT ?`, limit)
@@ -199,18 +204,22 @@ func (s *Store) RandomQuotes(limit int) ([]ChunkWithMedia, error) {
 }
 
 // GetChunkByKey resolves a chunk identity "mediaId:startIdx-endIdx".
+// Archived media resolve to nil so every consumer (public chunk endpoint,
+// search join-back, MCP scene tools) drops archived content at the store
+// boundary, even while stale Meili documents still exist.
 func (s *Store) GetChunkByKey(mediaID int64, startIdx, endIdx int) (*ChunkWithMedia, error) {
 	row := s.db.QueryRow(`SELECT `+chunkJoinCols+`
 		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
-		WHERE c.media_file_id=? AND c.start_cue_idx=? AND c.end_cue_idx=?`, mediaID, startIdx, endIdx)
+		WHERE c.media_file_id=? AND c.start_cue_idx=? AND c.end_cue_idx=? AND m.archived=0`, mediaID, startIdx, endIdx)
 	return scanChunkJoin(row)
 }
 
-// GetChunkByID resolves a chunk by its primary key.
+// GetChunkByID resolves a chunk by its primary key. Archived media resolve to
+// nil (see GetChunkByKey).
 func (s *Store) GetChunkByID(chunkID int64) (*ChunkWithMedia, error) {
 	row := s.db.QueryRow(`SELECT `+chunkJoinCols+`
 		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
-		WHERE c.id=?`, chunkID)
+		WHERE c.id=? AND m.archived=0`, chunkID)
 	return scanChunkJoin(row)
 }
 
