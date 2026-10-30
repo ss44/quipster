@@ -59,6 +59,53 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release create "${{ steps.ver.outputs.tag }}" --generate-notes
 
+      - name: Set up Node.js
+        if: steps.ver.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build frontend
+        if: steps.ver.outputs.skip != 'true'
+        run: |
+          cd web
+          npm install
+          npm run build
+
+      - name: Set up Go
+        if: steps.ver.outputs.skip != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - name: Build and upload binaries
+        if: steps.ver.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARGETS=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64" "windows/amd64")
+          for target in "${TARGETS[@]}"; do
+            GOOS=${target%/*}
+            GOARCH=${target#*/}
+            EXT=""
+            if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+            BIN="quipster${EXT}"
+            ARCHIVE="quipster-${{ steps.ver.outputs.tag }}-${GOOS}-${GOARCH}"
+            
+            echo "Building $GOOS/$GOARCH..."
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-s -w" -o "build/$ARCHIVE/$BIN" ./cmd/quipster
+            
+            pushd "build/$ARCHIVE" > /dev/null
+            if [ "$GOOS" = "windows" ]; then
+              zip -q -r "../../${ARCHIVE}.zip" .
+            else
+              tar -czf "../../${ARCHIVE}.tar.gz" .
+            fi
+            popd > /dev/null
+          done
+          
+          gh release upload "${{ steps.ver.outputs.tag }}" quipster-*.tar.gz quipster-*.zip
+
       # Tags pushed with GITHUB_TOKEN do not trigger other workflows, so the
       # docker-publish tag trigger never fires for automated tags. The
       # versioned image is therefore built and pushed here instead.
