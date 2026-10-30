@@ -134,7 +134,8 @@ func TestShareOutageWithinGrace(t *testing.T) {
 }
 
 // The full lifecycle: latch -> archive (with onArchived callback) -> return ->
-// restore, with an index job re-enqueued only when documents were deleted.
+// restore, with an index job re-enqueued for every restore so a crashed
+// de-index (docs gone, flag never latched) can never leave a row dark.
 //
 //nolint:gocyclo // linear lifecycle assertions across full scan passes
 func TestArchiveThenRestoreFullLifecycle(t *testing.T) {
@@ -202,23 +203,26 @@ func TestArchiveThenRestoreFullLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if indexJobs == 0 {
-		t.Fatal("deindexed restore must enqueue an index job")
+		t.Fatal("restore must always enqueue an index job: a crashed de-index can leave documents gone without the deindexed flag")
 	}
 
-	// Restores that happen before de-indexing keep their documents and must
-	// not enqueue index jobs.
+	// A follow-up scan must not enqueue duplicate index work: the unique-job
+	// dedup absorbs the re-enqueue while the first job is still queued.
 	if _, err := Run(context.Background(), root, nil, true, st, nil); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// Restoring before the de-index job runs must keep the documents: no index
-// job, no chunk flag reset. The pending archive_deindex job then becomes a
-// lazy no-op at execution time.
-func TestRestoreBeforeDeindexKeepsIndex(t *testing.T) {
+// Restoring before the de-index job runs still re-enqueues an index job: the
+// dedup makes it a no-op while the first job is queued, and it covers the case
+// where a de-index job deleted the Meili documents and crashed before latching
+// deindexed. The pending archive_deindex job then becomes a lazy no-op at
+// execution time.
+func TestRestoreBeforeDeindexStillRequeuesIndex(t *testing.T) {
 	st := archiveScanStore(t)
 	root := t.TempDir()
-	id := seedArchived(t, st, filepath.Join(root, "movies/Back.mkv"))
+	path := writeSingleMedia(t, root, "movies/Back.mkv")
+	id := seedArchived(t, st, path)
 
 	// Queue the de-index job as the scan's onArchived callback would.
 	_, _, err := st.EnqueueUniqueJob("archive_deindex", `{"mediaId":`+strconv.FormatInt(id, 10)+`}`, -1)
@@ -226,20 +230,28 @@ func TestRestoreBeforeDeindexKeepsIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The file is back; the scan restores it.
-	reindex, restored, err := st.RestoreSeenUnder(filepath.Join(root, "movies"), map[string]bool{filepath.Join(root, "movies/Back.mkv"): true})
+	// The file is back; the scan restores it and re-queues the index job.
+	res, err := Run(context.Background(), root, nil, true, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restored != 1 || len(reindex) != 0 {
-		t.Fatalf("restore = %d rows, reindex %v, want 1 and none", restored, reindex)
+	if res.Restored != 1 {
+		t.Fatalf("scan restored %d rows, want 1: %+v", res.Restored, res)
 	}
 	m, err := st.GetMedia(id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m == nil || m.Archived || m.Deindexed {
-		t.Fatalf("row = %+v, want active with docs intact", m)
+		t.Fatalf("row = %+v, want active", m)
+	}
+	var queued int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM jobs WHERE type='index' AND status='queued' AND payload=?`,
+		`{"mediaId":`+strconv.FormatInt(id, 10)+`}`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued == 0 {
+		t.Fatal("restore must queue one index job")
 	}
 }
 
@@ -338,5 +350,136 @@ func TestPartialWalkBlocksArchiveButRestoresSeen(t *testing.T) {
 	}
 	if sm == nil || sm.MissingAt != 0 {
 		t.Fatalf("seen row latch must clear even on partial walks: %+v", sm)
+	}
+}
+
+// A root-scoped admin scan (prune=false, as handleScan sends for an explicit
+// ?root=) must never drive archive decisions outside the roots it actually
+// walked. Files missing under unscanned roots stay active and unlatched: the
+// scan has no evidence about them, and a later full-library prune scan owns
+// their grace window.
+//
+//nolint:gocyclo // linear lifecycle assertions across full scan passes
+func TestRootScopedScanNeverArchivesUnwalkedRoots(t *testing.T) {
+	st := archiveScanStore(t)
+	root := t.TempDir()
+	moviesPath := writeSingleMedia(t, root, "movies/Back.mkv")
+	tvPath := writeSingleMedia(t, root, "tv/Gone.mkv")
+
+	if _, err := Run(context.Background(), root, nil, true, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(tvPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Root-scoped scans mirror handleScan's payload: explicit root, prune=false.
+	opts := Options{ArchiveEnabled: true, ArchiveGrace: 0, now: func() time.Time { return time.UnixMilli(5_000_000) }}
+	for i := 0; i < 2; i++ {
+		res, err := runWithOptions(context.Background(), root, []string{"movies"}, false, st, nil, opts)
+		if err != nil {
+			t.Fatalf("root-scoped scan %d: %v", i, err)
+		}
+		if res.Latched != 0 || res.Archived != 0 {
+			t.Fatalf("root-scoped scan %d = %+v, want no archive activity", i, res)
+		}
+	}
+	m, err := st.GetMediaByPath(tvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m == nil || m.Archived || m.MissingAt != 0 {
+		t.Fatalf("unwalked root row = %+v, want active and unlatched", m)
+	}
+	_ = moviesPath
+
+	// Contrast: a full-library prune scan owns the tv row's grace window.
+	if _, err = runWithOptions(context.Background(), root, nil, true, st, nil, opts); err != nil {
+		t.Fatal(err)
+	}
+	m, err = st.GetMediaByPath(tvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m == nil || m.MissingAt == 0 {
+		t.Fatalf("full-library scan must latch the missing tv row: %+v", m)
+	}
+	if _, err = runWithOptions(context.Background(), root, nil, true, st, nil, opts); err != nil {
+		t.Fatal(err)
+	}
+	m, err = st.GetMediaByPath(tvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m == nil || !m.Archived {
+		t.Fatalf("full-library scan must archive the tv row after grace: %+v", m)
+	}
+}
+
+// The walk-errors guard applies to root-scoped scans too: a partial walk under
+// the scoped root blocks all archive decisions for that scan. This is the
+// admin-path twin of TestPartialWalkBlocksArchiveButRestoresSeen.
+//
+//nolint:gocyclo // linear lifecycle assertions across full scan passes
+func TestRootScopedScanWalkErrorsBlockArchive(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory mode bits")
+	}
+	st := archiveScanStore(t)
+	root := t.TempDir()
+	moviesPath := writeSingleMedia(t, root, "movies/Back.mkv")
+	tvPath := writeSingleMedia(t, root, "tv/Gone.mkv")
+
+	if _, err := Run(context.Background(), root, nil, true, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(tvPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(moviesPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// An unreadable subdirectory inside the scoped root makes the walk partial.
+	locked := filepath.Join(root, "movies", "locked")
+	if merr := os.MkdirAll(locked, 0o750); merr != nil {
+		t.Fatal(merr)
+	}
+	if cerr := os.Chmod(locked, 0o000); cerr != nil {
+		t.Fatal(cerr)
+	}
+	t.Cleanup(func() {
+		//nolint:gosec // test cleanup restores a directory mode
+		if uerr := os.Chmod(locked, 0o750); uerr != nil {
+			t.Logf("restore mode: %v", uerr)
+		}
+	})
+
+	opts := Options{ArchiveEnabled: true, ArchiveGrace: 0}
+	for i := 0; i < 2; i++ {
+		res, err := runWithOptions(context.Background(), root, []string{"movies"}, false, st, nil, opts)
+		if err != nil {
+			t.Fatalf("root-scoped scan %d: %v", i, err)
+		}
+		if res.WalkErrors == 0 {
+			t.Fatalf("root-scoped scan %d must report walk errors: %+v", i, res)
+		}
+		if res.Latched != 0 || res.Archived != 0 {
+			t.Fatalf("partial root-scoped scan %d = %+v, want no archive activity", i, res)
+		}
+	}
+	tm, err := st.GetMediaByPath(tvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tm == nil || tm.Archived || tm.MissingAt != 0 {
+		t.Fatalf("unwalked root row = %+v, want active and unlatched", tm)
+	}
+	mm, err := st.GetMediaByPath(moviesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mm == nil || mm.Archived || mm.MissingAt != 0 {
+		t.Fatalf("missing row under the scoped root = %+v, want active and unlatched while the walk is partial", mm)
 	}
 }

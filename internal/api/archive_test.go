@@ -74,6 +74,28 @@ func TestRestoreEndpoint(t *testing.T) {
 	assert.Equal(t, false, body["reindexQueued"])
 }
 
+// A restore whose de-index job never ran (no deindexed flag) still queues a
+// reindex: the cheapest way to cover a de-index that deleted documents and
+// crashed before latching the flag.
+func TestRestoreEndpointAlwaysQueuesReindex(t *testing.T) {
+	st, deps := newEnv(t)
+	id := seedMedia(t, st)
+	archiveViaScan(t, st, id)
+	h := Router(deps)
+
+	rr := do(t, h, http.MethodPost, "/api/admin/media/"+strconv.FormatInt(id, 10)+"/restore", nil, nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	assert.Equal(t, true, body["restored"])
+	assert.Equal(t, true, body["reindexQueued"], "restores always queue the reindex")
+
+	var indexJobs int
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM jobs WHERE type='index' AND payload=?`,
+		`{"mediaId":`+strconv.FormatInt(id, 10)+`}`).Scan(&indexJobs))
+	assert.Equal(t, 1, indexJobs)
+}
+
 // seedMediaAt seeds one indexed media row at a distinct path.
 func seedMediaAt(t *testing.T, st *store.Store, path string) int64 {
 	t.Helper()

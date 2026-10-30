@@ -364,8 +364,12 @@ func (ix *Indexer) JobHandler() func(ctx context.Context, j *store.Job, progress
 // The archived re-check after the delete closes the restore race: if the row
 // was restored while the delete was in flight, the documents it still needs
 // were just removed, so the chunk flags are cleared and a standard-priority
-// index job re-adds them. Worst case is one redundant reindex; content is
-// never silently lost.
+// index job re-adds them. The check runs outside a transaction with the
+// restore path (GetMedia → delete → GetMedia), so a restore landing between
+// the first read and the delete leaves the restore's own index job to re-add
+// the docs, and this handler's re-check can then re-enqueue a second index
+// job for the same row. Worst case is one redundant reindex per raced
+// restore; content is never silently lost. See docs/video-archive-lifecycle.md.
 func (ix *Indexer) ArchiveJobHandler() func(ctx context.Context, j *store.Job, progress func(float64)) error {
 	return func(_ context.Context, j *store.Job, _ func(float64)) error {
 		var payload struct {

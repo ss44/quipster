@@ -136,8 +136,7 @@ Restore has two triggers sharing one code path (`restoreMediaIDs`):
 What restore does and does not do:
 
 - Clears `archived/archived_at/missing_at`, resets `deindexed=0`.
-- If `deindexed=1`: clears the media's chunk `indexed_at` flags and enqueues an `index` job (priority 1). `IndexMedia` re-adds every document from `chunks` + `media_files`; with a semantic embedder, vectors are regenerated server-side by Meili from the document template, so re-activation costs one Meili upload — no ffprobe, no subtitle extraction, no cue re-parsing, no chunk rebuild.
-- If `deindexed=0`: touches nothing in the index — the documents were never deleted, and the row becomes instantly searchable.
+- **Always** clears the media's chunk `indexed_at` flags and enqueues an `index` job (priority 1), regardless of `deindexed`. `IndexMedia` re-adds every document from `chunks` + `media_files`; with a semantic embedder, vectors are regenerated server-side by Meili from the document template, so re-activation costs one Meili upload — no ffprobe, no subtitle extraction, no cue re-parsing, no chunk rebuild. Doing this unconditionally is deliberate: a de-index job can delete the Meili documents and then crash before latching `deindexed`, and a trusted-flag restore would leave that row permanently dark in search (restored rows have no boot reconciliation pass). The cost is at most one redundant reindex per restore.
 - Does **not** enqueue a probe while cues exist. Probe metadata, subtitle tracks, cues, and chunks are intact. The single exception: a row archived while `status='pending'` restores with `status='pending'`, and the ordinary probe-recovery path probes it once the file is back — correct, because there was no caption data to preserve.
 
 The `ever_indexed` latch is never cleared by archive/restore; it continues to mean "docs may exist", and `deindexed` refines that during archive windows.
@@ -155,7 +154,7 @@ The `ever_indexed` latch is never cleared by archive/restore; it continues to me
 - **Ordering:** the `archived` flag commits before any Meili deletion is requested, and every read path gates on the flag. A de-index that is slow, failing, or never runs cannot leak archived content; it can only leave unused documents, cleaned by reconciliation.
 - **Meili down:** the job retries, then errors visibly; boot and query-time reconciliation re-enqueue unique jobs until the delete lands. The scan never fails because of Meili.
 - **Meili wiped or recreated:** `deindexed=1` rows believe their docs are gone (true); `deindexed=0` archived rows still get a delete-by-filter (a no-op on an empty index). Consistent either way.
-- **Restore/de-index races:** covered by the handler's post-delete re-check. The flag-then-delete ordering means the failure mode is always "too many documents, re-added later", never "missing content".
+- **Restore/de-index races:** covered by the handler's post-delete re-check and by restore always re-enqueueing the index job. The flag-then-delete ordering means the failure mode is always "too many documents, re-added later", never "missing content". The one benign redundancy: a restore racing a de-index can double-book one reindex (the handler's post-delete re-check and the restore's unconditional enqueue both fire); dedup collapses them when both are queued, and the cost is otherwise one extra reindex pass.
 - **Idempotence:** delete-by-filter is idempotent; archive/restore loops re-enqueue cleanly; repeated reconcile passes are no-ops once converged.
 - **Hybrid/semantic modes:** same index, same document shape; no embedder-side work is added on either transition.
 
@@ -163,7 +162,7 @@ The `ever_indexed` latch is never cleared by archive/restore; it continues to me
 
 - **Scan path:** adds at most three batched UPDATEs proportional to the number of missing/returned files plus one extra SELECT over the walked base (the same shape the old prune already ran). A 2,000-file removal completes in a handful of transactions; unchanged files cost nothing beyond that SELECT.
 - **De-index trickle:** priority `-1` + single worker means the archive backlog drains only when the queue is otherwise empty. Each job is ~2 Meili requests (submit + wait at the existing 300 ms poll); a 10k-file backlog drains in a few hours of idle trickle, invisible to probe/index latency.
-- **Restore burst (remounted drive):** produces normal-priority `index` jobs, identical in shape to a routine library index; `EnqueueUniqueJobs` dedupes overlapping scans.
+- **Restore burst (remounted drive):** produces normal-priority `index` jobs, identical in shape to a routine library index; `EnqueueUniqueJobs` dedupes overlapping scans. A restore that races a still-pending de-index can cost one redundant full reindex per raced row — bounded, and cheap next to the two-week re-probe the design eliminates.
 - **Read paths:** gating reuses rows already loaded; the extra integer columns in `mediaCols` are noise. Query-time reconciliation is one deduped INSERT per affected hit, amortized to zero once converged.
 - **Write pressure vs. before:** archival replaces cascade DELETEs of the largest tables (cues/chunks) with small flag UPDATEs — strictly less WAL and checkpoint work than the old prune.
 - **`jobs` table growth:** one row per archived media, consistent with existing per-media probe/index job retention.
@@ -172,7 +171,7 @@ The `ever_indexed` latch is never cleared by archive/restore; it continues to me
 
 | Surface | Change |
 |---|---|
-| `POST /api/admin/media/{id}/restore` | re-activates a row; response `{restored, reindexQueued}`; unknown id 404, active row a no-op |
+| `POST /api/admin/media/{id}/restore` | re-activates a row; response `{restored, reindexQueued, warning}` (warning names a de-index still in flight, if any); unknown id 404, active row a no-op |
 | `GET /api/media?archived=1\|any` | archived slice for the admin archive browser; default excludes archived |
 | `GET /api/media/{id}` | still resolves archived rows (with `archived: true`) so the admin can inspect and restore |
 | `GET /api/chunks/{id}`, `GET /api/clips/stream` | archived media 404 (clip rejects as absent, not a bad request) |
@@ -184,7 +183,7 @@ The `ever_indexed` latch is never cleared by archive/restore; it continues to me
 1. **Migration:** the four columns land via the existing `migrations` list; the index is created after the ALTER pass. Nothing is archived on deploy — the first completed scan only latches absences, and archiving begins one grace period later.
 2. **Tests** (all green at ≥85% statement coverage, enforced by `.githooks/pre-commit`):
    - `internal/store/archive_test.go`: grace partitioning, caption preservation, restore in both `deindexed` states, admin restore, latch guards, boot list, read-path exclusions (`ListMedia`/`TitleMatches`/`MediaIDsByStatus`/`MediaIDsNeedingIndex`/`PendingIndexChunks`/`RandomQuotes`/`PopularExamples`/chunk resolvers).
-   - `internal/scan/archive_test.go`: outage-within-grace costs nothing, full latch→archive→restore lifecycle, restore-before-deindex keeps documents, disabled pass, partial walk blocks archiving but still restores seen paths.
+   - `internal/scan/archive_test.go`: outage-within-grace costs nothing, full latch→archive→restore lifecycle, restore always re-enqueues the index job, disabled pass, partial walk blocks archiving but still restores seen paths.
    - `internal/indexer/archive_test.go`: de-index success/latch, lazy cancellation, error propagation (HTTP, task wait, failed task), restore race re-index, index-job archived guard.
    - `internal/search/archive_test.go`: archived hits dropped + reconciliation enqueued; title fallback excludes archived.
    - `internal/api/archive_test.go`: restore endpoint, media list filter, chunk/clip 404s, admin-visible archived flag.

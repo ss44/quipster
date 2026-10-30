@@ -186,13 +186,16 @@ func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *i
 
 // enqueueArchiveDeindex enqueues one unique low-priority de-index job per
 // archived media, in bounded batches. Deduplication makes the call idempotent
-// across overlapping scans and reconcile passes.
+// across overlapping scans and reconcile passes. A failed batch does not stop
+// the remaining batches: the next boot reconcile would recover the backlog,
+// but continuing here shrinks the gap instead of leaving it until restart.
 func enqueueArchiveDeindex(st *store.Store, ids []int64) {
 	if len(ids) == 0 {
 		return
 	}
 	const batch = 1000
 	enqueued := 0
+	skipped := 0
 	for start := 0; start < len(ids); start += batch {
 		specs := make([]store.JobSpec, 0, min(batch, len(ids)-start))
 		for _, id := range ids[start:min(start+batch, len(ids))] {
@@ -205,12 +208,16 @@ func enqueueArchiveDeindex(st *store.Store, ids []int64) {
 		n, err := st.EnqueueUniqueJobs(specs)
 		if err != nil {
 			log.Printf("enqueue archive deindex jobs: %v", err)
-			break
+			skipped += len(specs)
+			continue
 		}
 		enqueued += n
 	}
 	if enqueued > 0 {
 		log.Printf("queued %d archive de-index job(s)", enqueued)
+	}
+	if skipped > 0 {
+		log.Printf("skipped %d archive de-index job(s) after enqueue errors; boot reconcile will retry them", skipped)
 	}
 }
 

@@ -347,12 +347,13 @@ func (s *Store) ArchiveMissingUnder(base string, keep map[string]bool, grace tim
 // walk: a seen path was genuinely observed, so clearing its absence state
 // cannot hide a real disappearance.
 //
-// Restoring an archived row clears the archive flags and, when the Meili
-// documents were already deleted (deindexed=1), resets the chunk index flags
-// so the normal index job re-adds them. Rows restored while their documents
-// were never deleted keep their index untouched and become searchable
-// instantly. Returns the ids that need index jobs re-enqueued and how many
-// archived rows were restored.
+// Restoring an archived row clears the archive flags and always resets the
+// chunk index flags so the normal index job re-adds its documents. The reset
+// is unconditional because deindexed is not a reliable record of what Meili
+// still holds: a de-index job that crashed after deleting documents but before
+// MarkMediaDeindexed leaves deindexed=0 with the documents gone, and restored
+// rows have no boot reconciliation pass. The cost is at most one redundant
+// reindex per restore; the alternative is a permanently dark row in search.
 func (s *Store) RestoreSeenUnder(base string, keep map[string]bool) (needsReindex []int64, restored int, err error) {
 	base = strings.TrimSuffix(base, "/")
 	rows, err := s.db.Query(`SELECT id, path, archived FROM media_files
@@ -395,9 +396,16 @@ func (s *Store) RestoreMedia(id int64) (needsReindex, restored bool, err error) 
 }
 
 // restoreMediaIDs applies the restore transition to the given ids in bounded
-// batches. Returns the subset whose Meili documents had been deleted and
-// therefore need an index job re-enqueued, plus how many rows were actually
-// archived before this call.
+// batches. Returns the ids that need an index job re-enqueued, plus how many
+// rows were actually archived before this call.
+//
+// Every restored row is marked for re-indexing, not just the ones with
+// deindexed=1: a de-index job can have deleted the Meili documents and then
+// crashed before MarkMediaDeindexed, leaving a restored row with deindexed=0
+// and no documents. Re-activating such a row without reindexing would leave it
+// permanently dark in search, and restored rows have no boot reconciliation
+// pass. The cost is at most one redundant reindex per restore; the alternative
+// is a permanently dark row in search.
 func (s *Store) restoreMediaIDs(ids []int64) (needsReindex []int64, restored int, err error) {
 	if len(ids) == 0 {
 		return nil, 0, nil
@@ -405,34 +413,32 @@ func (s *Store) restoreMediaIDs(ids []int64) (needsReindex []int64, restored int
 	ph := placeholders(len(ids))
 	args := idArgs(ids)
 	//nolint:gosec // the concatenated part is a "?" placeholder list sized by len(ids); values are parameterized.
-	rows, err := s.db.Query(`SELECT id, deindexed FROM media_files WHERE id IN (`+ph+`) AND archived=1`, args...)
+	rows, err := s.db.Query(`SELECT id FROM media_files WHERE id IN (`+ph+`) AND archived=1`, args...)
 	if err != nil {
 		return nil, 0, err
 	}
 	var archivedIDs []int64
 	for rows.Next() {
-		var id, deindexed int64
-		if scanErr := rows.Scan(&id, &deindexed); scanErr != nil {
+		var id int64
+		if scanErr := rows.Scan(&id); scanErr != nil {
 			closeRows(rows)
 			return nil, 0, scanErr
 		}
 		archivedIDs = append(archivedIDs, id)
-		if deindexed > 0 {
-			needsReindex = append(needsReindex, id)
-		}
 	}
 	closeRows(rows)
 	if err = rows.Err(); err != nil {
 		return nil, 0, err
 	}
-	// Documents for these rows are gone from Meili; make the normal index job
-	// re-add every chunk. Media restored before de-indexing keep their docs
-	// and their index flags.
-	if len(needsReindex) > 0 {
-		if cerr := clearChunkFlagsBatched(s.db, needsReindex); cerr != nil {
+	// Make the normal index job re-add every chunk from the retained captions.
+	// The index job re-uses the doc-id scheme, so the re-add is a plain upload
+	// per chunk: no probe, no extraction, no re-read of the media file.
+	if len(archivedIDs) > 0 {
+		if cerr := clearChunkFlagsBatched(s.db, archivedIDs); cerr != nil {
 			return nil, 0, cerr
 		}
 	}
+	needsReindex = archivedIDs
 	restored, err = s.clearArchiveFlagsBatched(archivedIDs)
 	if err != nil {
 		return nil, 0, err
@@ -625,6 +631,26 @@ func (s *Store) MediaIDsByStatus(statuses ...string) ([]int64, error) {
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// CountMissingByStatus counts non-archived rows matching the given statuses
+// that are inside an absence grace window (missing_at set). MediaIDsByStatus
+// deliberately excludes those rows; this count lets callers surface the skip
+// so a re-probe over a flapping share is not mistaken for a silent no-op.
+func (s *Store) CountMissingByStatus(statuses ...string) (int, error) {
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
+	args := make([]any, 0, len(statuses))
+	for _, st := range statuses {
+		args = append(args, st)
+	}
+	//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length statuses slice; values are parameterized.
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM media_files
+		WHERE status IN (`+ph+`) AND archived=0 AND missing_at!=0`, args...).Scan(&n)
+	return n, err
 }
 
 // TitleMatches lists indexed media whose title or show title contains the

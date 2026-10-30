@@ -141,21 +141,24 @@ func TestRestoreSeenUnder(t *testing.T) {
 	// Simulate a completed de-index for a only.
 	require.NoError(t, st.MarkMediaDeindexed(deindexed))
 
-	// A scan sees b and c again, but not a. b restores without touching the
-	// index (docs were never deleted); a stays archived.
+	// A scan sees b and c again, but not a. b restores and is always marked
+	// for re-index: a de-index job can delete documents and crash before
+	// latching deindexed, so trusting the flag would leave b dark in search.
+	// a stays archived.
 	reindex, restored, err := st.RestoreSeenUnder("/lib", map[string]bool{
 		"/lib/b.mkv": true,
 		"/lib/c.mkv": true,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 1, restored, "only b transitions out of the archive; c was never latched")
-	assert.Empty(t, reindex, "deindexed=0 restores must not re-index")
+	assert.Equal(t, []int64{pending}, reindex, "restores always re-index to cover crashed de-indexes")
 
 	mb, err := st.GetMedia(pending)
 	require.NoError(t, err)
 	require.False(t, mb.Archived)
 	assert.Equal(t, "indexed", mb.Status)
-	// Chunk flags stay latched: the documents were never deleted.
+	// Chunk flags are stale: the index job re-adds every chunk from the
+	// retained captions, which is a plain upload per chunk.
 	flags, err := st.DB().Query(`SELECT indexed_at FROM chunks WHERE media_file_id=?`, pending)
 	require.NoError(t, err)
 	var latchedFlags []int64
@@ -166,7 +169,7 @@ func TestRestoreSeenUnder(t *testing.T) {
 	}
 	require.NoError(t, flags.Err())
 	require.NoError(t, flags.Close())
-	assert.NotZero(t, latchedFlags[0], "chunk flags must stay when docs were never deleted")
+	assert.Zero(t, latchedFlags[0], "chunk flags must be stale after a restore")
 
 	// A later scan sees a as well: restore with deindexed=1 must clear chunk
 	// flags and report the id for index re-enqueue.
