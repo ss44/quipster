@@ -758,7 +758,7 @@ func (d Deps) handleReprobe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	n := 0
+	specs := make([]store.JobSpec, 0, len(ids))
 	seen := make(map[int64]struct{}, len(ids))
 	for _, id := range ids {
 		if id <= 0 {
@@ -769,11 +769,15 @@ func (d Deps) handleReprobe(w http.ResponseWriter, r *http.Request) {
 		}
 		seen[id] = struct{}{}
 		payload, _ := json.Marshal(map[string]any{"mediaId": id}) //nolint:errcheck // the map holds only an int64, so marshaling cannot fail
-		if _, err := d.St.EnqueueJob("probe", string(payload), 2); err == nil {
-			n++
-		}
+		specs = append(specs, store.JobSpec{Type: "probe", Payload: string(payload), Priority: 2})
 	}
-	writeJSON(w, map[string]any{"enqueued": n, "skippedMissing": skippedMissing})
+	// Enqueue in one transaction: per-row commits would re-create the writer
+	// contention this endpoint is meant to recover from.
+	if _, err := d.St.EnqueueJobs(specs); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"enqueued": len(specs), "skippedMissing": skippedMissing})
 }
 
 // handleQueueStop pauses the queue, aborts in-flight jobs and clears queued work.
