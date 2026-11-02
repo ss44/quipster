@@ -22,7 +22,7 @@
               :key="previewURL"
               :src="previewURL"
               :poster="posterURL"
-              controls
+              :controls="!previewLoading"
               autoplay
               preload="auto"
               @loadeddata="onPreviewLoaded"

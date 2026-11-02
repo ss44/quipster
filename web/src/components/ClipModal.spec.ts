@@ -112,6 +112,18 @@ describe('ClipModal preview warning (issue #32)', () => {
     document.body.innerHTML = ''
   })
 
+  it('hides native controls until the preview has loaded', async () => {
+    const video = qs<HTMLVideoElement>('video')!
+    expect(video.hasAttribute('controls')).toBe(false)
+    expect(qs('.preview-overlay')).not.toBeNull()
+
+    fireMediaEvent(video, 'loadeddata')
+    await wrapper.vm.$nextTick()
+
+    expect(video.hasAttribute('controls')).toBe(true)
+    expect(qs('.preview-overlay')).toBeNull()
+  })
+
   it('shows the warning only for a genuine, unrecoverable playback failure', async () => {
     const video = qs<HTMLVideoElement>('video')!
     fireMediaEvent(video, 'error', MEDIA_ERR_SRC_NOT_SUPPORTED)
