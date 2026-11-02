@@ -175,7 +175,7 @@ func TestNodeClaimLifecycle(t *testing.T) {
 	// Complete as error: requeued within the retry budget.
 	rec = serveNode(t, d, nodeJSON(http.MethodPost, fmt.Sprintf("/api/nodes/jobs/%d/complete", work.JobID), token, `{"status":"error","error":"boom"}`))
 	require.Equal(t, http.StatusOK, rec.Code)
-	j, err := st.JobByID(work.JobID)
+	j, err := st.GetJob(work.JobID)
 	require.NoError(t, err)
 	assert.Equal(t, "queued", j.Status)
 }
@@ -239,7 +239,7 @@ func TestNodeProbeResultUpload(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	j, err := st.JobByID(jobID)
+	j, err := st.GetJob(jobID)
 	require.NoError(t, err)
 	assert.Equal(t, "done", j.Status)
 	m, err := st.GetMedia(mediaID)
@@ -270,7 +270,7 @@ func TestNodeClipResultUpload(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	j, err := st.JobByID(jobID)
+	j, err := st.GetJob(jobID)
 	require.NoError(t, err)
 	assert.Equal(t, "done", j.Status)
 	key := svc.Clips.CacheKey(clips.Request{MediaID: mediaID, Start: 1, End: 3, PadMs: 250, Mode: "accurate"})
@@ -484,7 +484,7 @@ func TestNodeResultSubtitleReadError(t *testing.T) {
 	r.Header.Set("Content-Type", "multipart/form-data; boundary=BOUNDARY")
 	rec := serveNode(t, d, r)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	j, err := st.JobByID(jobID)
+	j, err := st.GetJob(jobID)
 	require.NoError(t, err)
 	assert.Equal(t, "running", j.Status, "a failed upload must not finalize the lease")
 }

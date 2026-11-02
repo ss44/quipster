@@ -547,8 +547,3 @@ func (s *Store) EnqueueUniqueJob(jobType, payload string, priority int) (int64, 
 	id, err := s.EnqueueJob(jobType, payload, priority)
 	return id, true, err
 }
-
-// JobByID is retained as a compatibility alias for GetJob.
-func (s *Store) JobByID(id int64) (*Job, error) {
-	return s.GetJob(id)
-}

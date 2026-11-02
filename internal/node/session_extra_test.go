@@ -68,7 +68,7 @@ func TestRecoverAuthorizationOnRevocation(t *testing.T) {
 	require.NoError(t, err)
 	deadline = time.Now().Add(20 * time.Second)
 	for {
-		j, jerr := fs.st.JobByID(job2)
+		j, jerr := fs.st.GetJob(job2)
 		require.NoError(t, jerr)
 		if j.Status == "done" || time.Now().After(deadline) {
 			assert.Equal(t, "done", j.Status, "node should recover and finish post-revocation work")
@@ -116,7 +116,7 @@ func TestHeartbeatPauseCancelsInFlight(t *testing.T) {
 	// Wait until the job is running, then pause the queue.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		j, jerr := fs.st.JobByID(jobID)
+		j, jerr := fs.st.GetJob(jobID)
 		require.NoError(t, jerr)
 		if j.Status == "running" || time.Now().After(deadline) {
 			break
@@ -129,7 +129,7 @@ func TestHeartbeatPauseCancelsInFlight(t *testing.T) {
 	// server requeues it.
 	deadline = time.Now().Add(15 * time.Second)
 	for {
-		j, jerr := fs.st.JobByID(jobID)
+		j, jerr := fs.st.GetJob(jobID)
 		require.NoError(t, jerr)
 		if j.Status == "queued" || time.Now().After(deadline) {
 			assert.Equal(t, "queued", j.Status, "paused queue must requeue the in-flight job")

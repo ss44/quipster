@@ -31,12 +31,12 @@ func TestGetJobEnrichesMediaMetadata(t *testing.T) {
 	assert.Nil(t, missing)
 }
 
-func TestJobByIDReturnsRawRow(t *testing.T) {
+func TestGetJobReturnsPayload(t *testing.T) {
 	db := openTest(t)
 	jobID, err := db.EnqueueJob("index", `{"mediaId":7}`, 2)
 	require.NoError(t, err)
 
-	job, err := db.JobByID(jobID)
+	job, err := db.GetJob(jobID)
 	require.NoError(t, err)
 	require.NotNil(t, job)
 	assert.Equal(t, jobID, job.ID)
@@ -44,7 +44,7 @@ func TestJobByIDReturnsRawRow(t *testing.T) {
 	assert.Equal(t, `{"mediaId":7}`, job.Payload)
 	assert.Equal(t, int64(7), mediaIDFromPayload(job.Payload))
 
-	missing, err := db.JobByID(424242)
+	missing, err := db.GetJob(424242)
 	require.NoError(t, err)
 	assert.Nil(t, missing)
 }

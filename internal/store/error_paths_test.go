@@ -38,9 +38,6 @@ func TestStoreEmptyCollectionShortCircuits(t *testing.T) {
 func TestJobLookupsAndStatsEdgeCases(t *testing.T) {
 	s := openTest(t)
 
-	if j, err := s.JobByID(404); j != nil || err != nil {
-		t.Fatalf("JobByID(missing) = %v, %v", j, err)
-	}
 	if j, err := s.GetJob(404); j != nil || err != nil {
 		t.Fatalf("GetJob(missing) = %v, %v", j, err)
 	}
@@ -73,7 +70,7 @@ func TestJobLookupsAndStatsEdgeCases(t *testing.T) {
 	assert.Equal(t, "done", job.Status)
 	assert.EqualValues(t, 11, job.MediaID)
 
-	byID, err := s.JobByID(errID)
+	byID, err := s.GetJob(errID)
 	require.NoError(t, err)
 	require.NotNil(t, byID)
 	assert.Equal(t, "error", byID.Status)
@@ -244,8 +241,6 @@ func TestClosedStoreTailOperations(t *testing.T) {
 	mustErr("MediaSizes", err)
 	_, err = s.GetJob(1)
 	mustErr("GetJob", err)
-	_, err = s.JobByID(1)
-	mustErr("JobByID", err)
 
 	// Nodes.
 	_, err = s.UpsertNode("n", "fp", "v", "secret")

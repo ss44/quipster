@@ -60,7 +60,7 @@ func TestApplyProbeResultArchivedDropsOutcome(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, cues)
 
-	j, err := st.JobByID(jobID)
+	j, err := st.GetJob(jobID)
 	require.NoError(t, err)
 	assert.Equal(t, "done", j.Status)
 	assert.Contains(t, j.Error, "archived")
