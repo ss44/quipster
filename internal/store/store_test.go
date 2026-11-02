@@ -48,6 +48,17 @@ func TestOpenAppliesBusyTimeout(t *testing.T) {
 	}
 }
 
+// TestOpenCreatesChunksMediaIndex verifies the migration indexes chunk deletes
+// by media_file_id instead of scanning the whole chunks table.
+func TestOpenCreatesChunksMediaIndex(t *testing.T) {
+	s := openTest(t)
+	var name string
+	err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_chunks_media'`).Scan(&name)
+	if err != nil {
+		t.Fatalf("idx_chunks_media missing: %v", err)
+	}
+}
+
 // TestUpsertMediaReturnsUpdatedRowID guards against using LastInsertId after
 // an ON CONFLICT DO UPDATE: that rowid belongs to whichever row was inserted
 // last on the connection, so a changed existing file would hand scan the wrong
