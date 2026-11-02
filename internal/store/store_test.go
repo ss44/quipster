@@ -35,6 +35,19 @@ func TestOpenAppliesWALSizeLimit(t *testing.T) {
 	}
 }
 
+// TestOpenAppliesBusyTimeout verifies pooled connections wait long enough for
+// batched subtitle writes to release SQLite's writer lock.
+func TestOpenAppliesBusyTimeout(t *testing.T) {
+	s := openTest(t)
+	var timeout int64
+	if err := s.db.QueryRow(`PRAGMA busy_timeout`).Scan(&timeout); err != nil {
+		t.Fatalf("read busy_timeout: %v", err)
+	}
+	if timeout != busyTimeoutMS {
+		t.Fatalf("busy_timeout = %d, want %d", timeout, busyTimeoutMS)
+	}
+}
+
 // TestUpsertMediaReturnsUpdatedRowID guards against using LastInsertId after
 // an ON CONFLICT DO UPDATE: that rowid belongs to whichever row was inserted
 // last on the connection, so a changed existing file would hand scan the wrong

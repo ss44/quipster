@@ -20,6 +20,11 @@ type Store struct {
 	db *sql.DB
 }
 
+// busyTimeoutMS bounds how long a writer waits for SQLite's single writer
+// slot. Subtitle writes are batched, but a large media can still hold the lock
+// for several seconds while other workers wait.
+const busyTimeoutMS = 30000
+
 // walSizeLimitBytes bounds the WAL after a checkpoint. SQLite does not shrink
 // the WAL by default, so a one-off bulk scan or probe burst can leave a
 // multi-gigabyte sidecar that slows startup, recovery, and backups.
@@ -30,7 +35,7 @@ const walSizeLimitBytes = 256 << 20
 // and immediate transactions so concurrent readers work alongside serialized
 // writers.
 func dsn(path string) string {
-	return fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=journal_size_limit(%d)&_txlock=immediate", path, walSizeLimitBytes)
+	return fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=journal_size_limit(%d)&_txlock=immediate", path, busyTimeoutMS, walSizeLimitBytes)
 }
 
 // Open opens (and migrates) the SQLite database at the given path. The DSN
