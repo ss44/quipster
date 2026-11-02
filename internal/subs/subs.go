@@ -4,9 +4,11 @@ package subs
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/asticode/go-astisub"
@@ -209,7 +211,8 @@ func ParseBytes(data []byte, ext string) ([]Cue, error) {
 }
 
 func fromAstisub(subs *astisub.Subtitles) []Cue {
-	var out []Cue
+	out := make([]Cue, 0, len(subs.Items))
+	seen := make(map[cueKey]struct{}, len(subs.Items))
 	for _, it := range subs.Items {
 		if it.StartAt < 0 || it.EndAt <= it.StartAt {
 			continue
@@ -222,7 +225,7 @@ func fromAstisub(subs *astisub.Subtitles) []Cue {
 			}
 		}
 		text := normalizeText(strings.Join(parts, " "))
-		if text == "" {
+		if text == "" || looksLikeDrawingCommand(text) {
 			continue
 		}
 		start := it.StartAt.Seconds()
@@ -231,10 +234,54 @@ func fromAstisub(subs *astisub.Subtitles) []Cue {
 		if end <= start {
 			end = start + 0.5
 		}
+		// ASS karaoke/sign tracks frequently repeat the same syllable with
+		// identical timing. Deduplicate on millisecond precision so one
+		// episode cannot balloon into tens of thousands of identical cues.
+		key := cueKey{
+			startMS: int64(math.Round(start * 1000)),
+			endMS:   int64(math.Round(end * 1000)),
+			text:    text,
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
 		out = append(out, Cue{Start: start, End: end, Text: text})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Start < out[j].Start })
 	return out
+}
+
+// cueKey identifies a cue for exact-duplicate removal at millisecond precision.
+type cueKey struct {
+	text    string
+	startMS int64
+	endMS   int64
+}
+
+// drawingVerbs are the first tokens of ASS vector drawing commands. FFmpeg's
+// SRT conversion drops the {\p1} override but leaves the path data behind, so
+// those lines otherwise become searchable dialog.
+var drawingVerbs = map[string]bool{
+	"m": true, "l": true, "b": true, "c": true,
+	"s": true, "q": true, "t": true, "p": true,
+}
+
+// looksLikeDrawingCommand reports whether text is ASS vector path data rather
+// than dialog. Requiring a command token plus a majority of numeric operands
+// keeps legitimate lines that happen to start with a short word.
+func looksLikeDrawingCommand(text string) bool {
+	fields := strings.Fields(text)
+	if len(fields) < 6 || !drawingVerbs[strings.ToLower(fields[0])] {
+		return false
+	}
+	numeric := 0
+	for _, f := range fields[1:] {
+		if _, err := strconv.ParseFloat(strings.Trim(f, ","), 64); err == nil {
+			numeric++
+		}
+	}
+	return numeric >= len(fields)/2
 }
 
 // Offset shifts all cues by the given seconds (used for container start_time drift).
