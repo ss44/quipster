@@ -58,17 +58,21 @@ function setMode(value: Exclude<SearchMode, ''>) {
   void router.replace({ name: 'search', query: { q: query.value, mode: value } })
 }
 
-onMounted(async () => {
-  try {
-    quotes.value = (await api.quotes(4)).quotes ?? []
-  } catch {
-    quotes.value = []
-  }
-  try {
-    examples.value = (await api.examples()).examples
-  } catch {
-    examples.value = []
-  }
+onMounted(() => {
+  void api.quotes(4)
+    .then(({ quotes: nextQuotes }) => {
+      quotes.value = nextQuotes ?? []
+    })
+    .catch(() => {
+      quotes.value = []
+    })
+  void api.examples()
+    .then(({ examples: nextExamples }) => {
+      examples.value = nextExamples
+    })
+    .catch(() => {
+      examples.value = []
+    })
 })
 
 function openQuote(quote: Quote) {

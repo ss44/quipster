@@ -128,6 +128,25 @@ describe('SearchView landing', () => {
     expect(api.search).not.toHaveBeenCalled()
   })
 
+  it('loads example queries without waiting for quotes', async () => {
+    let resolveQuotes!: () => void
+    const quotesPending = new Promise<void>((resolve) => {
+      resolveQuotes = resolve
+    })
+    vi.mocked(api.quotes).mockImplementation(async () => {
+      await quotesPending
+      return { quotes: [] }
+    })
+    vi.mocked(api.examples).mockResolvedValue({ examples: ['what do you mean'] })
+
+    await mountView('/')
+
+    expect(api.examples).toHaveBeenCalledTimes(1)
+    resolveQuotes()
+    await flushPromises()
+    expect(wrapper!.text()).toContain('what do you mean')
+  })
+
   it('offers example queries when the library has no quotes', async () => {
     vi.mocked(api.examples).mockResolvedValue({ examples: ['what do you mean'] })
     const router = await mountView('/')
