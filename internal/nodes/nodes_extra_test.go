@@ -113,7 +113,7 @@ func TestClaimBadPayloadFinalizesJob(t *testing.T) {
 	w, err := svc.Claim(context.Background(), node.ID, []string{"probe"})
 	require.NoError(t, err)
 	assert.Nil(t, w)
-	j, err := st.JobByID(jobID)
+	j, err := st.GetJob(jobID)
 	require.NoError(t, err)
 	assert.Equal(t, "error", j.Status)
 	assert.Equal(t, "bad job payload", j.Error)
@@ -130,7 +130,7 @@ func TestClaimBadClipPayloadFinalizesJob(t *testing.T) {
 	w, err := svc.Claim(context.Background(), node.ID, []string{"clip"})
 	require.NoError(t, err)
 	assert.Nil(t, w)
-	j, err := st.JobByID(jobID)
+	j, err := st.GetJob(jobID)
 	require.NoError(t, err)
 	assert.Equal(t, "error", j.Status)
 	assert.Equal(t, "bad clip payload", j.Error)
@@ -231,7 +231,7 @@ func TestJanitorIgnoresFreshNodes(t *testing.T) {
 	}
 	cancel()
 	<-done
-	j, err := st.JobByID(jobID)
+	j, err := st.GetJob(jobID)
 	require.NoError(t, err)
 	assert.Equal(t, "running", j.Status, "a live node keeps its lease")
 }

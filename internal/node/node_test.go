@@ -313,7 +313,7 @@ cat > "$out" <<'SRT'
 	// Wait for the job to be finished by the node's upload.
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		j, jerr := fs.st.JobByID(jobID)
+		j, jerr := fs.st.GetJob(jobID)
 		require.NoError(t, jerr)
 		if j.Status == "done" {
 			break
@@ -324,7 +324,7 @@ cat > "$out" <<'SRT'
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	j, err := fs.st.JobByID(jobID)
+	j, err := fs.st.GetJob(jobID)
 	require.NoError(t, err)
 	assert.Equal(t, "done", j.Status)
 	m, err := fs.st.GetMedia(id)
@@ -384,7 +384,7 @@ printf 'render-bytes' > "$out"
 
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		j, jerr := fs.st.JobByID(jobID)
+		j, jerr := fs.st.GetJob(jobID)
 		require.NoError(t, jerr)
 		if j.Status == "done" || j.Status == "error" || time.Now().After(deadline) {
 			require.Equal(t, "done", j.Status, "error=%q", j.Error)
@@ -428,7 +428,7 @@ func TestNodeErrorVerdictRequeues(t *testing.T) {
 	// job finishes done with the media marked errored.
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		j, jerr := fs.st.JobByID(jobID)
+		j, jerr := fs.st.GetJob(jobID)
 		require.NoError(t, jerr)
 		if j.Status == "done" || time.Now().After(deadline) {
 			require.Equal(t, "done", j.Status, "media-level failures must finish the job")
@@ -472,14 +472,14 @@ func TestPausedQueueStopsClaiming(t *testing.T) {
 	go func() { done <- Run(ctx, cfg, "test-version") }()
 
 	time.Sleep(500 * time.Millisecond)
-	j, err := fs.st.JobByID(jobID)
+	j, err := fs.st.GetJob(jobID)
 	require.NoError(t, err)
 	assert.Equal(t, "queued", j.Status, "paused queue must not be claimed")
 
 	require.NoError(t, fs.st.SetQueuePaused(false))
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		j, err := fs.st.JobByID(jobID)
+		j, err := fs.st.GetJob(jobID)
 		require.NoError(t, err)
 		if j.Status != "queued" || time.Now().After(deadline) {
 			break

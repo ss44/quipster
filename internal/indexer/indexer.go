@@ -455,12 +455,13 @@ func (ix *Indexer) ReindexAll() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	n := 0
+	specs := make([]store.JobSpec, 0, len(ids))
 	for _, id := range ids {
 		payload := fmt.Sprintf(`{"mediaId":%d}`, id)
-		if _, err := ix.st.EnqueueJob("index", payload, 2); err == nil {
-			n++
-		}
+		specs = append(specs, store.JobSpec{Type: "index", Payload: payload, Priority: 2})
 	}
-	return n, nil
+	if _, err := ix.st.EnqueueJobs(specs); err != nil {
+		return 0, err
+	}
+	return len(specs), nil
 }

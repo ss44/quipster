@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const jobColumns = "id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at"
+
 // Job is one row of the processing queue, optionally enriched with media
 // metadata for display.
 type Job struct {
@@ -175,8 +177,8 @@ func (s *Store) ClaimJob(ctx context.Context, workerID string, types []string) (
 			log.Printf("store: close job conn: %v", cerr)
 		}
 	}()
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return nil, err
+	if _, beginErr := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); beginErr != nil {
+		return nil, beginErr
 	}
 	rollback := func() {
 		// The rollback must not depend on the caller's context: a canceled
@@ -199,19 +201,16 @@ func (s *Store) ClaimJob(ctx context.Context, workerID string, types []string) (
 		`UPDATE jobs SET status='running', worker_id=?, started_at=?, attempts=attempts+1
 		 WHERE id = (SELECT id FROM jobs WHERE status='queued' AND type IN (`+ph+`) ORDER BY priority DESC, id LIMIT 1)
 		 RETURNING id, type, payload, priority, attempts`, args...)
-	var j Job
-	if err := row.Scan(&j.ID, &j.Type, &j.Payload, &j.Priority, &j.Attempts); err != nil {
+	job, err := scanClaimedJob(row)
+	if err != nil || job == nil {
 		rollback()
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
 		return nil, err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		rollback()
 		return nil, err
 	}
-	return &j, nil
+	return job, nil
 }
 
 // FinishJob marks a job done or errored, latching full progress on success.
@@ -293,7 +292,7 @@ func (s *Store) JobStats() (*JobStats, error) {
 
 // ListJobs lists the most recent jobs with media metadata attached.
 func (s *Store) ListJobs(limit int) ([]Job, error) {
-	rows, err := s.db.Query(`SELECT id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at
+	rows, err := s.db.Query(`SELECT `+jobColumns+`
 		FROM jobs ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -307,7 +306,7 @@ func (s *Store) ListJobs(limit int) ([]Job, error) {
 
 // RunningJobs lists currently executing jobs with media metadata attached.
 func (s *Store) RunningJobs(limit int) ([]Job, error) {
-	rows, err := s.db.Query(`SELECT id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at
+	rows, err := s.db.Query(`SELECT `+jobColumns+`
 		FROM jobs WHERE status='running' ORDER BY started_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -326,7 +325,7 @@ func (s *Store) FinishedJobsSince(since int64, limit int) ([]Job, error) {
 	if limit <= 0 || limit > 20000 {
 		limit = 20000
 	}
-	rows, err := s.db.Query(`SELECT id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at
+	rows, err := s.db.Query(`SELECT `+jobColumns+`
 		FROM jobs WHERE status='done' AND finished_at>=? ORDER BY finished_at DESC LIMIT ?`, since, limit)
 	if err != nil {
 		return nil, err
@@ -362,15 +361,37 @@ func (s *Store) MediaSizes(ids []int64) (map[int64]int64, error) {
 	return out, rows.Err()
 }
 
+func scanJob(row rowScanner) (*Job, error) {
+	var j Job
+	if err := row.Scan(&j.ID, &j.Type, &j.Payload, &j.Status, &j.Priority, &j.Attempts, &j.WorkerID, &j.Error, &j.Progress, &j.CreatedAt, &j.StartedAt, &j.FinishedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &j, nil
+}
+
+func scanClaimedJob(row rowScanner) (*Job, error) {
+	var job Job
+	if err := row.Scan(&job.ID, &job.Type, &job.Payload, &job.Priority, &job.Attempts); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &job, nil
+}
+
 func scanJobs(rows *sql.Rows) ([]Job, error) {
 	defer closeRows(rows)
 	var out []Job
 	for rows.Next() {
-		var j Job
-		if err := rows.Scan(&j.ID, &j.Type, &j.Payload, &j.Status, &j.Priority, &j.Attempts, &j.WorkerID, &j.Error, &j.Progress, &j.CreatedAt, &j.StartedAt, &j.FinishedAt); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, j)
+		out = append(out, *j)
 	}
 	return out, rows.Err()
 }
@@ -487,19 +508,11 @@ func displayName(m *MediaFile) string {
 // GetJob returns one job by id, enriched with media metadata like ListJobs,
 // or nil when the id is unknown.
 func (s *Store) GetJob(jobID int64) (*Job, error) {
-	rows, err := s.db.Query(`SELECT id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at
-		FROM jobs WHERE id=?`, jobID)
-	if err != nil {
-		return nil, err
+	job, err := scanJob(s.db.QueryRow(`SELECT `+jobColumns+` FROM jobs WHERE id=?`, jobID))
+	if err != nil || job == nil {
+		return job, err
 	}
-	jobs, err := scanJobs(rows)
-	if err != nil {
-		return nil, err
-	}
-	if len(jobs) == 0 {
-		return nil, nil
-	}
-	return &s.enrichJobs(jobs)[0], nil
+	return &s.enrichJobs([]Job{*job})[0], nil
 }
 
 // LineStats summarizes how much dialog has been digested and indexed.
@@ -533,18 +546,4 @@ func (s *Store) EnqueueUniqueJob(jobType, payload string, priority int) (int64, 
 	}
 	id, err := s.EnqueueJob(jobType, payload, priority)
 	return id, true, err
-}
-
-// JobByID loads one job row by id, returning nil when absent.
-func (s *Store) JobByID(id int64) (*Job, error) {
-	row := s.db.QueryRow(`SELECT id, type, payload, status, priority, attempts, worker_id, error, progress, created_at, started_at, finished_at FROM jobs WHERE id=?`, id)
-	var j Job
-	err := row.Scan(&j.ID, &j.Type, &j.Payload, &j.Status, &j.Priority, &j.Attempts, &j.WorkerID, &j.Error, &j.Progress, &j.CreatedAt, &j.StartedAt, &j.FinishedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &j, nil
 }
