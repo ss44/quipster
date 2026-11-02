@@ -13,33 +13,6 @@ import (
 	"quipster/internal/indexer"
 )
 
-func TestParseChunkIDVariants(t *testing.T) {
-	cases := []struct {
-		id    string
-		ok    bool
-		media int64
-		start int
-		end   int
-	}{
-		{"7_0-2", true, 7, 0, 2},
-		{"12_5-9", true, 12, 5, 9},
-		{"garbage", false, 0, 0, 0},
-		{"_0-1", false, 0, 0, 0},
-		{"x_0-1", false, 0, 0, 0},
-		{"1_abc-1", false, 0, 0, 0},
-		{"1_0-b", false, 0, 0, 0},
-		{"1_0", false, 0, 0, 0},
-		{"1_", false, 0, 0, 0},
-	}
-	for _, tc := range cases {
-		media, start, end, ok := parseChunkID(tc.id)
-		if ok != tc.ok || media != tc.media || start != tc.start || end != tc.end {
-			t.Errorf("parseChunkID(%q) = (%d,%d,%d,%v), want (%d,%d,%d,%v)",
-				tc.id, media, start, end, ok, tc.media, tc.start, tc.end, tc.ok)
-		}
-	}
-}
-
 func TestResourceHelpers(t *testing.T) {
 	// resourceBody cannot serialize a channel: it must return nil instead of
 	// half-written content.

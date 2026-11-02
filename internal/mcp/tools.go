@@ -8,6 +8,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"quipster/internal/chunks"
 	"quipster/internal/clips"
 	"quipster/internal/indexer"
 	"quipster/internal/search"
@@ -402,7 +403,7 @@ func (s *Server) getSceneByLine(_ context.Context, _ *mcpsdk.CallToolRequest, in
 func (s *Server) resolveSceneChunk(in sceneIn) (*store.ChunkWithMedia, error) {
 	switch {
 	case strings.TrimSpace(in.ChunkID) != "":
-		mediaID, startIdx, endIdx, ok := parseChunkID(in.ChunkID)
+		mediaID, startIdx, endIdx, ok := chunks.ParseID(in.ChunkID)
 		if !ok {
 			return nil, errors.New("chunkId must be mediaId_startCueIdx-endCueIdx")
 		}
@@ -434,31 +435,6 @@ func sceneContext(requested int) int {
 		return 2
 	}
 	return min(requested, 5)
-}
-
-// parseChunkID splits a chunk id of the form "{mediaId}_{startIdx}-{endIdx}".
-func parseChunkID(id string) (int64, int, int, bool) {
-	underscore := strings.Index(id, "_")
-	if underscore <= 0 {
-		return 0, 0, 0, false
-	}
-	rest := id[underscore+1:]
-	dash := strings.Index(rest, "-")
-	if dash <= 0 {
-		return 0, 0, 0, false
-	}
-	var mediaID int64
-	var start, end int
-	if _, err := fmt.Sscanf(id[:underscore], "%d", &mediaID); err != nil {
-		return 0, 0, 0, false
-	}
-	if _, err := fmt.Sscanf(rest[:dash], "%d", &start); err != nil {
-		return 0, 0, 0, false
-	}
-	if _, err := fmt.Sscanf(rest[dash+1:], "%d", &end); err != nil {
-		return 0, 0, 0, false
-	}
-	return mediaID, start, end, true
 }
 
 // listMediaIn / listMediaOut are the list_media wire types. PerPage is
