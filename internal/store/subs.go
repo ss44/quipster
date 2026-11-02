@@ -59,18 +59,34 @@ type Cue struct {
 	ChunkID     int64   `json:"chunkId"`
 }
 
-// ReplaceCues swaps the cue set for a media file within one transaction.
+// cueWriteBatchSize bounds each cue insert transaction. A single media with
+// tens of thousands of cues can otherwise hold SQLite's writer lock long
+// enough to starve probe/index/node claims; batches release it between commits.
+const cueWriteBatchSize = 2000
+
+// ReplaceCues swaps the cue set for a media file. Large cue sets are written
+// in bounded batches so the writer lock is released between commits. A partial
+// failure is safe: the probe job retries and replaces the whole set.
 func (s *Store) ReplaceCues(mediaFileID, trackID int64, cues []Cue) error {
+	if _, err := s.db.Exec(`DELETE FROM cues WHERE media_file_id=?`, mediaFileID); err != nil {
+		return err
+	}
+	for start := 0; start < len(cues); start += cueWriteBatchSize {
+		end := min(start+cueWriteBatchSize, len(cues))
+		if err := s.insertCueBatch(mediaFileID, trackID, cues[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// insertCueBatch writes one bounded batch in its own transaction.
+func (s *Store) insertCueBatch(mediaFileID, trackID int64, cues []Cue) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer rollbackTx(tx)
-	if _, derr := tx.Exec(`DELETE FROM cues WHERE media_file_id=?`, mediaFileID); derr != nil {
-		return derr
-	}
-	// One prepared insert for the whole swap: per-row re-preparation would
-	// stretch this exclusive write transaction (see idx_cues_media_idx).
 	stmt, err := tx.Prepare(`INSERT INTO cues (media_file_id, track_id, idx, start_sec, end_sec, text) VALUES (?,?,?,?,?,?)`)
 	if err != nil {
 		return err

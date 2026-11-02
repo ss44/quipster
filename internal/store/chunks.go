@@ -15,18 +15,38 @@ type Chunk struct {
 	IndexedAt   int64  `json:"indexedAt"`
 }
 
+// chunkWriteBatchSize bounds each chunk insert/relink transaction. A media
+// with tens of thousands of chunks can otherwise hold SQLite's writer lock
+// long enough to starve probe/index/node claims.
+const chunkWriteBatchSize = 1000
+
 // ReplaceChunks swaps chunks for a media file and relinks cues by index range.
+// Large chunk sets are written in bounded batches so the writer lock is
+// released between commits. A partial failure is safe: the probe job retries
+// and replaces the whole set.
 func (s *Store) ReplaceChunks(mediaFileID int64, chunks []Chunk) error {
+	if _, err := s.db.Exec(`DELETE FROM chunks WHERE media_file_id=?`, mediaFileID); err != nil {
+		return err
+	}
+	for start := 0; start < len(chunks); start += chunkWriteBatchSize {
+		end := min(start+chunkWriteBatchSize, len(chunks))
+		if err := s.insertChunkBatch(mediaFileID, chunks[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// insertChunkBatch writes one bounded batch and relinks its cue ranges in its
+// own transaction.
+func (s *Store) insertChunkBatch(mediaFileID int64, chunks []Chunk) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer rollbackTx(tx)
-	if _, derr := tx.Exec(`DELETE FROM chunks WHERE media_file_id=?`, mediaFileID); derr != nil {
-		return derr
-	}
-	// Both statements are prepared once: per-row re-preparation would stretch
-	// this exclusive write transaction (see the idx_cues_media_idx migration).
+	// Both statements are prepared once per batch: per-row re-preparation
+	// would stretch the transaction (see the idx_cues_media_idx migration).
 	insert, err := tx.Prepare(`INSERT INTO chunks (media_file_id, start_cue_idx, end_cue_idx, text) VALUES (?,?,?,?)`)
 	if err != nil {
 		return err
