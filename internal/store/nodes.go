@@ -255,7 +255,7 @@ func (s *Store) scanNode(row *sql.Row) (*Node, error) {
 	return &n, nil
 }
 
-// rowScanner abstracts *sql.Row and *sql.Rows for shared node scanning.
+// rowScanner abstracts database query results that expose Scan.
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanFullNode(row rowScanner, n *Node) error {

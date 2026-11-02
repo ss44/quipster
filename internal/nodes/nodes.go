@@ -461,7 +461,7 @@ func (s *Service) Complete(nodeID, jobID int64, status, errMsg string) (bool, er
 		}
 		return true, s.st.BumpNodeCounters(nodeID, false)
 	case "error":
-		j, err := s.st.JobByID(jobID)
+		j, err := s.st.GetJob(jobID)
 		if err != nil {
 			return true, err
 		}
@@ -507,7 +507,7 @@ func (s *Service) ApplyProbeResult(nodeID, jobID int64, o *probe.Outcome, subFil
 	var payload struct {
 		MediaID int64 `json:"mediaId"`
 	}
-	j, jerr := s.st.JobByID(jobID)
+	j, jerr := s.st.GetJob(jobID)
 	if jerr != nil {
 		return true, jerr
 	}
@@ -558,7 +558,7 @@ func (s *Service) ApplyClipResult(nodeID, jobID int64, ext string, file io.Reade
 	if s.Clips == nil {
 		return true, fmt.Errorf("clip service not configured")
 	}
-	j, err := s.st.JobByID(jobID)
+	j, err := s.st.GetJob(jobID)
 	if err != nil {
 		return true, err
 	}
