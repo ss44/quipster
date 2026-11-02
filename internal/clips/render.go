@@ -62,16 +62,6 @@ func (s *Service) registerCacheEntry(key, path string) error {
 	return s.st.UpsertCacheEntry(key, path, "clip", st.Size())
 }
 
-// RenderLocal renders a clip for a worker node. Unlike the cache-backed
-// service paths it takes the media path and audio stream ordinal directly and
-// skips store validation and cache registration: the node uploads the result
-// to the coordinating server, which owns the cache entry. The node's clip
-// configuration must mirror the server's so the encoding profile matches the
-// cache key the server will register.
-func (s *Service) RenderLocal(ctx context.Context, src string, audioOrdinal int, r Request, report func(float64)) (string, string, error) {
-	return s.renderer.RenderLocal(ctx, src, audioOrdinal, r, report)
-}
-
 // RenderLocal renders a clip directly to the renderer's configured cache directory.
 func (s *Renderer) RenderLocal(ctx context.Context, src string, audioOrdinal int, r Request, report func(float64)) (string, string, error) {
 	return s.cut(ctx, s.CacheKey(r), src, audioOrdinal, r, report)
