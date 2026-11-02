@@ -143,6 +143,10 @@ func (s *Store) migrate() error {
 			UNIQUE(media_file_id, start_cue_idx)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_indexed ON chunks(indexed_at, media_file_id)`,
+		// CleanSubtitles and ReplaceChunks delete chunks by media_file_id.
+		// Without this index those deletes scan the whole chunks table while
+		// holding the single writer lock, starving every claim and heartbeat.
+		`CREATE INDEX IF NOT EXISTS idx_chunks_media ON chunks(media_file_id)`,
 		`CREATE TABLE IF NOT EXISTS cues (
 			id INTEGER PRIMARY KEY,
 			media_file_id INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
