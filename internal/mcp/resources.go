@@ -9,6 +9,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"quipster/internal/chunks"
 	"quipster/internal/search"
 )
 
@@ -78,7 +79,7 @@ func (s *Server) readChunkResource(_ context.Context, req *mcpsdk.ReadResourceRe
 	if !ok || chunkID == "" {
 		return nil, mcpsdk.ResourceNotFoundError(uri)
 	}
-	mediaID, startIdx, endIdx, ok := parseChunkID(chunkID)
+	mediaID, startIdx, endIdx, ok := chunks.ParseID(chunkID)
 	if !ok {
 		return nil, mcpsdk.ResourceNotFoundError(uri)
 	}

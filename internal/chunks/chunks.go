@@ -3,6 +3,7 @@
 package chunks
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -25,6 +26,33 @@ type Chunk struct {
 	Text        string
 	StartCueIdx int
 	EndCueIdx   int
+}
+
+// ParseID parses a chunk document id of the form
+// "{mediaId}_{startCueIdx}-{endCueIdx}". It reports ok as false when the id
+// does not contain all three integer components or has any malformed part.
+func ParseID(id string) (mediaID int64, startIdx, endIdx int, ok bool) {
+	mediaPart, span, found := strings.Cut(id, "_")
+	if !found || mediaPart == "" {
+		return 0, 0, 0, false
+	}
+	mediaID, err := strconv.ParseInt(mediaPart, 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	startPart, endPart, found := strings.Cut(span, "-")
+	if !found {
+		return 0, 0, 0, false
+	}
+	startIdx, err = strconv.Atoi(startPart)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	endIdx, err = strconv.Atoi(endPart)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return mediaID, startIdx, endIdx, true
 }
 
 // Build merges consecutive cues into non-overlapping chunks of at most ~280
