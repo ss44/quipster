@@ -175,6 +175,22 @@ func setMockFFmpeg(t *testing.T) {
 	t.Setenv("FFMPEG_BIN", filepath.Join(cwd, "mock_ffmpeg.sh"))
 }
 
+func TestRendererRenderLocalWithoutStore(t *testing.T) {
+	setMockFFmpeg(t)
+	renderer := NewRenderer(Config{CacheDir: t.TempDir(), MaxClipSec: 30})
+	path, ext, err := renderer.RenderLocal(context.Background(), "/fake/movie.mp4", 0,
+		Request{MediaID: 1, Start: 10, End: 20, Mode: "fast", PadMs: 250}, nil)
+	if err != nil {
+		t.Fatalf("RenderLocal: %v", err)
+	}
+	if ext != "mp4" {
+		t.Fatalf("RenderLocal extension = %q, want mp4", ext)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("rendered file not found: %v", err)
+	}
+}
+
 func TestProduce(t *testing.T) {
 	setMockFFmpeg(t)
 	st := setupTestStore(t)
@@ -316,7 +332,7 @@ func runTranscodeTest(t *testing.T, hw hardware.Capabilities, failTimes int) (st
 	t.Setenv("MOCK_ARGS_DIR", argsDir)
 	t.Setenv("MOCK_FAIL_TIMES", fmt.Sprint(failTimes))
 
-	s := &Service{cfg: Config{Hw: hardware.MonitorFor(hw), PreviewRes: "640:-2", AccurateRes: "1280:-2"}}
+	s := NewRenderer(Config{Hw: hardware.MonitorFor(hw), PreviewRes: "640:-2", AccurateRes: "1280:-2"})
 	out := filepath.Join(t.TempDir(), "out.mp4")
 	err := s.runTranscode(context.Background(), "in.mp4", out, 5, 10, 1, s.previewProfile(), nil)
 	if err != nil {

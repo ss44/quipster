@@ -15,7 +15,7 @@ import (
 // no validation and no store bookkeeping, which lets a worker node render a
 // clip for a coordinating server without database access. report is forwarded
 // to the transcode path for 0..1 progress and may be nil.
-func (s *Service) cut(ctx context.Context, key, src string, audioOrdinal int, r Request, report func(float64)) (string, string, error) {
+func (s *Renderer) cut(ctx context.Context, key, src string, audioOrdinal int, r Request, report func(float64)) (string, string, error) {
 	pad := float64(r.PadMs) / 1000
 	outDir := filepath.Join(s.cfg.CacheDir, "clips")
 	if mkErr := os.MkdirAll(outDir, 0o750); mkErr != nil {
@@ -62,13 +62,8 @@ func (s *Service) registerCacheEntry(key, path string) error {
 	return s.st.UpsertCacheEntry(key, path, "clip", st.Size())
 }
 
-// RenderLocal renders a clip for a worker node. Unlike the cache-backed
-// service paths it takes the media path and audio stream ordinal directly and
-// skips store validation and cache registration: the node uploads the result
-// to the coordinating server, which owns the cache entry. The node's clip
-// configuration must mirror the server's so the encoding profile matches the
-// cache key the server will register.
-func (s *Service) RenderLocal(ctx context.Context, src string, audioOrdinal int, r Request, report func(float64)) (string, string, error) {
+// RenderLocal renders a clip directly to the renderer's configured cache directory.
+func (s *Renderer) RenderLocal(ctx context.Context, src string, audioOrdinal int, r Request, report func(float64)) (string, string, error) {
 	return s.cut(ctx, s.CacheKey(r), src, audioOrdinal, r, report)
 }
 
@@ -81,7 +76,7 @@ func (s *Service) RegisterRendered(key, ext string, r io.Reader) error {
 	if ext != "mp4" && ext != "mkv" {
 		return fmt.Errorf("unsupported clip container %q", ext)
 	}
-	outDir := filepath.Join(s.cfg.CacheDir, "clips")
+	outDir := filepath.Join(s.renderer.cfg.CacheDir, "clips")
 	if err := os.MkdirAll(outDir, 0o750); err != nil {
 		return err
 	}

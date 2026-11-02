@@ -18,8 +18,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"quipster/internal/hardware"
 	"quipster/internal/probe"
@@ -45,22 +46,18 @@ type Config struct {
 // entries in the store. Concurrent requests for the same clip share a single
 // render flight instead of running duplicate ffmpeg work.
 type Service struct {
-	st   *store.Store
-	sf   map[string]*flight
-	cfg  Config
-	sfMu sync.Mutex
-}
-
-// flight tracks one in-flight render so later requests can await its result.
-type flight struct {
-	err  error
-	done chan struct{}
-	path string
-	ext  string
+	st       *store.Store
+	renderer *Renderer
+	sf       singleflight.Group
 }
 
 // New builds a clip service, applying defaults for unset Config fields.
 func New(st *store.Store, cfg Config) *Service {
+	renderer := NewRenderer(cfg)
+	return &Service{st: st, renderer: renderer}
+}
+
+func normalizeConfig(cfg Config) Config {
 	if cfg.MaxClipSec <= 0 {
 		cfg.MaxClipSec = 120
 	}
@@ -77,7 +74,7 @@ func New(st *store.Store, cfg Config) *Service {
 		cfg.CPUPreset = ""
 	}
 	log.Printf("[clips] settings preview=%s accurate=%s cpu_preset=%q (blank uses mode defaults); fast mode copies original streams", cfg.PreviewRes, cfg.AccurateRes, cfg.CPUPreset)
-	return &Service{st: st, cfg: cfg, sf: map[string]*flight{}}
+	return cfg
 }
 
 // normalizeResolution accepts only even dimensions, not arbitrary filter expressions.
@@ -99,7 +96,7 @@ func normalizeResolution(value, fallback string) string {
 }
 
 // Config returns the effective configuration after defaults were applied.
-func (s *Service) Config() Config { return s.cfg }
+func (s *Service) Config() Config { return s.renderer.cfg }
 
 // CacheKey is the stable identity of a rendered clip.
 func CacheKey(mediaID int64, start, end float64, mode string, padMs int) string {
@@ -110,14 +107,7 @@ func CacheKey(mediaID int64, start, end float64, mode string, padMs int) string 
 // CacheKey includes the encoding profile so tuning changes cannot reuse stale transcodes.
 // Stream-copy identities remain independent of transcode settings.
 func (s *Service) CacheKey(r Request) string {
-	mode := r.Mode
-	switch mode {
-	case "preview":
-		mode += "|" + s.cfg.PreviewRes + "|" + s.cfg.CPUPreset
-	case "accurate":
-		mode += "|" + s.cfg.AccurateRes + "|" + s.cfg.CPUPreset
-	}
-	return CacheKey(r.MediaID, r.Start, r.End, mode, r.PadMs)
+	return s.renderer.CacheKey(r)
 }
 
 // Request describes one clip render: the media, the [Start, End] window in
@@ -147,8 +137,8 @@ func (s *Service) Validate(r Request) (*store.MediaFile, float64, error) {
 	}
 	pad := float64(r.PadMs) / 1000
 	span := (r.End - r.Start) + 2*pad
-	if span > s.cfg.MaxClipSec+0.001 {
-		return nil, 0, fmt.Errorf("clip span %.1fs exceeds max %.0fs", span, s.cfg.MaxClipSec)
+	if span > s.renderer.cfg.MaxClipSec+0.001 {
+		return nil, 0, fmt.Errorf("clip span %.1fs exceeds max %.0fs", span, s.renderer.cfg.MaxClipSec)
 	}
 	m, err := s.st.GetMedia(r.MediaID)
 	if err != nil {
@@ -203,6 +193,10 @@ func (s *Service) Touch(key string) {
 
 // Produce renders the clip if not cached, deduplicating concurrent requests.
 func (s *Service) Produce(ctx context.Context, r Request) (string, string, error) {
+	return s.produce(ctx, r, nil)
+}
+
+func (s *Service) produce(ctx context.Context, r Request, report func(float64)) (string, string, error) {
 	key := s.CacheKey(r)
 	if e, err := s.Cached(key); err != nil {
 		return "", "", err
@@ -211,59 +205,39 @@ func (s *Service) Produce(ctx context.Context, r Request) (string, string, error
 		return e.Path, strings.TrimPrefix(filepath.Ext(e.Path), "."), nil
 	}
 
-	f, joined := s.joinFlight(key)
-	if joined {
-		log.Printf("[clips] media=%d mode=%s waiting for existing render key=%s", r.MediaID, r.Mode, key)
-		return awaitFlight(ctx, f)
-	}
-	defer s.endFlight(key, f)
-
-	started := time.Now()
-	log.Printf("[clips] media=%d mode=%s cache=miss start=%.3f end=%.3f key=%s", r.MediaID, r.Mode, r.Start, r.End, key)
-	f.path, f.ext, f.err = s.render(ctx, key, r)
-	log.Printf("[clips] media=%d mode=%s finished elapsed=%s error=%v", r.MediaID, r.Mode, time.Since(started).Round(time.Millisecond), f.err)
-	return f.path, f.ext, f.err
-}
-
-// joinFlight returns the flight already rendering key, or registers a fresh
-// one; joined reports the former case so the caller can await instead of
-// rendering.
-func (s *Service) joinFlight(key string) (*flight, bool) {
-	s.sfMu.Lock()
-	defer s.sfMu.Unlock()
-	if f, ok := s.sf[key]; ok {
-		return f, true
-	}
-	f := &flight{done: make(chan struct{})}
-	s.sf[key] = f
-	return f, false
-}
-
-// awaitFlight blocks until the joined flight completes and returns its result
-// or the context is done.
-func awaitFlight(ctx context.Context, f *flight) (string, string, error) {
+	result := s.sf.DoChan(key, func() (any, error) {
+		started := time.Now()
+		log.Printf("[clips] media=%d mode=%s cache=miss start=%.3f end=%.3f key=%s", r.MediaID, r.Mode, r.Start, r.End, key)
+		path, ext, err := s.render(ctx, key, r, report)
+		log.Printf("[clips] media=%d mode=%s finished elapsed=%s error=%v", r.MediaID, r.Mode, time.Since(started).Round(time.Millisecond), err)
+		return renderResult{path: path, ext: ext}, err
+	})
 	select {
-	case <-f.done:
-		return f.path, f.ext, f.err
 	case <-ctx.Done():
 		return "", "", ctx.Err()
+	case outcome := <-result:
+		if outcome.Err != nil {
+			return "", "", outcome.Err
+		}
+		rendered, ok := outcome.Val.(renderResult)
+		if !ok {
+			return "", "", fmt.Errorf("unexpected clip render result %T", outcome.Val)
+		}
+		return rendered.path, rendered.ext, nil
 	}
 }
 
-// endFlight forgets the flight for key and wakes everyone awaiting it.
-func (s *Service) endFlight(key string, f *flight) {
-	s.sfMu.Lock()
-	delete(s.sf, key)
-	s.sfMu.Unlock()
-	close(f.done)
+type renderResult struct {
+	path string
+	ext  string
 }
 
-func (s *Service) render(ctx context.Context, key string, r Request) (string, string, error) {
+func (s *Service) render(ctx context.Context, key string, r Request, report func(float64)) (string, string, error) {
 	m, _, err := s.Validate(r)
 	if err != nil {
 		return "", "", err
 	}
-	path, ext, err := s.cut(ctx, key, m.Path, m.AudioStreamIndex, r, nil)
+	path, ext, err := s.renderer.cut(ctx, key, m.Path, m.AudioStreamIndex, r, report)
 	if err != nil {
 		return "", "", err
 	}
@@ -275,7 +249,7 @@ func (s *Service) render(ctx context.Context, key string, r Request) (string, st
 
 // cutFast stream-copies the clip region. Input-side seek lets ffmpeg start at
 // the keyframe at or before `start` in a single pass — no separate probe.
-func (s *Service) cutFast(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
+func (s *Renderer) cutFast(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
 	mp4 := outBase + ".mp4"
 	err := runFFmpeg(ctx, fastCopyArgs(src, start, dur, audioOrdinal, mp4))
 	if err == nil {
@@ -296,7 +270,7 @@ func (s *Service) cutFast(ctx context.Context, src string, start, dur float64, a
 
 // cutPreview transcodes a small, browser-playable clip as fast as possible;
 // preview quality is intentionally low (640px by default).
-func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
+func (s *Renderer) cutPreview(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string) (string, error) {
 	out := outBase + ".mp4"
 	if err := s.runTranscode(ctx, src, out, start, dur, audioOrdinal, s.previewProfile(), nil); err != nil {
 		removePartial(out)
@@ -308,7 +282,7 @@ func (s *Service) cutPreview(ctx context.Context, src string, start, dur float64
 // cutAccurate transcodes a high-quality 720p clip, preferring the hardware
 // pipeline and falling back to libx264 when hardware encoding fails. report
 // forwards ffmpeg progress when non-nil.
-func (s *Service) cutAccurate(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string, report func(float64)) (string, error) {
+func (s *Renderer) cutAccurate(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string, report func(float64)) (string, error) {
 	out := outBase + ".mp4"
 	if err := s.runTranscode(ctx, src, out, start, dur, audioOrdinal, s.accurateProfile(), report); err != nil {
 		removePartial(out)
@@ -354,7 +328,7 @@ type encProfile struct {
 }
 
 // previewProfile returns the low-quality, low-latency encoder profile.
-func (s *Service) previewProfile() encProfile {
+func (s *Renderer) previewProfile() encProfile {
 	return encProfile{
 		res:      s.cfg.PreviewRes,
 		hwEnc:    []string{"-b:v", "1M"},
@@ -364,7 +338,7 @@ func (s *Service) previewProfile() encProfile {
 }
 
 // accurateProfile returns the 720p high-quality encoder profile.
-func (s *Service) accurateProfile() encProfile {
+func (s *Renderer) accurateProfile() encProfile {
 	return encProfile{
 		res:      s.cfg.AccurateRes,
 		hwEnc:    []string{"-b:v", "2M"},
@@ -375,7 +349,7 @@ func (s *Service) accurateProfile() encProfile {
 
 // cpuEncArgs builds the x264 encoder args for a mode, honoring the configured
 // CPU preset override over the mode default.
-func (s *Service) cpuEncArgs(defPreset, crf string, extra ...string) []string {
+func (s *Renderer) cpuEncArgs(defPreset, crf string, extra ...string) []string {
 	preset := s.cfg.CPUPreset
 	if preset == "" {
 		preset = defPreset
@@ -414,7 +388,7 @@ func transcodeArgs(plan hardware.Pipeline, prof encProfile, src string, audioOrd
 // first and falling back to CPU libx264 when the hardware attempt fails
 // (hardware encoders can fail mid-run on driver hiccups or unsupported input).
 // When report is non-nil, ffmpeg progress is parsed and forwarded (0..1).
-func (s *Service) runTranscode(ctx context.Context, src, out string, start, dur float64,
+func (s *Renderer) runTranscode(ctx context.Context, src, out string, start, dur float64,
 	audioOrdinal int, prof encProfile, report func(float64)) error {
 
 	hwCaps := s.cfg.Hw.Capabilities()
@@ -465,34 +439,7 @@ func (s *Service) RunWithProgress(ctx context.Context, r Request, report func(fl
 	if r.Mode != "accurate" {
 		return s.Produce(ctx, r)
 	}
-	key := s.CacheKey(r)
-	if e, err := s.Cached(key); err != nil {
-		return "", "", err
-	} else if e != nil {
-		return e.Path, strings.TrimPrefix(filepath.Ext(e.Path), "."), nil
-	}
-	f, joined := s.joinFlight(key)
-	if joined {
-		return awaitFlight(ctx, f)
-	}
-	defer s.endFlight(key, f)
-
-	m, _, err := s.Validate(r)
-	if err != nil {
-		f.err = err
-		return "", "", err
-	}
-	path, ext, rerr := s.cut(ctx, key, m.Path, m.AudioStreamIndex, r, report)
-	if rerr != nil {
-		f.err = rerr
-		return "", "", rerr
-	}
-	if err := s.registerCacheEntry(key, path); err != nil {
-		f.err = err
-		return "", "", err
-	}
-	f.path, f.ext = path, ext
-	return path, ext, nil
+	return s.produce(ctx, r, report)
 }
 
 func runFFmpegProgress(ctx context.Context, args []string, dur float64, report func(float64)) error {
@@ -581,7 +528,7 @@ func (s *Service) JobHandler() func(ctx context.Context, j *store.Job, progress 
 			r.Mode = "accurate"
 		}
 		if r.PadMs <= 0 {
-			r.PadMs = s.cfg.DefaultPadMs
+			r.PadMs = s.renderer.cfg.DefaultPadMs
 		}
 		// Media archived between request and render: finish quietly instead of
 		// burning retries on a render that must not happen. If the media is
