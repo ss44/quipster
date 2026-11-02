@@ -699,6 +699,53 @@ func TestAdminReindexAndReprobe(t *testing.T) {
 	}
 }
 
+// TestAdminReprobeTargeted verifies the optional mediaIds body limits the
+// reprobe to the requested rows, so operators can rebuild only bad episodes.
+func TestAdminReprobeTargeted(t *testing.T) {
+	st, deps := newEnv(t)
+	id := seedMedia(t, st)
+	other, _, err := st.UpsertMedia("/media/show-s01e02.mkv", "matroska", 1234, 1700000001, "Second", 2020, 1, 2, "Show")
+	if err != nil {
+		t.Fatalf("UpsertMedia: %v", err)
+	}
+	if serr := st.SetMediaStatus(other, "indexed", ""); serr != nil {
+		t.Fatalf("SetMediaStatus: %v", serr)
+	}
+	h := Router(deps)
+
+	body := strings.NewReader(fmt.Sprintf(`{"mediaIds":[%d,%d,%d]}`, id, id, other))
+	rr := do(t, h, http.MethodPost, "/api/admin/reprobe", body, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("reprobe status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if n, ok := decodeMap(t, rr)["enqueued"].(float64); !ok || n != 2 {
+		t.Fatalf("enqueued = %v, want 2 after dedupe", decodeMap(t, rr)["enqueued"])
+	}
+	jobs, err := st.ListJobs(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		fmt.Sprintf(`"mediaId":%d`, id):    false,
+		fmt.Sprintf(`"mediaId":%d`, other): false,
+	}
+	for _, j := range jobs {
+		if j.Type != "probe" {
+			continue
+		}
+		for payload := range want {
+			if strings.Contains(j.Payload, payload) {
+				want[payload] = true
+			}
+		}
+	}
+	for payload, found := range want {
+		if !found {
+			t.Errorf("missing probe job for %s", payload)
+		}
+	}
+}
+
 func enqueueProbes(t *testing.T, st *store.Store, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
