@@ -152,6 +152,43 @@ func TestParseBytesVTT(t *testing.T) {
 	}
 }
 
+// TestParseDeduplicatesCues covers ASS karaoke tracks that repeat the same
+// syllable with identical timing thousands of times.
+func TestParseDeduplicatesCues(t *testing.T) {
+	data := "1\n00:00:01,000 --> 00:00:02,000\nkyo\n\n" +
+		"2\n00:00:01,000 --> 00:00:02,000\nkyo\n\n" +
+		"3\n00:00:01,000 --> 00:00:02,000\nkyo\n\n" +
+		"4\n00:00:03,000 --> 00:00:04,000\nkyo\n"
+	cues, err := ParseBytes([]byte(data), ".srt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cues) != 2 {
+		t.Fatalf("got %d cues, want 2 after dedupe: %+v", len(cues), cues)
+	}
+	if cues[0].Start != 1.0 || cues[1].Start != 3.0 {
+		t.Errorf("deduped timings = %+v", cues)
+	}
+}
+
+// TestParseDropsDrawingCommands covers ASS vector signs that ffmpeg leaves as
+// raw path data after stripping the {\p1} override tag.
+func TestParseDropsDrawingCommands(t *testing.T) {
+	data := "1\n00:00:01,000 --> 00:00:02,000\nm 615 636 l 604.5 616.5 597 615 588 618\n\n" +
+		"2\n00:00:03,000 --> 00:00:04,000\nHello there\n\n" +
+		"3\n00:00:05,000 --> 00:00:06,000\nm 615 people arrived\n"
+	cues, err := ParseBytes([]byte(data), ".srt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cues) != 2 {
+		t.Fatalf("got %d cues, want 2: %+v", len(cues), cues)
+	}
+	if cues[0].Text != "Hello there" || cues[1].Text != "m 615 people arrived" {
+		t.Errorf("unexpected cues = %+v", cues)
+	}
+}
+
 func TestParseBytesVTTCRLF(t *testing.T) {
 	data := "WEBVTT\r\n\r\n00:01.000 --> 00:03.000\r\nFirst line.\r\n\r\n00:04.000 --> 00:05.000\r\nSecond.\r\n"
 	cues, err := ParseBytes([]byte(data), ".VTT")
