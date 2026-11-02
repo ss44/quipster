@@ -473,7 +473,7 @@ func (s *session) runClip(ctx context.Context, w *nodes.Work, report func(float6
 	req := clips.Request{MediaID: w.Media.ID, Start: w.Clip.Start, End: w.Clip.End, PadMs: w.Clip.PadMs, Mode: w.Clip.Mode}
 	// The renderer mirrors the server's encoding profile so the uploaded
 	// file matches the cache key the server registers.
-	svc := clips.New(nil, clips.Config{
+	svc := clips.NewRenderer(clips.Config{
 		CacheDir:     s.cfg.CacheDir,
 		PreviewRes:   w.Clips.PreviewRes,
 		AccurateRes:  w.Clips.AccurateRes,

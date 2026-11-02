@@ -41,11 +41,13 @@ func mockSlowCreate(t *testing.T) {
 // forceHWOn/forceHWOff pin the hardware backend so tests are deterministic
 // regardless of the host's GPUs.
 func forceHWOn(s *Service) {
-	s.cfg.Hw = hardware.MonitorFor(hardware.Capabilities{Backend: hardware.BackendVaapi, Device: "/dev/dri/renderD128"})
+	monitor := hardware.MonitorFor(hardware.Capabilities{Backend: hardware.BackendVaapi, Device: "/dev/dri/renderD128"})
+	s.renderer.cfg.Hw = monitor
 }
 
 func forceHWOff(s *Service) {
-	s.cfg.Hw = hardware.MonitorFor(hardware.Capabilities{})
+	monitor := hardware.MonitorFor(hardware.Capabilities{})
+	s.renderer.cfg.Hw = monitor
 }
 
 func newTestService(t *testing.T) (*Service, *store.Store) {
@@ -90,8 +92,8 @@ func TestEncodingArguments(t *testing.T) {
 	for _, preset := range []string{"", "superfast"} {
 		svc := New(nil, Config{PreviewRes: "480:-2", AccurateRes: "854:480", CPUPreset: preset})
 		cpu := hardware.Capabilities{}
-		preview := transcodeArgs(cpu.Pipeline(svc.cfg.PreviewRes), svc.previewProfile(), "source.mkv", 1, 12, 3, "preview.mp4", false)
-		accurate := transcodeArgs(cpu.Pipeline(svc.cfg.AccurateRes), svc.accurateProfile(), "source.mkv", 1, 12, 3, "accurate.mp4", true)
+		preview := transcodeArgs(cpu.Pipeline(svc.Config().PreviewRes), svc.renderer.previewProfile(), "source.mkv", 1, 12, 3, "preview.mp4", false)
+		accurate := transcodeArgs(cpu.Pipeline(svc.Config().AccurateRes), svc.renderer.accurateProfile(), "source.mkv", 1, 12, 3, "accurate.mp4", true)
 		assert.Contains(t, preview, "scale=480:-2")
 		assert.Contains(t, accurate, "scale=854:480")
 		assert.Contains(t, accurate, "pipe:1")
@@ -111,7 +113,7 @@ func TestEncodingArguments(t *testing.T) {
 	// hardware encoder, keeping the shared container/audio flags.
 	hw := hardware.Capabilities{Backend: hardware.BackendVaapi, Device: "/dev/dri/renderD128"}
 	svc := New(nil, Config{})
-	hwPreview := transcodeArgs(hw.Pipeline(svc.cfg.PreviewRes), svc.previewProfile(), "source.mkv", 0, 12, 3, "preview.mp4", false)
+	hwPreview := transcodeArgs(hw.Pipeline(svc.Config().PreviewRes), svc.renderer.previewProfile(), "source.mkv", 0, 12, 3, "preview.mp4", false)
 	assert.Contains(t, hwPreview, "-hwaccel")
 	assert.Contains(t, hwPreview, "vaapi")
 	assert.Contains(t, hwPreview, "scale_vaapi=640:-2:format=nv12")
@@ -201,25 +203,24 @@ func TestProduceRenderValidateError(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestProduceFlightDedup covers the Produce flight table branches: a waiter
-// joining a finished flight, and a canceled context while one is in flight.
+// TestProduceFlightDedup covers the canceled-context path while a singleflight
+// render is in progress.
 func TestProduceFlightDedup(t *testing.T) {
 	s, _ := newTestService(t)
-
-	key := CacheKey(7, 10, 20, "fast", 0)
-	fake := &flight{done: make(chan struct{}), path: "/fake/done.mp4", ext: "mp4"}
-	close(fake.done)
-	s.sf[key] = fake
-	path, ext, err := s.Produce(context.Background(), Request{MediaID: 7, Start: 10, End: 20, Mode: "fast"})
-	require.NoError(t, err)
-	assert.Equal(t, "/fake/done.mp4", path)
-	assert.Equal(t, "mp4", ext)
-
-	key2 := CacheKey(8, 10, 20, "fast", 0)
-	s.sf[key2] = &flight{done: make(chan struct{})}
+	request := Request{MediaID: 8, Start: 10, End: 20, Mode: "fast"}
+	key := s.CacheKey(request)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s.sf.DoChan(key, func() (any, error) {
+		close(started)
+		<-release
+		return renderResult{}, nil
+	})
+	<-started
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err = s.Produce(ctx, Request{MediaID: 8, Start: 10, End: 20, Mode: "fast"})
+	_, _, err := s.Produce(ctx, request)
+	close(release)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
@@ -399,7 +400,7 @@ func TestCutFastCleanupError(t *testing.T) {
 	key := CacheKey(id, 10, 20, "fast", 250)
 
 	// Plant a non-empty directory where the mp4 output would be written.
-	junk := filepath.Join(s.cfg.CacheDir, "clips", key+".mp4", "occupied")
+	junk := filepath.Join(s.renderer.cfg.CacheDir, "clips", key+".mp4", "occupied")
 	require.NoError(t, os.MkdirAll(junk, 0o750))
 
 	path, ext, err := s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "fast", PadMs: 250})
