@@ -16,7 +16,7 @@ import (
 // buildDSN mirrors the DSN construction used by Open so tests can pre-seed
 // legacy or broken database files through the same driver configuration.
 func buildDSN(path string) string {
-	return fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate", path)
+	return dsn(path)
 }
 
 // TestLegacySchemaMigration verifies migrate adds the newer media_files

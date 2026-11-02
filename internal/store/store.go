@@ -20,12 +20,24 @@ type Store struct {
 	db *sql.DB
 }
 
+// walSizeLimitBytes bounds the WAL after a checkpoint. SQLite does not shrink
+// the WAL by default, so a one-off bulk scan or probe burst can leave a
+// multi-gigabyte sidecar that slows startup, recovery, and backups.
+const walSizeLimitBytes = 256 << 20
+
+// dsn builds the SQLite connection string used by every pooled connection. It
+// enables WAL journaling, foreign keys, a busy timeout, a bounded WAL size,
+// and immediate transactions so concurrent readers work alongside serialized
+// writers.
+func dsn(path string) string {
+	return fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=journal_size_limit(%d)&_txlock=immediate", path, walSizeLimitBytes)
+}
+
 // Open opens (and migrates) the SQLite database at the given path. The DSN
 // enables WAL journaling, foreign keys, a busy timeout, and immediate
 // transactions so concurrent readers work alongside serialized writers.
 func Open(path string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate", path)
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
 		return nil, err
 	}

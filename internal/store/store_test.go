@@ -22,6 +22,19 @@ func openTest(t *testing.T) *Store {
 	return s
 }
 
+// TestOpenAppliesWALSizeLimit verifies pooled connections inherit the WAL
+// size cap so a large one-off write cannot leave an unbounded sidecar.
+func TestOpenAppliesWALSizeLimit(t *testing.T) {
+	s := openTest(t)
+	var limit int64
+	if err := s.db.QueryRow(`PRAGMA journal_size_limit`).Scan(&limit); err != nil {
+		t.Fatalf("read journal_size_limit: %v", err)
+	}
+	if limit != walSizeLimitBytes {
+		t.Fatalf("journal_size_limit = %d, want %d", limit, walSizeLimitBytes)
+	}
+}
+
 // TestUpsertMediaReturnsUpdatedRowID guards against using LastInsertId after
 // an ON CONFLICT DO UPDATE: that rowid belongs to whichever row was inserted
 // last on the connection, so a changed existing file would hand scan the wrong
