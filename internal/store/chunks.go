@@ -123,20 +123,31 @@ func (s *Store) PendingIndexChunks(mediaFileID int64, limit int) ([]ChunkWithMed
 	return out, rows.Err()
 }
 
+// markIndexedBatchSize bounds each MarkChunksIndexed UPDATE. A single
+// statement covering tens of thousands of chunk ids can hold SQLite's writer
+// lock long enough to starve job claims; batches release it between statements.
+const markIndexedBatchSize = 500
+
 // MarkChunksIndexed stamps the given chunk ids as indexed at the given time.
+// Large media can have tens of thousands of chunks, so the update is split
+// into bounded batches. A partial failure is safe: the index job retries and
+// the flag update is idempotent.
 func (s *Store) MarkChunksIndexed(ids []int64, at int64) error {
-	if len(ids) == 0 {
-		return nil
+	for start := 0; start < len(ids); start += markIndexedBatchSize {
+		end := min(start+markIndexedBatchSize, len(ids))
+		batch := ids[start:end]
+		ph := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, at)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length batch slice; values are parameterized.
+		if _, err := s.db.Exec(`UPDATE chunks SET indexed_at=? WHERE id IN (`+ph+`)`, args...); err != nil {
+			return err
+		}
 	}
-	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, at)
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length ids slice; values are parameterized.
-	_, err := s.db.Exec(`UPDATE chunks SET indexed_at=? WHERE id IN (`+ph+`)`, args...)
-	return err
+	return nil
 }
 
 // ClearChunkIndexFlags resets indexed_at for all chunks of a media file.

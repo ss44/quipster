@@ -111,7 +111,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 		meiliKey:       "",
 		scanIntvl:      0,
 		subWorkers:     4,
-		indexWorkers:   4,
+		indexWorkers:   1,
 		clipWorkers:    2,
 		apiToken:       "",
 		padMs:          250,
