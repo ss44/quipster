@@ -29,13 +29,14 @@ func newTestService(t *testing.T) (*Service, *store.Store) {
 		}
 	})
 	svc := NewService(st, Settings{
-		MediaRoot:    "/srv/media",
-		SubsCacheDir: t.TempDir(),
-		Clips:        ClipSettings{PreviewRes: "640:-2", AccurateRes: "1280:-2", MaxClipSec: 120, DefaultPadMs: 250},
-		Heartbeat:    10 * time.Second,
-		OfflineAfter: time.Second,
-		MaxPending:   2,
-		Version:      "test",
+		MediaRoot:         "/srv/media",
+		SubsCacheDir:      t.TempDir(),
+		Clips:             ClipSettings{PreviewRes: "640:-2", AccurateRes: "1280:-2", MaxClipSec: 120, DefaultPadMs: 250},
+		Heartbeat:         10 * time.Second,
+		OfflineAfter:      time.Second,
+		MaxPending:        2,
+		MaxConcurrentJobs: 4,
+		Version:           "test",
 	})
 	svc.Pipeline = &probe.Pipeline{St: st, SubsCacheDir: filepath.Join(t.TempDir(), "subs")}
 	return svc, st
@@ -155,6 +156,35 @@ func TestClaimProbeWork(t *testing.T) {
 // itoa is a tiny helper for building payloads in tests.
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
+}
+
+// TestClaimRespectsNodeConcurrencyCap verifies one node cannot lease more than
+// the configured number of SQLite-writing jobs at once.
+func TestClaimRespectsNodeConcurrencyCap(t *testing.T) {
+	svc, st := newTestService(t)
+	svc.cfg.MaxConcurrentJobs = 1
+	node, _ := approvedNode(t, svc, "n1", "fp1")
+	id := addMedia(t, st, "/srv/media/library/movie.mkv")
+
+	first, err := st.EnqueueJob("probe", `{"mediaId":`+itoa(id)+`}`, 2)
+	require.NoError(t, err)
+	second, err := st.EnqueueJob("probe", `{"mediaId":`+itoa(id)+`}`, 2)
+	require.NoError(t, err)
+
+	w, err := svc.Claim(context.Background(), node.ID, []string{"probe"})
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	assert.Equal(t, first, w.JobID)
+
+	blocked, err := svc.Claim(context.Background(), node.ID, []string{"probe"})
+	require.NoError(t, err)
+	assert.Nil(t, blocked, "second claim must be capped while the first runs")
+
+	require.NoError(t, st.FinishJob(first, "done", ""))
+	w2, err := svc.Claim(context.Background(), node.ID, []string{"probe"})
+	require.NoError(t, err)
+	require.NotNil(t, w2)
+	assert.Equal(t, second, w2.JobID)
 }
 
 func TestClaimClipWork(t *testing.T) {

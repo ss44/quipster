@@ -134,8 +134,8 @@ func LoadConfig(opts Options) (Config, error) {
 	if cfg.JobTimeout <= 0 {
 		cfg.JobTimeout = 3 * time.Hour
 	}
-	cfg.ProbeWorkers = envInt("SUBTITLE_WORKERS", 4)
-	cfg.ClipWorkers = envInt("CLIP_WORKERS", 2)
+	cfg.ProbeWorkers = envInt("SUBTITLE_WORKERS", 1)
+	cfg.ClipWorkers = envInt("CLIP_WORKERS", 1)
 	cfg.ExtractConns = envInt("EXTRACT_CONNS", 4)
 	cfg.ProbeTimeout = parseDuration(envStr("PROBE_TIMEOUT", ""))
 	cfg.ExtractTimeout = parseDuration(envStr("EXTRACT_TIMEOUT", "10m"))

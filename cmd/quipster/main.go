@@ -105,9 +105,9 @@ func loadConfig() config {
 		meiliURL:       envStr("MEILI_URL", "http://localhost:7700"),
 		meiliKey:       envStr("MEILI_MASTER_KEY", ""),
 		scanIntvl:      parseDuration(envStr("SCAN_INTERVAL", "")),
-		subWorkers:     envInt("SUBTITLE_WORKERS", 4),
+		subWorkers:     envInt("SUBTITLE_WORKERS", 1),
 		indexWorkers:   envInt("INDEX_WORKERS", 1),
-		clipWorkers:    envInt("CLIP_WORKERS", 2),
+		clipWorkers:    envInt("CLIP_WORKERS", 1),
 		apiToken:       os.Getenv("API_TOKEN"),
 		padMs:          envInt("CLIP_PAD_MS", 250),
 		maxClipSec:     envFloat("MAX_CLIP_SEC", 120),
@@ -558,7 +558,8 @@ func newNodeService(cfg config, st *store.Store, pipe *probe.Pipeline, clipSvc *
 			MaxClipSec:   ccfg.MaxClipSec,
 			DefaultPadMs: ccfg.DefaultPadMs,
 		},
-		Version: version,
+		Version:           version,
+		MaxConcurrentJobs: envInt("NODE_MAX_CONCURRENT_JOBS", 1),
 	})
 	svc.Pipeline = pipe
 	svc.Clips = clipSvc

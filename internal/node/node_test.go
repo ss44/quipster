@@ -552,8 +552,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	assert.True(t, strings.HasSuffix(cfg.StatePath, filepath.Join("quipster", "node.json")))
 	assert.True(t, strings.HasSuffix(cfg.CacheDir, filepath.Join("quipster")))
 	assert.True(t, filepath.IsAbs(cfg.MediaDir), "media dir is absolutized")
-	assert.Equal(t, 4, cfg.ProbeWorkers)
-	assert.Equal(t, 2, cfg.ClipWorkers)
+	assert.Equal(t, 1, cfg.ProbeWorkers)
+	assert.Equal(t, 1, cfg.ClipWorkers)
 	assert.Equal(t, 10*time.Second, cfg.Heartbeat)
 
 	// Missing server URL is an error.

@@ -314,13 +314,14 @@ Set `NODE_SERVER_URL` to the main app's URL and mount the library the same way t
 | `MEILI_MASTER_KEY` | — | Meilisearch key |
 | `SCAN_INTERVAL` | off | e.g. `12h` periodic rescan |
 | `SCAN_TIMEOUT` | `2h` | hard per-scan cap; `0` disables it and leaves `JOB_TIMEOUT` as the only bound |
-| `SUBTITLE_WORKERS` | `4` | probe/extract/chunk worker pool |
+| `SUBTITLE_WORKERS` | `1` | probe/extract/chunk worker pool |
 | `EXTRACT_CONNS` | `4` | parallel embedded-subtitle extractions (each scans the whole file; tune to storage throughput) |
 | `EXTRACT_TIMEOUT` | `10m` | per-embedded-subtitle extraction cap; a stalled ffmpeg is killed and the media marked `no_subs` with a note |
 | `PROBE_TIMEOUT` | `60s` | per-file ffprobe cap; a stalled probe is killed and the file marked errored instead of blocking the queue |
 | `JOB_TIMEOUT` | `3h` | hard per-job timeout |
 | `INDEX_WORKERS` | `1` | Meili indexer pool |
-| `CLIP_WORKERS` | `2` | async clip render pool |
+| `CLIP_WORKERS` | `1` | async clip render pool |
+| `NODE_MAX_CONCURRENT_JOBS` | `1` | server-side cap on concurrent jobs leased to one worker node |
 | `CLIP_PAD_MS` | `250` | head+tail padding |
 | `MAX_CLIP_SEC` | `120` | hard clip cap |
 | `CLIP_PREVIEW_RES` | `640:-2` | preview width:height; even dimensions, with `-2` in one dimension to preserve aspect ratio |
