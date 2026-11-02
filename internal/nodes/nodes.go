@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 	"time"
 
 	"quipster/internal/clips"
@@ -76,7 +77,11 @@ type Settings struct {
 	Heartbeat    time.Duration
 	OfflineAfter time.Duration
 	MaxPending   int
-	Version      string
+	// MaxConcurrentJobs caps how many jobs one node may hold at once. SQLite
+	// has a single writer, so unbounded node concurrency turns every claim and
+	// subtitle write into a busy-timeout fight.
+	MaxConcurrentJobs int
+	Version           string
 }
 
 // ServerInfo is the configuration payload an approved node receives: the
@@ -171,6 +176,9 @@ type Service struct {
 	cfg      Settings
 	Pipeline *probe.Pipeline
 	Clips    *clips.Service
+	// claimMu makes the per-node concurrency check and lease atomic; several
+	// node workers poll simultaneously and would otherwise all pass the cap.
+	claimMu sync.Mutex
 }
 
 // NewService builds the server-side protocol service.
@@ -183,6 +191,9 @@ func NewService(st *store.Store, cfg Settings) *Service {
 	}
 	if cfg.MaxPending <= 0 {
 		cfg.MaxPending = DefaultMaxPending
+	}
+	if cfg.MaxConcurrentJobs <= 0 {
+		cfg.MaxConcurrentJobs = 1
 	}
 	return &Service{st: st, cfg: cfg}
 }
@@ -300,6 +311,15 @@ func (s *Service) Claim(ctx context.Context, nodeID int64, types []string) (*Wor
 		return nil, nil
 	}
 	if paused, perr := s.st.GetQueuePaused(); perr == nil && paused {
+		return nil, nil
+	}
+	s.claimMu.Lock()
+	defer s.claimMu.Unlock()
+	running, err := s.st.CountRunningJobsByWorker(store.NodeWorkerID(nodeID))
+	if err != nil {
+		return nil, err
+	}
+	if running >= s.cfg.MaxConcurrentJobs {
 		return nil, nil
 	}
 	j, err := s.st.ClaimJob(ctx, store.NodeWorkerID(nodeID), filtered)

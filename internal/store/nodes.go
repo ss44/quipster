@@ -224,6 +224,14 @@ func (s *Store) RequeueNodeJobs(nodeID int64, note string) (int64, error) {
 	return res.RowsAffected()
 }
 
+// CountRunningJobsByWorker returns how many jobs are currently leased to one
+// worker. The node claim path uses it to cap concurrent writers per node.
+func (s *Store) CountRunningJobsByWorker(workerID string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE status='running' AND worker_id=?`, workerID).Scan(&n)
+	return n, err
+}
+
 // RunningNodeJobs lists running jobs claimed through the node protocol, with
 // media metadata attached; the admin dashboard groups them per node.
 func (s *Store) RunningNodeJobs() ([]Job, error) {
