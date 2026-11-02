@@ -142,6 +142,44 @@ func TestReplaceChunksRelinksCues(t *testing.T) {
 	}
 }
 
+// TestMarkChunksIndexedBatches covers media large enough to span multiple
+// bounded UPDATE statements and verifies every chunk is stamped.
+func TestMarkChunksIndexedBatches(t *testing.T) {
+	s := openTest(t)
+	id, _ := setupChunkRelink(t, s)
+	const total = markIndexedBatchSize*2 + 7
+	chunks := make([]Chunk, total)
+	for i := range chunks {
+		chunks[i] = Chunk{MediaFileID: id, StartCueIdx: i, EndCueIdx: i, Text: "line"}
+	}
+	if err := s.ReplaceChunks(id, chunks); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.ChunksForMedia(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != total {
+		t.Fatalf("chunks = %d, want %d", len(all), total)
+	}
+	ids := make([]int64, len(all))
+	for i := range all {
+		ids[i] = all[i].ID
+	}
+	if merr := s.MarkChunksIndexed(ids, 99); merr != nil {
+		t.Fatal(merr)
+	}
+	after, err := s.ChunksForMedia(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range after {
+		if c.IndexedAt != 99 {
+			t.Fatalf("chunk %d indexed_at = %d, want 99", c.ID, c.IndexedAt)
+		}
+	}
+}
+
 func TestClaimJobExclusive(t *testing.T) {
 	s := openTest(t)
 	for i := 0; i < 5; i++ {
