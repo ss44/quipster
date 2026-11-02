@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -720,23 +721,53 @@ func (d Deps) handleQueueClear(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{"cleared": n})
 }
 
+// reprobeRequest optionally narrows a reprobe to specific media ids.
+type reprobeRequest struct {
+	MediaIDs []int64 `json:"mediaIds"`
+}
+
 // handleReprobe re-runs probe (metadata/audio/subtitle selection) for media
-// that already finished, e.g. after a pipeline improvement. Rows inside an
-// absence grace window are skipped so a flapping share does not manufacture
-// error rows; the response reports how many were skipped so the admin knows
-// the re-probe was not a silent no-op.
-func (d Deps) handleReprobe(w http.ResponseWriter, _ *http.Request) {
-	ids, err := d.St.MediaIDsByStatus("indexed", "no_subs", "error")
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
+// that already finished, e.g. after a pipeline improvement. A JSON body with
+// mediaIds targets specific rows; an empty body reprobes every finished row.
+// Rows inside an absence grace window are skipped so a flapping share does not
+// manufacture error rows; the response reports how many were skipped so the
+// admin knows the re-probe was not a silent no-op.
+func (d Deps) handleReprobe(w http.ResponseWriter, r *http.Request) {
+	var req reprobeRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, http.StatusBadRequest, "invalid reprobe request: "+err.Error())
+			return
+		}
 	}
-	skippedMissing, err := d.St.CountMissingByStatus("indexed", "no_subs", "error")
-	if err != nil {
-		log.Printf("[api] count missing media for reprobe: %v", err)
+
+	var ids []int64
+	var skippedMissing int
+	if len(req.MediaIDs) > 0 {
+		ids = req.MediaIDs
+	} else {
+		var err error
+		ids, err = d.St.MediaIDsByStatus("indexed", "no_subs", "error")
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		skippedMissing, err = d.St.CountMissingByStatus("indexed", "no_subs", "error")
+		if err != nil {
+			log.Printf("[api] count missing media for reprobe: %v", err)
+		}
 	}
+
 	n := 0
+	seen := make(map[int64]struct{}, len(ids))
 	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
 		payload, _ := json.Marshal(map[string]any{"mediaId": id}) //nolint:errcheck // the map holds only an int64, so marshaling cannot fail
 		if _, err := d.St.EnqueueJob("probe", string(payload), 2); err == nil {
 			n++
