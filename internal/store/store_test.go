@@ -180,6 +180,50 @@ func TestMarkChunksIndexedBatches(t *testing.T) {
 	}
 }
 
+// TestReplaceCuesBatches verifies cue writes spanning multiple bounded
+// transactions preserve every row.
+func TestReplaceCuesBatches(t *testing.T) {
+	s := openTest(t)
+	id, trackID := setupChunkRelink(t, s)
+	const total = cueWriteBatchSize*2 + 3
+	cues := make([]Cue, total)
+	for i := range cues {
+		cues[i] = Cue{MediaFileID: id, TrackID: trackID, Idx: i, StartSec: float64(i), EndSec: float64(i) + 1, Text: "line"}
+	}
+	if err := s.ReplaceCues(id, trackID, cues); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.CueCount(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != total {
+		t.Fatalf("cues = %d, want %d", n, total)
+	}
+}
+
+// TestReplaceChunksBatches verifies chunk writes spanning multiple bounded
+// transactions preserve every row.
+func TestReplaceChunksBatches(t *testing.T) {
+	s := openTest(t)
+	id, _ := setupChunkRelink(t, s)
+	const total = chunkWriteBatchSize*2 + 3
+	chunks := make([]Chunk, total)
+	for i := range chunks {
+		chunks[i] = Chunk{MediaFileID: id, StartCueIdx: i, EndCueIdx: i, Text: "line"}
+	}
+	if err := s.ReplaceChunks(id, chunks); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ChunksForMedia(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != total {
+		t.Fatalf("chunks = %d, want %d", len(got), total)
+	}
+}
+
 func TestClaimJobExclusive(t *testing.T) {
 	s := openTest(t)
 	for i := 0; i < 5; i++ {
