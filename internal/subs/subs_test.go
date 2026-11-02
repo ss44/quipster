@@ -1,6 +1,7 @@
 package subs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,6 +187,37 @@ func TestParseDropsDrawingCommands(t *testing.T) {
 	}
 	if cues[0].Text != "Hello there" || cues[1].Text != "m 615 people arrived" {
 		t.Errorf("unexpected cues = %+v", cues)
+	}
+}
+
+// TestParseDropsTaggedDrawingCommands covers ASS override tags that hide the
+// vector path from the drawing-command filter.
+func TestParseDropsTaggedDrawingCommands(t *testing.T) {
+	data := "1\n00:00:01,000 --> 00:00:02,000\n<font>{\\an8}m 0 0 b 3 -3 7.5 -3 10.5 0</font>\n\n" +
+		"2\n00:00:03,000 --> 00:00:04,000\nHello there\n"
+	cues, err := ParseBytes([]byte(data), ".srt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cues) != 1 || cues[0].Text != "Hello there" {
+		t.Fatalf("tagged drawing not dropped: %+v", cues)
+	}
+}
+
+// TestParseDropsRepeatedKaraokeText covers ASS karaoke syllables that are
+// unique per timestamp but repeated hundreds of times across the episode.
+func TestParseDropsRepeatedKaraokeText(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= maxRepeatedCueText+1; i++ {
+		fmt.Fprintf(&b, "%d\n00:00:%02d,000 --> 00:00:%02d,500\no\n\n", i, i, i)
+	}
+	b.WriteString("99\n00:00:59,000 --> 00:01:00,000\nHello there\n")
+	cues, err := ParseBytes([]byte(b.String()), ".srt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cues) != 1 || cues[0].Text != "Hello there" {
+		t.Fatalf("repeated karaoke text not dropped: %+v", cues)
 	}
 }
 

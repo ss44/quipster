@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,11 +133,17 @@ func isEnglish(lang string) bool {
 
 var textTagReplacer = strings.NewReplacer("\r", "")
 
+// assTagRe matches ASS/SSA override blocks such as {\an8} and {\p1}. FFmpeg
+// leaves these in SRT output, which hides vector drawing commands from the
+// drawing-command filter.
+var assTagRe = regexp.MustCompile(`\{[^}]*\}`)
+
 func normalizeText(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	// Strip residual markup astisub did not consume.
 	s = stripTags(s)
+	s = assTagRe.ReplaceAllString(s, "")
 	var lines []string
 	for _, ln := range strings.Split(s, "\n") {
 		ln = strings.TrimSpace(ln)
@@ -210,22 +217,31 @@ func ParseBytes(data []byte, ext string) ([]Cue, error) {
 	return fromAstisub(subs), nil
 }
 
+// maxRepeatedCueText drops text repeated more than this many times in one
+// media. ASS karaoke tracks emit each syllable hundreds or thousands of times;
+// normal dialog lines do not repeat 20+ times in a single episode.
+const maxRepeatedCueText = 20
+
 func fromAstisub(subs *astisub.Subtitles) []Cue {
+	textCounts := make(map[string]int, len(subs.Items))
+	for _, it := range subs.Items {
+		if it.StartAt < 0 || it.EndAt <= it.StartAt {
+			continue
+		}
+		text := itemText(it)
+		if text != "" && !looksLikeDrawingCommand(text) {
+			textCounts[text]++
+		}
+	}
+
 	out := make([]Cue, 0, len(subs.Items))
 	seen := make(map[cueKey]struct{}, len(subs.Items))
 	for _, it := range subs.Items {
 		if it.StartAt < 0 || it.EndAt <= it.StartAt {
 			continue
 		}
-		var parts []string
-		for _, ln := range it.Lines {
-			txt := strings.TrimSpace(ln.String())
-			if txt != "" {
-				parts = append(parts, txt)
-			}
-		}
-		text := normalizeText(strings.Join(parts, " "))
-		if text == "" || looksLikeDrawingCommand(text) {
+		text := itemText(it)
+		if text == "" || looksLikeDrawingCommand(text) || textCounts[text] > maxRepeatedCueText {
 			continue
 		}
 		start := it.StartAt.Seconds()
@@ -250,6 +266,18 @@ func fromAstisub(subs *astisub.Subtitles) []Cue {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Start < out[j].Start })
 	return out
+}
+
+// itemText joins and normalizes the lines of one subtitle item.
+func itemText(it *astisub.Item) string {
+	var parts []string
+	for _, ln := range it.Lines {
+		txt := strings.TrimSpace(ln.String())
+		if txt != "" {
+			parts = append(parts, txt)
+		}
+	}
+	return normalizeText(strings.Join(parts, " "))
 }
 
 // cueKey identifies a cue for exact-duplicate removal at millisecond precision.
