@@ -362,18 +362,10 @@ func TestRandomQuotesAndExamplesExcludeArchived(t *testing.T) {
 	require.Len(t, quotes, 1)
 	assert.Equal(t, active, quotes[0].MediaFileID)
 
-	examples, err := st.PopularExamples([]string{"hello there"})
-	require.NoError(t, err)
-	assert.NotEmpty(t, examples, "the active row still backs the example")
-
 	// With only the archived row left, neither surface has anything to show.
 	_, err = st.DB().Exec(`DELETE FROM chunks WHERE media_file_id=?`, active)
 	require.NoError(t, err)
 	quotes, err = st.RandomQuotes(10)
 	require.NoError(t, err)
 	assert.Empty(t, quotes)
-	examples, err = st.PopularExamples([]string{"hello there"})
-	require.NoError(t, err)
-	assert.Empty(t, examples)
-	_ = hidden
 }

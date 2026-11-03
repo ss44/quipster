@@ -8,7 +8,13 @@ import (
 )
 
 func TestExamplesEndpoint(t *testing.T) {
-	st, deps := newEnv(t)
+	st := newStore(t)
+	// Return a fake search hit so the candidates resolve.
+	hits := []map[string]any{
+		{"id": `"1_0-1"`, "text": `"fake hit"`},
+	}
+	deps := buildDeps(t, st, newMeili(t, http.StatusOK, hits))
+
 	id := seedMedia(t, st)
 	seedIndexedChunks(t, st, id)
 
@@ -22,9 +28,7 @@ func TestExamplesEndpoint(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	// "the city never sleeps" outranks nothing and both resolve, so the
-	// candidates are returned ranked by chunk count.
-	want := []string{"show me the money", "the city never sleeps"}
+	want := []string{"i could have been a contender", "run, you fools", "show me the money", "the city never sleeps"}
 	if !reflect.DeepEqual(body.Examples, want) {
 		t.Errorf("examples = %v, want %v", body.Examples, want)
 	}

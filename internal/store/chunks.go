@@ -211,27 +211,39 @@ func (s *Store) RandomQuotes(limit int) ([]ChunkWithMedia, error) {
 	if limit <= 0 || limit > 12 {
 		limit = 6
 	}
-	rows, err := s.db.Query(`SELECT `+chunkJoinCols+`
-		FROM chunks c JOIN media_files m ON m.id = c.media_file_id
-		WHERE c.indexed_at > 0 AND m.status = 'indexed' AND m.archived = 0
-		  AND length(c.text) BETWEEN 12 AND 220 AND TRIM(c.text) != ''
-		  AND substr(TRIM(c.text), 1, 1) != '['
-		ORDER BY RANDOM() LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer closeRows(rows)
 	var out []ChunkWithMedia
-	for rows.Next() {
-		var c ChunkWithMedia
-		if err := rows.Scan(&c.ID, &c.MediaFileID, &c.StartCueIdx, &c.EndCueIdx, &c.Text, &c.IndexedAt,
-			&c.MediaTitle, &c.ShowTitle, &c.Year, &c.Season, &c.Episode, &c.DurationSec, &c.FilePath,
-			&c.StartSec, &c.EndSec); err != nil {
+	seen := make(map[int64]bool)
+	maxAttempts := limit * 10
+	attempts := 0
+
+	for len(out) < limit && attempts < maxAttempts {
+		attempts++
+		rows, err := s.db.Query(`SELECT ` + chunkJoinCols + `
+			FROM chunks c JOIN media_files m ON m.id = c.media_file_id
+			WHERE c.id >= ((ABS(RANDOM()) % (SELECT COALESCE(MAX(id), 1) FROM chunks)) + 1)
+			  AND c.indexed_at > 0 AND m.status = 'indexed' AND m.archived = 0
+			  AND length(c.text) BETWEEN 12 AND 220 AND TRIM(c.text) != ''
+			  AND substr(TRIM(c.text), 1, 1) != '['
+			LIMIT 1`)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, c)
+		for rows.Next() {
+			var c ChunkWithMedia
+			if err := rows.Scan(&c.ID, &c.MediaFileID, &c.StartCueIdx, &c.EndCueIdx, &c.Text, &c.IndexedAt,
+				&c.MediaTitle, &c.ShowTitle, &c.Year, &c.Season, &c.Episode, &c.DurationSec, &c.FilePath,
+				&c.StartSec, &c.EndSec); err != nil {
+				closeRows(rows)
+				return nil, err
+			}
+			if !seen[c.ID] {
+				seen[c.ID] = true
+				out = append(out, c)
+			}
+		}
+		closeRows(rows)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // GetChunkByKey resolves a chunk identity "mediaId:startIdx-endIdx".
