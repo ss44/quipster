@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -166,9 +165,7 @@ func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *i
 	// de-index queue: priority -1 jobs are claimed only when nothing else is
 	// queued, so a large archive backlog trickles strictly behind
 	// user-visible work and the scan itself never waits on Meili.
-	onArchived := func(ids []int64) {
-		enqueueArchiveDeindex(st, ids)
-	}
+	onArchived := ix.EnqueueArchiveDeindex
 	// A scan is metadata-only and must not compete with full-file subtitle
 	// extraction on a network share. The gate makes scans exclusive: in-flight
 	// probes are canceled and requeued, and new probes wait for the walk.
@@ -182,58 +179,6 @@ func registerJobHandlers(cfg config, st *store.Store, runner *jobs.Runner, ix *i
 	// De-indexing runs on a single dedicated worker so Meili pressure from the
 	// archive trickle stays flat regardless of backlog size.
 	runner.Register("archive_deindex", 1, ix.ArchiveJobHandler())
-}
-
-// enqueueArchiveDeindex enqueues one unique low-priority de-index job per
-// archived media, in bounded batches. Deduplication makes the call idempotent
-// across overlapping scans and reconcile passes. A failed batch does not stop
-// the remaining batches: the next boot reconcile would recover the backlog,
-// but continuing here shrinks the gap instead of leaving it until restart.
-func enqueueArchiveDeindex(st *store.Store, ids []int64) {
-	if len(ids) == 0 {
-		return
-	}
-	const batch = 1000
-	enqueued := 0
-	skipped := 0
-	for start := 0; start < len(ids); start += batch {
-		specs := make([]store.JobSpec, 0, min(batch, len(ids)-start))
-		for _, id := range ids[start:min(start+batch, len(ids))] {
-			specs = append(specs, store.JobSpec{
-				Type:     "archive_deindex",
-				Payload:  fmt.Sprintf(`{"mediaId":%d}`, id),
-				Priority: -1,
-			})
-		}
-		n, err := st.EnqueueUniqueJobs(specs)
-		if err != nil {
-			log.Printf("enqueue archive deindex jobs: %v", err)
-			skipped += len(specs)
-			continue
-		}
-		enqueued += n
-	}
-	if enqueued > 0 {
-		log.Printf("queued %d archive de-index job(s)", enqueued)
-	}
-	if skipped > 0 {
-		log.Printf("skipped %d archive de-index job(s) after enqueue errors; boot reconcile will retry them", skipped)
-	}
-}
-
-// reconcileArchivedDeindex re-enqueues de-index jobs for rows archived before
-// a crash or Meili outage, closing the gap left by the runner's bounded
-// retries. Best-effort: the next query-time reconciliation pass also covers it.
-func reconcileArchivedDeindex(st *store.Store) {
-	ids, err := st.ArchivedPendingDeindex()
-	if err != nil {
-		log.Printf("archive reconcile: %v", err)
-		return
-	}
-	if len(ids) > 0 {
-		log.Printf("archive reconcile: %d archived media awaiting de-index", len(ids))
-		enqueueArchiveDeindex(st, ids)
-	}
 }
 
 // buildProbePipeline constructs the probe pipeline shared by the local job
@@ -415,7 +360,7 @@ func main() {
 
 	// Repair any de-index backlog left by a crash or a Meili outage before
 	// serving traffic.
-	reconcileArchivedDeindex(st)
+	ix.ReconcileArchivedDeindex()
 
 	// Stdio mode replaces the HTTP server entirely: the process is launched
 	// by an MCP client as a subprocess and speaks MCP over stdin/stdout. It
@@ -621,12 +566,7 @@ func scanTicker(ctx context.Context, st *store.Store, interval time.Duration) {
 					log.Printf("scan ticker read roots: %v", rerr)
 					continue
 				}
-				payload, merr := json.Marshal(map[string]any{"roots": roots, "prune": true})
-				if merr != nil {
-					log.Printf("scan ticker marshal: %v", merr)
-					continue
-				}
-				if _, err := st.EnqueueJob("scan", string(payload), 3); err != nil {
+				if _, err := scan.EnqueueScanJob(st, roots, true); err != nil {
 					log.Printf("scan ticker enqueue: %v", err)
 				} else {
 					log.Printf("scan ticker: scan enqueued (%d folders)", len(roots))
