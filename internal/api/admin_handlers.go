@@ -22,26 +22,25 @@ func (d Deps) handleScan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "already-running"})
 		return
 	}
-	payload := map[string]any{}
+	var roots []string
+	prune := true
 	if root := strings.TrimSpace(r.URL.Query().Get("root")); root != "" {
-		roots, err := scan.CleanRoots([]string{root})
+		var err error
+		roots, err = scan.CleanRoots([]string{root})
 		if err != nil || len(roots) == 0 {
 			writeErr(w, http.StatusBadRequest, "invalid scan root")
 			return
 		}
-		payload["roots"] = roots
-		payload["prune"] = false
+		prune = false
 	} else {
-		roots, err := d.St.GetLibraryPaths()
+		var err error
+		roots, err = d.St.GetLibraryPaths()
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		payload["roots"] = roots
-		payload["prune"] = true
 	}
-	pb, _ := json.Marshal(payload) //nolint:errcheck // the map holds only strings and a bool, so marshaling cannot fail
-	if _, err := d.St.EnqueueJob("scan", string(pb), 3); err != nil {
+	if _, err := scan.EnqueueScanJob(d.St, roots, prune); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

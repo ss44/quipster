@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -55,40 +54,27 @@ func (s *Server) triggerScan(_ context.Context, _ *mcpsdk.CallToolRequest, in sc
 	if active, err := s.deps.St.HasActiveScanJob(); err == nil && active {
 		return nil, scanOut{Status: "already-running"}, nil
 	}
-	payload, err := s.scanPayload(in.Root)
-	if err != nil {
-		return nil, scanOut{}, err
+	var roots []string
+	prune := true
+	if strings.TrimSpace(in.Root) != "" {
+		var err error
+		roots, err = scan.CleanRoots([]string{in.Root})
+		if err != nil || len(roots) == 0 {
+			return nil, scanOut{}, errors.New("invalid scan root")
+		}
+		prune = false
+	} else {
+		var err error
+		roots, err = s.deps.St.GetLibraryPaths()
+		if err != nil {
+			return nil, scanOut{}, err
+		}
 	}
-	id, err := s.deps.St.EnqueueJob("scan", payload, 3)
+	id, err := scan.EnqueueScanJob(s.deps.St, roots, prune)
 	if err != nil {
 		return nil, scanOut{}, err
 	}
 	return nil, scanOut{Status: "started", JobID: id}, nil
-}
-
-// scanPayload builds the scan job payload for a root-scoped or full scan.
-func (s *Server) scanPayload(root string) (string, error) {
-	payload := map[string]any{}
-	if strings.TrimSpace(root) != "" {
-		roots, err := scan.CleanRoots([]string{root})
-		if err != nil || len(roots) == 0 {
-			return "", errors.New("invalid scan root")
-		}
-		payload["roots"] = roots
-		payload["prune"] = false
-	} else {
-		roots, err := s.deps.St.GetLibraryPaths()
-		if err != nil {
-			return "", err
-		}
-		payload["roots"] = roots
-		payload["prune"] = true
-	}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
 }
 
 // reindexOut is the reindex_library wire type.
