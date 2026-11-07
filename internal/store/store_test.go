@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func openTest(t *testing.T) *Store {
@@ -65,7 +68,7 @@ func TestOpenCreatesChunksMediaIndex(t *testing.T) {
 // id and enqueue a probe job for a nonexistent or unrelated media row.
 func TestUpsertMediaReturnsUpdatedRowID(t *testing.T) {
 	s := openTest(t)
-	s.db.SetMaxOpenConns(1)
+	s.writeDB.SetMaxOpenConns(1)
 
 	idA, changed, err := s.UpsertMedia("/media/a.mkv", "mkv", 1, 1, "A", 0, 0, 0, "")
 	if err != nil || !changed {
@@ -287,6 +290,128 @@ func TestClaimJobExclusive(t *testing.T) {
 	if j != nil {
 		t.Errorf("queue should be empty")
 	}
+}
+
+func TestPoolsApplySQLitePragmas(t *testing.T) {
+	s := openTest(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, pool := range []*sql.DB{s.writeDB, s.db, s.db} {
+		conn, err := pool.Conn(ctx)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, conn.Close()) })
+		var mode string
+		require.NoError(t, conn.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&mode))
+		require.Equal(t, "wal", mode)
+		for query, want := range map[string]int64{
+			"PRAGMA busy_timeout":       busyTimeoutMS,
+			"PRAGMA journal_size_limit": walSizeLimitBytes,
+			"PRAGMA foreign_keys":       1,
+			"PRAGMA synchronous":        1,
+		} {
+			var got int64
+			require.NoError(t, conn.QueryRowContext(ctx, query).Scan(&got))
+			require.Equal(t, want, got, query)
+		}
+	}
+}
+
+func TestWriterPoolWALReadersAndCancellation(t *testing.T) {
+	s := openTest(t)
+	require.Same(t, s.writeDB, s.DB())
+	require.NotSame(t, s.db, s.writeDB)
+	require.Equal(t, 1, s.writeDB.Stats().MaxOpenConnections)
+	require.NoError(t, s.SetSetting("key", "committed"))
+	jobID, err := s.EnqueueJob("probe", "{}", 0)
+	require.NoError(t, err)
+	tx, err := s.writeDB.Begin()
+	require.NoError(t, err)
+	defer rollbackTx(tx)
+	_, err = tx.Exec(`UPDATE settings SET value='uncommitted' WHERE key='key'`)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reader1, err := s.db.Conn(ctx)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, reader1.Close()) }()
+	reader2, err := s.db.Conn(ctx)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, reader2.Close()) }()
+	for _, reader := range []*sql.Conn{reader1, reader2} {
+		var value string
+		require.NoError(t, reader.QueryRowContext(ctx, `SELECT value FROM settings WHERE key='key'`).Scan(&value))
+		require.Equal(t, "committed", value)
+	}
+	job, err := s.ClaimJob(ctx, "worker", []string{"clip"})
+	require.NoError(t, err)
+	require.Nil(t, job)
+
+	claimCtx, claimCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer claimCancel()
+	job, err = s.ClaimJob(claimCtx, "worker", []string{"probe"})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Nil(t, job)
+	waitCount := s.writeDB.Stats().WaitCount
+	require.Positive(t, waitCount)
+
+	done := make(chan error, 1)
+	go func() { done <- s.SetSetting("other", "after") }()
+	require.Eventually(t, func() bool { return s.writeDB.Stats().WaitCount > waitCount }, 2*time.Second, time.Millisecond)
+	select {
+	case writeErr := <-done:
+		t.Fatalf("second writer completed before commit: %v", writeErr)
+	default:
+	}
+	require.NoError(t, tx.Commit())
+	select {
+	case writeErr := <-done:
+		require.NoError(t, writeErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("second writer did not resume")
+	}
+	job, err = s.ClaimJob(ctx, "worker", []string{"probe"})
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, jobID, job.ID)
+}
+
+func TestClaimRollbackReleasesWriter(t *testing.T) {
+	s := openTest(t)
+	id, err := s.EnqueueJob("probe", "{}", 0)
+	require.NoError(t, err)
+	_, err = s.DB().Exec(`CREATE TRIGGER fail_claim BEFORE UPDATE ON jobs BEGIN SELECT RAISE(ABORT, 'claim failure'); END`)
+	require.NoError(t, err)
+	_, err = s.ClaimJob(context.Background(), "worker", []string{"probe"})
+	require.Error(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = s.DB().ExecContext(ctx, `DROP TRIGGER fail_claim`)
+	require.NoError(t, err)
+	job, err := s.ClaimJob(ctx, "worker", []string{"probe"})
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, id, job.ID)
+}
+
+func TestMemoryStoreUsesIsolatedSharedPool(t *testing.T) {
+	first, err := Open(":memory:")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, first.Close()) }()
+	second, err := Open(":memory:")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, second.Close()) }()
+	require.Same(t, first.db, first.writeDB)
+	require.Same(t, first.db, first.DB())
+	require.Equal(t, 1, first.db.Stats().MaxOpenConnections)
+	require.NoError(t, first.SetSetting("key", "value"))
+	value, ok, err := first.GetSetting("key")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "value", value)
+	_, ok, err = second.GetSetting("key")
+	require.NoError(t, err)
+	require.False(t, ok)
 }
 
 func TestCacheEntriesLRU(t *testing.T) {

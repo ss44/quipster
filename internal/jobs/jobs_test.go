@@ -136,6 +136,7 @@ func TestRunnerMissingHandler(t *testing.T) {
 	if err != nil || j == nil {
 		t.Fatalf("claim: job=%v err=%v", j, err)
 	}
+	j.WorkerID = "manual"
 	r.run("orphan", j)
 
 	got := jobByID(t, st, id)
@@ -164,12 +165,22 @@ func TestRunnerFinishJobErrorPath(t *testing.T) {
 	r.handlers["x"] = func(context.Context, *store.Job, func(float64)) error { return nil }
 	r.mu.Unlock()
 
-	// Closing the store forces FinishJob to fail; run must swallow the error
-	// rather than panic or retry the job.
 	if err := st.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
-	r.run("x", j)
+	j.WorkerID = "manual"
+	done := make(chan struct{})
+	go func() {
+		r.run("x", j)
+		close(done)
+	}()
+	waitFor(t, "failed finalization retained", func() bool { return r.CancelActive() == 1 })
+	r.Stop()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pending finalization did not stop")
+	}
 }
 
 func TestRunnerHandlesClaimError(t *testing.T) {

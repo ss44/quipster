@@ -18,10 +18,10 @@ type SubtitleTrack struct {
 // ReplaceTrack swaps the subtitle track row for a media file and returns the
 // new track id.
 func (s *Store) ReplaceTrack(mediaFileID int64, t *SubtitleTrack) (int64, error) {
-	if _, err := s.db.Exec(`DELETE FROM subtitle_tracks WHERE media_file_id=?`, mediaFileID); err != nil {
+	if _, err := s.writeDB.Exec(`DELETE FROM subtitle_tracks WHERE media_file_id=?`, mediaFileID); err != nil {
 		return 0, err
 	}
-	res, err := s.db.Exec(`INSERT INTO subtitle_tracks (media_file_id, source, lang, stream_index, extracted_path) VALUES (?,?,?,?,?)`,
+	res, err := s.writeDB.Exec(`INSERT INTO subtitle_tracks (media_file_id, source, lang, stream_index, extracted_path) VALUES (?,?,?,?,?)`,
 		mediaFileID, t.Source, t.Lang, t.StreamIndex, t.ExtractedPath)
 	if err != nil {
 		return 0, err
@@ -68,7 +68,7 @@ const cueWriteBatchSize = 2000
 // in bounded batches so the writer lock is released between commits. A partial
 // failure is safe: the probe job retries and replaces the whole set.
 func (s *Store) ReplaceCues(mediaFileID, trackID int64, cues []Cue) error {
-	if _, err := s.db.Exec(`DELETE FROM cues WHERE media_file_id=?`, mediaFileID); err != nil {
+	if _, err := s.writeDB.Exec(`DELETE FROM cues WHERE media_file_id=?`, mediaFileID); err != nil {
 		return err
 	}
 	for start := 0; start < len(cues); start += cueWriteBatchSize {
@@ -82,7 +82,7 @@ func (s *Store) ReplaceCues(mediaFileID, trackID int64, cues []Cue) error {
 
 // insertCueBatch writes one bounded batch in its own transaction.
 func (s *Store) insertCueBatch(mediaFileID, trackID int64, cues []Cue) error {
-	tx, err := s.db.Begin()
+	tx, err := s.writeDB.Begin()
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func (s *Store) CueCount(mediaFileID int64) (int64, error) {
 
 // CleanSubtitles removes tracks, cues and chunks for a media file in one transaction.
 func (s *Store) CleanSubtitles(mediaFileID int64) error {
-	tx, err := s.db.Begin()
+	tx, err := s.writeDB.Begin()
 	if err != nil {
 		return err
 	}

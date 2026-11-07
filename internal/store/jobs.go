@@ -63,7 +63,7 @@ func (s *Store) EnqueueJobs(specs []JobSpec) ([]int64, error) {
 	if len(specs) == 0 {
 		return nil, nil
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.writeDB.Begin()
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func (s *Store) EnqueueUniqueJobs(specs []JobSpec) (int, error) {
 	if len(specs) == 0 {
 		return 0, nil
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.writeDB.Begin()
 	if err != nil {
 		return 0, err
 	}
@@ -168,7 +168,7 @@ func (s *Store) ClaimJob(ctx context.Context, workerID string, types []string) (
 	if !ok {
 		return nil, nil
 	}
-	conn, err := s.db.Conn(ctx)
+	conn, err := s.writeDB.Conn(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -215,34 +215,34 @@ func (s *Store) ClaimJob(ctx context.Context, workerID string, types []string) (
 
 // FinishJob marks a job done or errored, latching full progress on success.
 func (s *Store) FinishJob(id int64, status, errMsg string) error {
-	_, err := s.db.Exec(`UPDATE jobs SET status=?, error=?, progress=CASE WHEN ?='done' THEN 1 ELSE progress END, finished_at=? WHERE id=?`,
+	_, err := s.writeDB.Exec(`UPDATE jobs SET status=?, error=?, progress=CASE WHEN ?='done' THEN 1 ELSE progress END, finished_at=? WHERE id=?`,
 		status, errMsg, status, nowMillis(), id)
 	return err
 }
 
 // SetJobProgress updates the progress fraction for a running job.
 func (s *Store) SetJobProgress(id int64, progress float64) error {
-	_, err := s.db.Exec(`UPDATE jobs SET progress=? WHERE id=?`, progress, id)
+	_, err := s.writeDB.Exec(`UPDATE jobs SET progress=? WHERE id=?`, progress, id)
 	return err
 }
 
 // RequeueJob returns a failed job to the queue for another attempt.
 func (s *Store) RequeueJob(id int64, errMsg string) error {
-	_, err := s.db.Exec(`UPDATE jobs SET status='queued', worker_id='', error=? WHERE id=?`, errMsg, id)
+	_, err := s.writeDB.Exec(`UPDATE jobs SET status='queued', worker_id='', error=? WHERE id=?`, errMsg, id)
 	return err
 }
 
 // RequeueJobSoft returns a paused/canceled job to the queue without counting
 // the interrupted attempt against its retry budget.
 func (s *Store) RequeueJobSoft(id int64, note string) error {
-	_, err := s.db.Exec(`UPDATE jobs SET status='queued', worker_id='', error=?,
+	_, err := s.writeDB.Exec(`UPDATE jobs SET status='queued', worker_id='', error=?,
 		attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END WHERE id=? AND status='running'`, note, id)
 	return err
 }
 
 // ClearQueuedJobs removes all queued jobs and returns how many were removed.
 func (s *Store) ClearQueuedJobs() (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM jobs WHERE status='queued'`)
+	res, err := s.writeDB.Exec(`DELETE FROM jobs WHERE status='queued'`)
 	if err != nil {
 		return 0, err
 	}
@@ -524,8 +524,13 @@ type LineStats struct {
 
 // LineStats returns total cue/chunk counts plus how many chunks are indexed.
 func (s *Store) LineStats() (*LineStats, error) {
+	return s.LineStatsContext(context.Background())
+}
+
+// LineStatsContext returns line statistics using the supplied context.
+func (s *Store) LineStatsContext(ctx context.Context) (*LineStats, error) {
 	st := &LineStats{}
-	err := s.db.QueryRow(`SELECT
+	err := s.db.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(*) FROM cues),
 		(SELECT COUNT(*) FROM chunks),
 		(SELECT COUNT(*) FROM chunks WHERE indexed_at > 0)`).Scan(&st.Cues, &st.Chunks, &st.ChunksIndexed)

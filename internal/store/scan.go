@@ -17,7 +17,7 @@ type Scan struct {
 
 // StartScan inserts a new running scan row and returns its id.
 func (s *Store) StartScan(root string) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO scans (root_path, status, started_at) VALUES (?,'running',?)`, root, nowMillis())
+	res, err := s.writeDB.Exec(`INSERT INTO scans (root_path, status, started_at) VALUES (?,'running',?)`, root, nowMillis())
 	if err != nil {
 		return 0, err
 	}
@@ -28,10 +28,10 @@ func (s *Store) StartScan(root string) (int64, error) {
 // scan row with that status and a finished timestamp.
 func (s *Store) UpdateScan(id int64, seen, done int64, status string) error {
 	if status == "" {
-		_, err := s.db.Exec(`UPDATE scans SET files_seen=?, files_done=? WHERE id=?`, seen, done, id)
+		_, err := s.writeDB.Exec(`UPDATE scans SET files_seen=?, files_done=? WHERE id=?`, seen, done, id)
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE scans SET files_seen=?, files_done=?, status=?, finished_at=? WHERE id=?`, seen, done, status, nowMillis(), id)
+	_, err := s.writeDB.Exec(`UPDATE scans SET files_seen=?, files_done=?, status=?, finished_at=? WHERE id=?`, seen, done, status, nowMillis(), id)
 	return err
 }
 

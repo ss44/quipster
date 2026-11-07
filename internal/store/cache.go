@@ -31,13 +31,13 @@ func (s *Store) GetCacheEntry(key string) (*CacheEntry, error) {
 
 // TouchCache bumps last-access time and hit counter for a cache entry.
 func (s *Store) TouchCache(key string) error {
-	_, err := s.db.Exec(`UPDATE cache_entries SET last_access=?, hits=hits+1 WHERE cache_key=?`, nowMillis(), key)
+	_, err := s.writeDB.Exec(`UPDATE cache_entries SET last_access=?, hits=hits+1 WHERE cache_key=?`, nowMillis(), key)
 	return err
 }
 
 // UpsertCacheEntry inserts or refreshes a cache entry keyed on cache key.
 func (s *Store) UpsertCacheEntry(key, path, kind string, bytes int64) error {
-	_, err := s.db.Exec(`INSERT INTO cache_entries (cache_key, path, kind, bytes, last_access, hits) VALUES (?,?,?,?,?,0)
+	_, err := s.writeDB.Exec(`INSERT INTO cache_entries (cache_key, path, kind, bytes, last_access, hits) VALUES (?,?,?,?,?,0)
 		ON CONFLICT(cache_key) DO UPDATE SET path=excluded.path, kind=excluded.kind, bytes=excluded.bytes, last_access=excluded.last_access`,
 		key, path, kind, bytes, nowMillis())
 	return err
@@ -45,7 +45,7 @@ func (s *Store) UpsertCacheEntry(key, path, kind string, bytes int64) error {
 
 // DeleteCacheEntry removes a cache entry by key.
 func (s *Store) DeleteCacheEntry(key string) error {
-	_, err := s.db.Exec(`DELETE FROM cache_entries WHERE cache_key=?`, key)
+	_, err := s.writeDB.Exec(`DELETE FROM cache_entries WHERE cache_key=?`, key)
 	return err
 }
 
