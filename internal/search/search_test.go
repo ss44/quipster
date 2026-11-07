@@ -61,25 +61,26 @@ func TestMediaTitleFor(t *testing.T) {
 	}
 }
 
-func TestParseDocID(t *testing.T) {
-	cases := []struct {
-		id         string
-		mediaID    int64
-		start, end int
-		ok         bool
-	}{
-		{"3_0-5", 3, 0, 5, true},
-		{"12_34-56", 12, 34, 56, true},
-		{"nounderscore", 0, 0, 0, false},
-		{"x_0-5", 0, 0, 0, false},
-		{"1_abc", 0, 0, 0, false},
-		{"1_0", 0, 0, 0, false},
+func TestSearchSkipsMalformedChunkIDs(t *testing.T) {
+	fx := newSearchFixture(t)
+	id := indexer.DocID(fx.id, 0, 1)
+	fx.f.hits = []map[string]any{
+		{"id": "nounderscore"},
+		{"id": "x_0-1"},
+		{"id": "1_abc"},
+		{"id": "1_0"},
+		{"id": "1suffix_0-1"},
+		{"id": id + "suffix"},
+		{"id": id + "_extra"},
+		{"id": id + "-2"},
+		{"id": id},
 	}
-	for _, c := range cases {
-		mediaID, start, end, ok := parseDocID(c.id)
-		if ok != c.ok || mediaID != c.mediaID || start != c.start || end != c.end {
-			t.Errorf("parseDocID(%q) = (%d,%d,%d,%v), want (%d,%d,%d,%v)", c.id, mediaID, start, end, ok, c.mediaID, c.start, c.end, c.ok)
-		}
+	resp, err := fx.svc.Search("", "", 1, 20, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Hits) != 1 || resp.Hits[0].ChunkID != id {
+		t.Fatalf("hits = %+v, want only canonical chunk %q", resp.Hits, id)
 	}
 }
 
