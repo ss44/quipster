@@ -97,6 +97,20 @@ func TestDiagnosticsStream(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsTokenProtection(t *testing.T) {
+	_, deps := newEnv(t)
+	deps.APIToken = "diagnostics-secret"
+	h := Router(deps)
+	for _, path := range []string{"/api/admin/diagnostics/system", "/api/admin/diagnostics/metrics", "/api/admin/diagnostics/bundle"} {
+		if r := do(t, h, http.MethodGet, path, nil, nil); r.Code != http.StatusUnauthorized {
+			t.Errorf("%s: %d", path, r.Code)
+		}
+		if r := do(t, h, http.MethodGet, path, nil, map[string]string{"Authorization": "Bearer diagnostics-secret"}); r.Code != http.StatusOK {
+			t.Errorf("%s authenticated: %d", path, r.Code)
+		}
+	}
+}
+
 func TestDiagnosticsUnavailable(t *testing.T) {
 	deps := Deps{}
 	h := Router(deps)

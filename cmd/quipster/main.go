@@ -238,6 +238,7 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	searchSvc := search.New(st, ix)
 	collector := &events.Collector{St: st, MeiliUp: ix.Healthy}
 	diag := diagnostics.New(st, hw, cfg.logs, ix.Healthy, version, cfg.dataDir, cfg.cacheDir, cfg.mediaDir)
+	diag.Revision = revision
 
 	runner := jobs.NewRunner(st, "worker")
 	runner.SetJobTimeout(parseDuration(envStr("JOB_TIMEOUT", "3h")))
@@ -303,6 +304,7 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 
 // version is overridable at build time with -ldflags "-X main.version=...".
 var version = "dev"
+var revision = "unknown"
 
 func main() {
 	// `quipster node` launches the stateless worker-node mode: it talks to

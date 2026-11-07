@@ -15,7 +15,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=webbuild /web/dist ./web/dist
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/quipster ./cmd/quipster
+ARG APP_VERSION=dev
+ARG APP_REVISION=unknown
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${APP_VERSION} -X main.revision=${APP_REVISION}" -o /out/quipster ./cmd/quipster
 
 FROM debian:bookworm-slim
 
