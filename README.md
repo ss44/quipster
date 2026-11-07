@@ -128,6 +128,17 @@ Media dir (bind-mount, read-only) ──> ingestion; cache dir (clips/thumbs) �
 
 ## Quickstart (Docker)
 
+Quipster is local-first: a locally run, single-user instance does not require accounts or an
+admin token. **Before making it reachable from an untrusted network, protect the admin API**
+with `API_TOKEN` or a trusted-network/reverse-proxy access-control layer. Without either,
+visitors can read admin configuration and node information and operate the library, including
+queue control, scans, reindexing, and configuration changes.
+
+The supplied Compose file publishes port `8080` on all host interfaces by default. For a
+local-only setup, change the app's port mapping to `127.0.0.1:8080:8080`; otherwise restrict
+access with your firewall or reverse proxy. See [Deployment access control](#deployment-access-control)
+for token setup and its scope.
+
 1. **Prerequisite:** Docker with the compose plugin.
 2. **Clone and configure:**
 
@@ -344,6 +355,33 @@ Set `NODE_SERVER_URL` to the main app's URL and mount the library the same way t
 | `EMBEDDINGS_DOCUMENT_TEMPLATE` | `{{doc.text}}` | Liquid template rendering the text to embed |
 | `EMBEDDINGS_REQUEST` / `EMBEDDINGS_RESPONSE` | — | `rest` source JSON request/response templates |
 | `EMBEDDINGS_SEMANTIC_RATIO` | `0.5` | keyword/semantic blend for hybrid queries (0 = keyword only, 1 = pure semantic) |
+
+### Deployment access control
+
+`API_TOKEN` is optional for the intended single-user local setup. If Quipster is reachable
+from an untrusted network, set a strong, unique `API_TOKEN` in the **app process environment**
+or restrict `/api/admin/*` to trusted users with a network or reverse-proxy access-control
+layer. The token guards both read and write REST admin routes; clients must send it in the
+`X-API-Token` header. Use HTTPS when sending tokens over an untrusted network.
+
+The supplied Compose file does not forward `API_TOKEN` from `.env` automatically. To use it,
+add the following entry to the selected app service's `environment` mapping and set
+`API_TOKEN` in `.env` before recreating that service:
+
+```yaml
+environment:
+  API_TOKEN: ${API_TOKEN:?set API_TOKEN in .env}
+```
+
+`API_TOKEN` is **not** whole-site authentication: public search, media, thumbnail, and clip
+routes remain public. Use a trusted-network boundary or reverse-proxy authentication for the
+entire service if your media library must remain private. Do not embed the admin token in a
+public frontend or expose it to untrusted visitors.
+
+`MCP_TOKENS` separately protects the MCP endpoint at `/mcp`; it does **not** protect REST
+admin routes. Likewise, `API_TOKEN` does not configure MCP authorization. Configure scoped
+`MCP_TOKENS` when enabling MCP, and retain `MCP_ALLOW_ADMIN` as its separate admin-tool master
+switch. These settings do not change the no-auth local default.
 
 ## API
 
