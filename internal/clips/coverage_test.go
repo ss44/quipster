@@ -3,6 +3,7 @@ package clips
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -432,20 +433,51 @@ func TestProduceMkdirError(t *testing.T) {
 // with progress reporting, the fast delegation, field defaults and malformed
 // payloads.
 func TestJobHandler(t *testing.T) {
-	mockCreateOutput(t)
+	dir := t.TempDir()
+	ackPath := filepath.Join(dir, "progress-ack")
+	mkfifo := exec.Command("mkfifo", "progress-ack")
+	mkfifo.Dir = dir
+	require.NoError(t, mkfifo.Run())
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer func() { assert.NoError(t, root.Close()) }()
+	ack, err := root.OpenFile("progress-ack", os.O_RDWR, 0o600)
+	require.NoError(t, err)
+	defer func() { assert.NoError(t, ack.Close()) }()
+
+	script := filepath.Join(dir, "ffmpeg")
+	require.NoError(t, root.WriteFile("ffmpeg", []byte(`#!/bin/sh
+for arg in "$@"; do out="$arg"; done
+printf '%s\n' 'out_time_us=1000000' 'out_time_us=2000000'
+read -r ack < "$MOCK_PROGRESS_ACK" || exit 1
+printf 'mock data\n' > "$out"
+`), 0o600))
+	require.NoError(t, root.Chmod("ffmpeg", 0o700))
+	t.Setenv("FFMPEG_BIN", script)
+	t.Setenv("MOCK_PROGRESS_ACK", ackPath)
 	s, st := newTestService(t)
 	forceHWOff(s)
 	id := seedMedia(t, st, "/fake/source", 0)
 	handler := s.JobHandler()
 	validMedia := `{"mediaId":` + strconv.FormatInt(id, 10) + ``
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	var reported []float64
-	err := handler(context.Background(),
+	var ackErr error
+	err = handler(ctx,
 		&store.Job{Payload: validMedia + `,"start":10,"end":20,"padMs":100,"mode":"accurate"}`},
-		func(p float64) { reported = append(reported, p) })
+		func(p float64) {
+			reported = append(reported, p)
+			if len(reported) == 2 {
+				_, ackErr = ack.WriteString("ok\n")
+			}
+		})
 	require.NoError(t, err)
+	require.NoError(t, ackErr)
 	require.Greater(t, len(reported), 1)
 
+	mockCreateOutput(t)
 	// Explicit fast payload delegates to the sync produce path.
 	err = handler(context.Background(),
 		&store.Job{Payload: validMedia + `,"start":10,"end":20,"padMs":0,"mode":"fast"}`},
