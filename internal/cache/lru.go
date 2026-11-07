@@ -45,9 +45,11 @@ func (l *LRU) Evict(ctx context.Context) error {
 		}
 		if err := os.Remove(e.Path); err != nil && !os.IsNotExist(err) {
 			log.Printf("[cache] remove %s: %v", e.Path, err)
+			continue
 		}
 		if err := l.St.DeleteCacheEntry(e.CacheKey); err != nil {
 			log.Printf("[cache] delete entry %s: %v", e.CacheKey, err)
+			continue
 		}
 		over -= e.Bytes
 	}
