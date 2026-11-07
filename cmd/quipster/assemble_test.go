@@ -66,6 +66,9 @@ func TestAssembleAppAllRole(t *testing.T) {
 	if a.Deps.Search == nil || a.Deps.Clips == nil || a.Deps.Thumbs == nil || a.Deps.Events == nil {
 		t.Fatal("all services must be wired")
 	}
+	if a.Deps.Diagnostics == nil || a.Deps.Diagnostics.Revision != revision {
+		t.Fatal("diagnostics must receive the build revision")
+	}
 
 	// Worker role handlers must be registered: a queued job gets picked up.
 	if _, err := st.EnqueueJob("probe", `{"mediaId":1}`, 0); err != nil {

@@ -30,6 +30,9 @@ func (c *Collector) Report(ctx context.Context) string {
 	var b strings.Builder
 	b.WriteString("### Quipster diagnostics\n")
 	fmt.Fprintf(&b, "Version: %s (%s, %s/%s)\n", fallback(sys.AppVersion, "dev"), sys.GoVersion, sys.OS, sys.Arch)
+	fmt.Fprintf(&b, "Revision: %s\n", sys.AppRevision)
+	fmt.Fprintf(&b, "SQLite writer sampled at %d: %s\n", sys.SQLite.SampledAt, pragmaSummary(sys.SQLite.Writer))
+	fmt.Fprintf(&b, "Go writer connection pool (cumulative connection waits, not SQLite locks): %s\n", poolSummary(gauge.SQLitePools.Writer))
 	fmt.Fprintf(&b, "Deployment: %s · kernel %s · uptime %s\n", deployment(sys), fallback(sys.Kernel, "unknown"), minutes(sys.AppUptimeS))
 	fmt.Fprintf(&b, "Hardware: %s\n", hardwareLine(sys.Hardware))
 	fmt.Fprintf(&b, "Runtime: %d HW renders · %d CPU renders · %d fallbacks (last: %s)\n",
@@ -62,10 +65,25 @@ func (c *Collector) Report(ctx context.Context) string {
 	return redactSecrets(b.String())
 }
 
+func pragmaSummary(p sqlitePragmas) string {
+	if !p.Available {
+		return "unavailable (" + p.Reason + ")"
+	}
+	return fmt.Sprintf("journal=%s busy_timeout=%dms foreign_keys=%d synchronous=%d journal_size_limit=%d bytes", p.JournalMode, p.BusyTimeoutMS, p.ForeignKeys, p.Synchronous, p.JournalSizeLimit)
+}
+
+func poolSummary(p connectionPool) string {
+	if !p.Available {
+		return "unavailable (" + p.Reason + ")"
+	}
+	return fmt.Sprintf("in_use=%d open=%d max=%d idle=%d waits=%d wait_duration=%dns", p.InUse, p.OpenConnections, p.MaxOpenConnections, p.Idle, p.WaitCount, p.WaitDurationNS)
+}
+
 // Bundle builds a ZIP containing the system report, metrics, recent jobs,
 // logs, and a short description. Paths are redacted unless explicitly allowed.
 func (c *Collector) Bundle(ctx context.Context, opts BundleOptions) ([]byte, error) {
 	sys := *c.System(ctx)
+	sys.Paths = append([]PathInfo(nil), sys.Paths...)
 	if !opts.IncludePaths {
 		for i := range sys.Paths {
 			sys.Paths[i].Path = "<redacted>"

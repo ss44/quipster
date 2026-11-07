@@ -95,7 +95,7 @@ jobs:
             ARCHIVE="quipster-${{ steps.ver.outputs.tag }}-${GOOS}-${GOARCH}"
             
             echo "Building $GOOS/$GOARCH..."
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-s -w" -o "build/$ARCHIVE/$BIN" ./cmd/quipster
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="-s -w -X main.version=${{ steps.ver.outputs.tag }} -X main.revision=${{ github.sha }}" -o "build/$ARCHIVE/$BIN" ./cmd/quipster
             
             pushd "build/$ARCHIVE" > /dev/null
             if [ "$GOOS" = "windows" ]; then
@@ -141,3 +141,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.ver.outputs.tag }}
+            APP_REVISION=${{ github.sha }}

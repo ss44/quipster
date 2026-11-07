@@ -5,6 +5,7 @@ package diagnostics
 
 import (
 	"context"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,19 +57,20 @@ type DiskMetric struct {
 //
 //nolint:govet // field grouping favors readability over optimal alignment.
 type GaugeSnapshot struct {
-	At         int64                 `json:"at"`
-	CacheParts map[string]int64      `json:"cacheParts"`
-	Disks      map[string]DiskMetric `json:"disks"`
-	CPU        Metric                `json:"cpu"`
-	ProcessCPU Metric                `json:"processCpu"`
-	RAM        Metric                `json:"ram"`
-	Swap       Metric                `json:"swap"`
-	Load       LoadMetric            `json:"load"`
-	GPU        Metric                `json:"gpu"`
-	VRAM       Metric                `json:"vram"`
-	Hardware   hardware.Status       `json:"hardware"`
-	CacheBytes int64                 `json:"cacheBytes"`
-	Queue      *store.JobStats       `json:"queue,omitempty"`
+	At          int64                 `json:"at"`
+	CacheParts  map[string]int64      `json:"cacheParts"`
+	Disks       map[string]DiskMetric `json:"disks"`
+	CPU         Metric                `json:"cpu"`
+	ProcessCPU  Metric                `json:"processCpu"`
+	RAM         Metric                `json:"ram"`
+	Swap        Metric                `json:"swap"`
+	Load        LoadMetric            `json:"load"`
+	GPU         Metric                `json:"gpu"`
+	VRAM        Metric                `json:"vram"`
+	Hardware    hardware.Status       `json:"hardware"`
+	CacheBytes  int64                 `json:"cacheBytes"`
+	Queue       *store.JobStats       `json:"queue,omitempty"`
+	SQLitePools sqlitePools           `json:"sqlitePools"`
 }
 
 // VersionInfo is a resolved external tool version.
@@ -110,6 +112,8 @@ type SystemInfo struct {
 	OSName      string            `json:"osName"`
 	Kernel      string            `json:"kernel"`
 	AppVersion  string            `json:"appVersion"`
+	AppRevision string            `json:"appRevision"`
+	SQLite      sqliteSnapshot    `json:"sqlite"`
 	GoVersion   string            `json:"goVersion"`
 	Arch        string            `json:"goarch"`
 	OS          string            `json:"goos"`
@@ -154,11 +158,13 @@ type Collector struct {
 	MeiliUp   func() bool
 	StartedAt time.Time
 	Version   string
+	Revision  string
 	DataDir   string
 	CacheDir  string
 	MediaDir  string
 
 	mu           sync.Mutex
+	systemMu     sync.Mutex
 	lastGauge    *GaugeSnapshot
 	lastGaugeAt  time.Time
 	lastSystem   *SystemInfo
@@ -187,7 +193,7 @@ func New(st *store.Store, hw *hardware.Monitor, logs *logbuf.Buffer, meiliUp fun
 // Gauge returns a cached resource snapshot, refreshing it at most every 750ms.
 func (c *Collector) Gauge(ctx context.Context) *GaugeSnapshot {
 	if c == nil {
-		return &GaugeSnapshot{At: time.Now().UnixMilli()}
+		return &GaugeSnapshot{At: time.Now().UnixMilli(), SQLitePools: writerPoolStats(nil)}
 	}
 	c.mu.Lock()
 	if c.lastGauge != nil && time.Since(c.lastGaugeAt) < 750*time.Millisecond {
@@ -216,8 +222,11 @@ func (c *Collector) sampleGauge(ctx context.Context) *GaugeSnapshot {
 	snap.GPU, snap.VRAM = sampleGPU(ctx, now)
 	snap.Disks = c.sampleDisks()
 	snap.CacheParts, snap.CacheBytes = c.sampleCache()
-	if qs, err := c.St.JobStats(); err == nil {
-		snap.Queue = qs
+	snap.SQLitePools = writerPoolStats(c.St)
+	if c.St != nil {
+		if qs, err := c.St.JobStats(); err == nil {
+			snap.Queue = qs
+		}
 	}
 	if c.Hw != nil {
 		snap.Hardware = c.Hw.Status()
@@ -228,22 +237,16 @@ func (c *Collector) sampleGauge(ctx context.Context) *GaugeSnapshot {
 // System returns cached environment information, refreshing after five minutes.
 func (c *Collector) System(ctx context.Context) *SystemInfo {
 	if c == nil {
-		return &SystemInfo{GeneratedAt: time.Now().UnixMilli()}
+		return &SystemInfo{GeneratedAt: time.Now().UnixMilli(), AppRevision: "unknown", SQLite: sampleSQLite(ctx, nil)}
 	}
-	c.mu.Lock()
+	c.systemMu.Lock()
+	defer c.systemMu.Unlock()
 	if c.lastSystem != nil && time.Since(c.lastSystemAt) < 5*time.Minute {
-		sys := c.lastSystem
-		c.mu.Unlock()
-		return sys
+		return c.lastSystem
 	}
-	c.mu.Unlock()
-
 	sys := c.collectSystem(ctx)
-
-	c.mu.Lock()
 	c.lastSystem = sys
 	c.lastSystemAt = time.Now()
-	c.mu.Unlock()
 	return sys
 }
 
@@ -257,10 +260,10 @@ func (c *Collector) RefreshHardware(ctx context.Context) hardware.Status {
 	if c.Hw != nil {
 		status = c.Hw.Refresh()
 	}
-	c.mu.Lock()
+	c.systemMu.Lock()
 	c.lastSystem = nil
 	c.lastSystemAt = time.Time{}
-	c.mu.Unlock()
+	c.systemMu.Unlock()
 	// Rebuild immediately so the caller gets the refreshed environment too.
 	c.System(ctx)
 	return status
@@ -296,6 +299,8 @@ func (c *Collector) collectSystem(ctx context.Context) *SystemInfo {
 	sys := &SystemInfo{
 		GeneratedAt: now.UnixMilli(),
 		AppVersion:  c.Version,
+		AppRevision: validRevision(c.Revision),
+		SQLite:      sampleSQLite(ctx, c.St),
 		GoVersion:   runtime.Version(),
 		OS:          runtime.GOOS,
 		Arch:        runtime.GOARCH,
@@ -327,6 +332,16 @@ func (c *Collector) collectSystem(ctx context.Context) *SystemInfo {
 		sys.GPU.Reason = "vendor GPU tooling not available (nvidia-smi missing)"
 	}
 	return sys
+}
+
+func validRevision(revision string) string {
+	if len(revision) != 40 && len(revision) != 64 {
+		return "unknown"
+	}
+	if _, err := hex.DecodeString(revision); err != nil {
+		return "unknown"
+	}
+	return strings.ToLower(revision)
 }
 
 // paths lists configured directories with free space.

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -356,6 +357,131 @@ func TestSafeConfigAndPlatformHelpers(t *testing.T) {
 	}
 	if list := ffmpegCodecs(context.Background(), "-encoders"); list != nil {
 		t.Errorf("missing ffmpeg codecs = %v", list)
+	}
+}
+
+func TestRevisionValidation(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"", "unknown"}, {"secret/path", "unknown"}, {strings.Repeat("z", 40), "unknown"},
+		{strings.Repeat("A", 40), strings.Repeat("a", 40)}, {strings.Repeat("1", 64), strings.Repeat("1", 64)},
+	} {
+		if got := validRevision(tc.input); got != tc.want {
+			t.Errorf("revision %q: %q", tc.input, got)
+		}
+	}
+}
+
+func TestSQLiteBundlePrivacy(t *testing.T) {
+	t.Setenv("API_TOKEN", "sentinel-secret-token")
+	c, st := newTestCollector(t)
+	if _, _, err := st.UpsertMedia("/sentinel-private-path", "mkv", 1, 1, "sentinel-private-title", 0, 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	c.Revision = strings.Repeat("a", 40)
+	if !strings.Contains(c.Report(context.Background()), "Go writer connection pool (cumulative connection waits, not SQLite locks") {
+		t.Fatal("missing pool explanation")
+	}
+	data, err := c.Bundle(context.Background(), BundleOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, f := range zr.File {
+		if f.Name != "system.json" && f.Name != "metrics.json" {
+			continue
+		}
+		assertSQLiteBundleMember(t, f, c)
+		seen++
+	}
+	if seen != 2 {
+		t.Fatalf("members found: %d", seen)
+	}
+}
+
+func assertSQLiteBundleMember(t *testing.T, f *zip.File, c *Collector) {
+	t.Helper()
+	r, err := f.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(r)
+	if closeErr := r.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatal(err)
+	}
+	key := "sqlite"
+	if f.Name == "metrics.json" {
+		key = "sqlitePools"
+	} else if string(m["appRevision"]) != `"`+c.Revision+`"` {
+		t.Fatalf("revision: %s", m["appRevision"])
+	}
+	if len(m[key]) == 0 {
+		t.Fatalf("missing %s", key)
+	}
+	for _, forbidden := range []string{c.DataDir, "PRAGMA", "sentinel-private-path", "sentinel-private-title", "sentinel-secret-token"} {
+		if strings.Contains(string(m[key]), forbidden) {
+			t.Fatalf("unsafe %s: %s", key, m[key])
+		}
+	}
+}
+
+func TestSystemCoalescesAndCachesFailures(t *testing.T) {
+	c, st := newTestCollector(t)
+	conn, err := st.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	before := writerPoolStats(st).Writer.WaitCount
+	const n = 12
+	results := make(chan *SystemInfo, n)
+	for i := 0; i < n; i++ {
+		go func() { results <- c.System(context.Background()) }()
+	}
+	first := <-results
+	for i := 1; i < n; i++ {
+		if got := <-results; got != first {
+			t.Fatal("system collection not coalesced")
+		}
+	}
+	if first.SQLite.Writer.Reason != "timeout" {
+		t.Fatalf("sample %+v", first.SQLite)
+	}
+	if waits := writerPoolStats(st).Writer.WaitCount - before; waits != 1 {
+		t.Fatalf("waits: %d", waits)
+	}
+	_ = c.Gauge(context.Background())
+	_ = c.Gauge(context.Background())
+	if writerPoolStats(st).Writer.WaitCount-before != 1 {
+		t.Fatal("gauge acquired writer")
+	}
+	if c.System(context.Background()) != first {
+		t.Fatal("failure was not cached")
+	}
+}
+
+func TestNilCollectorAndStore(t *testing.T) {
+	var c *Collector
+	if c.System(context.Background()).AppRevision != "unknown" || c.Gauge(context.Background()).SQLitePools.Writer.Available {
+		t.Fatal("nil collector")
+	}
+	c = New(nil, nil, nil, nil, "dev", "", "", "")
+	if c.Gauge(context.Background()).SQLitePools.Writer.Available || c.System(context.Background()).SQLite.Writer.Reason != "store_unavailable" {
+		t.Fatal("missing store")
 	}
 }
 
