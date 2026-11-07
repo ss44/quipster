@@ -108,16 +108,26 @@ func TestRunDaemon(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	cache.RunDaemon(ctx, lru, 10*time.Millisecond)
 
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-
-	total, err := st.CacheBytes("thumb")
-	if err != nil {
-		t.Fatalf("cache bytes: %v", err)
-	}
-	if total != 0 {
-		t.Errorf("daemon failed to evict, bytes remaining: %d", total)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			t.Fatal("daemon did not reclaim the registered thumbnail")
+		case <-poll.C:
+			total, err := st.CacheBytes("thumb")
+			if err != nil {
+				t.Fatalf("cache bytes: %v", err)
+			}
+			if total == 0 {
+				assertMissing(t, f)
+				return
+			}
+		}
 	}
 }
