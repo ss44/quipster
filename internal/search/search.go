@@ -10,6 +10,7 @@ import (
 
 	meili "github.com/meilisearch/meilisearch-go"
 
+	"quipster/internal/chunks"
 	"quipster/internal/indexer"
 	"quipster/internal/store"
 )
@@ -226,7 +227,7 @@ func (s *Service) appendHits(resp *Response, res *meili.SearchResponse) (map[int
 		if err := json.Unmarshal(h["id"], &id); err != nil {
 			continue
 		}
-		mediaID, startIdx, endIdx, ok := parseDocID(id)
+		mediaID, startIdx, endIdx, ok := chunks.ParseID(id)
 		if !ok {
 			continue
 		}
@@ -391,22 +392,6 @@ func (s *Service) Suggest(q string, limit int) ([]Suggestion, error) {
 		out = append(out, Suggestion{Text: text, TextMarked: formattedText(h, "")})
 	}
 	return out, nil
-}
-
-// parseDocID splits a Meili document id of the form "{mediaId}_{start}-{end}"
-// into its components.
-func parseDocID(id string) (mediaID int64, startIdx, endIdx int, ok bool) {
-	parts := strings.SplitN(id, "_", 2)
-	if len(parts) != 2 {
-		return 0, 0, 0, false
-	}
-	if _, err := fmt.Sscanf(parts[0], "%d", &mediaID); err != nil {
-		return 0, 0, 0, false
-	}
-	if _, err := fmt.Sscanf(parts[1], "%d-%d", &startIdx, &endIdx); err != nil {
-		return 0, 0, 0, false
-	}
-	return mediaID, startIdx, endIdx, true
 }
 
 // escape quotes a value for use inside a Meilisearch filter string literal.
