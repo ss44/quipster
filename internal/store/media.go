@@ -117,7 +117,7 @@ func (s *Store) UpsertMediaBatch(entries []MediaUpsert) ([]int64, []bool, error)
 	if len(entries) == 0 {
 		return nil, nil, nil
 	}
-	tx, err := s.db.Begin()
+	tx, err := s.writeDB.Begin()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -178,14 +178,14 @@ func (s *Store) GetMediaByPath(path string) (*MediaFile, error) {
 
 // UpdateMediaProbe persists probe results for a media file.
 func (s *Store) UpdateMediaProbe(id int64, duration float64, width, height int, vcodec, acodec, container string, startTime float64, audioStream int, audioLang string) error {
-	_, err := s.db.Exec(`UPDATE media_files SET duration_sec=?, width=?, height=?, video_codec=?, audio_codec=?, container=?, start_time=?, audio_stream_index=?, audio_lang=? WHERE id=?`,
+	_, err := s.writeDB.Exec(`UPDATE media_files SET duration_sec=?, width=?, height=?, video_codec=?, audio_codec=?, container=?, start_time=?, audio_stream_index=?, audio_lang=? WHERE id=?`,
 		duration, width, height, vcodec, acodec, container, startTime, audioStream, audioLang, id)
 	return err
 }
 
 // UpdateMediaOptimizationFlags stores the deterministic optimization codes from a probe.
 func (s *Store) UpdateMediaOptimizationFlags(id int64, flags []string) error {
-	_, err := s.db.Exec(`UPDATE media_files SET optimization_flags=?, optimization_checked=1 WHERE id=?`, strings.Join(flags, ","), id)
+	_, err := s.writeDB.Exec(`UPDATE media_files SET optimization_flags=?, optimization_checked=1 WHERE id=?`, strings.Join(flags, ","), id)
 	return err
 }
 
@@ -219,14 +219,14 @@ func (s *Store) MediaOptimizationStats() (int64, int64, map[string]int64, error)
 
 // SetMediaStatus updates a media row's processing status (and error text).
 func (s *Store) SetMediaStatus(id int64, status, errMsg string) error {
-	_, err := s.db.Exec(`UPDATE media_files SET status=?, error=? WHERE id=?`, status, errMsg, id)
+	_, err := s.writeDB.Exec(`UPDATE media_files SET status=?, error=? WHERE id=?`, status, errMsg, id)
 	return err
 }
 
 // MarkIndexed sets status=indexed and latches ever_indexed (used to skip
 // pointless delete round-trips on first-time indexing).
 func (s *Store) MarkIndexed(id int64) error {
-	_, err := s.db.Exec(`UPDATE media_files SET status='indexed', error='', ever_indexed=1 WHERE id=?`, id)
+	_, err := s.writeDB.Exec(`UPDATE media_files SET status='indexed', error='', ever_indexed=1 WHERE id=?`, id)
 	return err
 }
 
@@ -333,10 +333,10 @@ func (s *Store) ArchiveMissingUnder(base string, keep map[string]bool, grace tim
 		return nil, 0, err
 	}
 	nowMs := now.UnixMilli()
-	if err := updateIDsBatched(s.db, `UPDATE media_files SET missing_at=? WHERE id IN (`, nowMs, latch); err != nil {
+	if err := updateIDsBatched(s.writeDB, `UPDATE media_files SET missing_at=? WHERE id IN (`, nowMs, latch); err != nil {
 		return archived, 0, err
 	}
-	if err := updateIDsBatched(s.db, `UPDATE media_files SET archived=1, archived_at=?, deindexed=0 WHERE id IN (`, nowMs, archive); err != nil {
+	if err := updateIDsBatched(s.writeDB, `UPDATE media_files SET archived=1, archived_at=?, deindexed=0 WHERE id IN (`, nowMs, archive); err != nil {
 		return archived, len(latch), err
 	}
 	return archive, len(latch), nil
@@ -434,7 +434,7 @@ func (s *Store) restoreMediaIDs(ids []int64) (needsReindex []int64, restored int
 	// The index job re-uses the doc-id scheme, so the re-add is a plain upload
 	// per chunk: no probe, no extraction, no re-read of the media file.
 	if len(archivedIDs) > 0 {
-		if cerr := clearChunkFlagsBatched(s.db, archivedIDs); cerr != nil {
+		if cerr := clearChunkFlagsBatched(s.writeDB, archivedIDs); cerr != nil {
 			return nil, 0, cerr
 		}
 	}
@@ -444,7 +444,7 @@ func (s *Store) restoreMediaIDs(ids []int64) (needsReindex []int64, restored int
 		return nil, 0, err
 	}
 	// Clear stale absence latches on rows that were missing but never archived.
-	if lerr := updateIDsBatched(s.db, `UPDATE media_files SET missing_at=? WHERE archived=0 AND id IN (`, 0, ids); lerr != nil {
+	if lerr := updateIDsBatched(s.writeDB, `UPDATE media_files SET missing_at=? WHERE archived=0 AND id IN (`, 0, ids); lerr != nil {
 		return nil, 0, lerr
 	}
 	return needsReindex, restored, nil
@@ -461,7 +461,7 @@ func (s *Store) clearArchiveFlagsBatched(ids []int64) (int, error) {
 		ph := placeholders(len(chunk))
 		args := idArgs(chunk)
 		//nolint:gosec // only a parameter placeholder list is concatenated; ids are bound values.
-		res, err := s.db.Exec(`UPDATE media_files
+		res, err := s.writeDB.Exec(`UPDATE media_files
 			SET archived=0, archived_at=0, missing_at=0, deindexed=0
 			WHERE id IN (`+ph+`) AND archived=1`, args...)
 		if err != nil {
@@ -480,7 +480,7 @@ func (s *Store) clearArchiveFlagsBatched(ids []int64) (int, error) {
 // archived=1 guard keeps a de-index that raced a restore from latching a
 // stale flag onto a re-activated row.
 func (s *Store) MarkMediaDeindexed(id int64) error {
-	_, err := s.db.Exec(`UPDATE media_files SET deindexed=1 WHERE id=? AND archived=1`, id)
+	_, err := s.writeDB.Exec(`UPDATE media_files SET deindexed=1 WHERE id=? AND archived=1`, id)
 	return err
 }
 
@@ -568,7 +568,7 @@ func (s *Store) DeleteMediaIDs(ids []int64) error {
 			args = append(args, id)
 		}
 		//nolint:gosec // only a parameter placeholder list is concatenated; ids are bound values.
-		if _, err := s.db.Exec(`DELETE FROM media_files WHERE id IN (`+ph+`)`, args...); err != nil {
+		if _, err := s.writeDB.Exec(`DELETE FROM media_files WHERE id IN (`+ph+`)`, args...); err != nil {
 			return err
 		}
 	}

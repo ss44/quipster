@@ -66,7 +66,7 @@ func NodeIDFromWorker(workerID string) int64 {
 // cannot silently resurrect access.
 func (s *Store) UpsertNode(name, fingerprint, version, secret string) (*Node, error) {
 	now := nowMillis()
-	if _, err := s.db.Exec(`INSERT INTO nodes (name, fingerprint, secret, status, version, last_seen, created_at)
+	if _, err := s.writeDB.Exec(`INSERT INTO nodes (name, fingerprint, secret, status, version, last_seen, created_at)
 		VALUES (?,?,?,'pending',?,?,?)
 		ON CONFLICT(fingerprint) DO UPDATE SET
 			name=excluded.name, secret=excluded.secret, version=excluded.version,
@@ -95,7 +95,7 @@ func (s *Store) NodeByToken(token string) (*Node, error) {
 
 // ApproveNode flips a pending node to approved and issues its claim token.
 func (s *Store) ApproveNode(id int64, token string) error {
-	res, err := s.db.Exec(`UPDATE nodes SET status=?, token=? WHERE id=? AND status=?`,
+	res, err := s.writeDB.Exec(`UPDATE nodes SET status=?, token=? WHERE id=? AND status=?`,
 		NodeApproved, token, id, NodePending)
 	if err != nil {
 		return err
@@ -113,30 +113,30 @@ func (s *Store) ApproveNode(id int64, token string) error {
 // RevokeNode flips an approved node back to revoked and clears its token so
 // in-flight claim attempts start failing immediately.
 func (s *Store) RevokeNode(id int64) error {
-	_, err := s.db.Exec(`UPDATE nodes SET status=?, token='' WHERE id=? AND status=?`, NodeRevoked, id, NodeApproved)
+	_, err := s.writeDB.Exec(`UPDATE nodes SET status=?, token='' WHERE id=? AND status=?`, NodeRevoked, id, NodeApproved)
 	return err
 }
 
 // DeleteNode removes the node row entirely.
 func (s *Store) DeleteNode(id int64) error {
-	_, err := s.db.Exec(`DELETE FROM nodes WHERE id=?`, id)
+	_, err := s.writeDB.Exec(`DELETE FROM nodes WHERE id=?`, id)
 	return err
 }
 
 // TouchNode records a heartbeat, keeping the node marked live for the
 // dashboard and the stale-job janitor.
 func (s *Store) TouchNode(id int64) error {
-	_, err := s.db.Exec(`UPDATE nodes SET last_seen=? WHERE id=?`, nowMillis(), id)
+	_, err := s.writeDB.Exec(`UPDATE nodes SET last_seen=? WHERE id=?`, nowMillis(), id)
 	return err
 }
 
 // BumpNodeCounters adjusts a node's completed/failed job tallies.
 func (s *Store) BumpNodeCounters(id int64, failed bool) error {
 	if failed {
-		_, err := s.db.Exec(`UPDATE nodes SET jobs_failed=jobs_failed+1 WHERE id=?`, id)
+		_, err := s.writeDB.Exec(`UPDATE nodes SET jobs_failed=jobs_failed+1 WHERE id=?`, id)
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE nodes SET jobs_done=jobs_done+1 WHERE id=?`, id)
+	_, err := s.writeDB.Exec(`UPDATE nodes SET jobs_done=jobs_done+1 WHERE id=?`, id)
 	return err
 }
 
@@ -171,7 +171,7 @@ func (s *Store) CountPendingNodes() (int64, error) {
 // spent on the claim is refunded, mirroring RequeueJobSoft, because the work
 // itself never reported a failure.
 func (s *Store) RequeueStaleNodeJobs(cutoffMillis int64, note string) (int64, error) {
-	res, err := s.db.Exec(`UPDATE jobs SET status='queued', worker_id='', error=?,
+	res, err := s.writeDB.Exec(`UPDATE jobs SET status='queued', worker_id='', error=?,
 			attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END
 		WHERE status='running' AND worker_id LIKE '`+workerPrefix+`%'
 			AND (
@@ -205,7 +205,7 @@ func (s *Store) RequeueMissingNodeJobs(nodeID int64, reported []int64, claimedBe
 			args = append(args, id)
 		}
 	}
-	res, err := s.db.Exec(query, args...)
+	res, err := s.writeDB.Exec(query, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -215,7 +215,7 @@ func (s *Store) RequeueMissingNodeJobs(nodeID int64, reported []int64, claimedBe
 // RequeueNodeJobs returns all running jobs of one node to the queue; used
 // when an operator deletes a node so its leases cannot outlive it.
 func (s *Store) RequeueNodeJobs(nodeID int64, note string) (int64, error) {
-	res, err := s.db.Exec(`UPDATE jobs SET status='queued', worker_id='', error=?,
+	res, err := s.writeDB.Exec(`UPDATE jobs SET status='queued', worker_id='', error=?,
 			attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END
 		WHERE status='running' AND worker_id=?`, note, NodeWorkerID(nodeID))
 	if err != nil {

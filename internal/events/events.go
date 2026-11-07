@@ -4,6 +4,7 @@ package events
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -33,9 +34,57 @@ type Collector struct {
 	MeiliUp  func() bool
 	notifyCh chan struct{}
 	state    []byte
-	users    int
-	once     sync.Once
+	lines    lineStatsCache
 	mu       sync.Mutex
+	users    int
+	running  bool
+}
+
+const (
+	lineStatsRefreshInterval = 30 * time.Second
+	lineStatsMaxAge          = 2 * time.Minute
+	lineStatsTimeout         = time.Minute
+)
+
+type lineStatsCache struct {
+	value      *store.LineStats
+	at         time.Time
+	next       time.Time
+	mu         sync.Mutex
+	refreshing bool
+}
+
+func (c *lineStatsCache) get(now time.Time, load func(context.Context) (*store.LineStats, error)) *store.LineStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.refreshing && !now.Before(c.next) {
+		c.refreshing = true
+		c.next = now.Add(lineStatsRefreshInterval)
+		go c.refresh(now, load)
+	}
+	if c.value == nil || now.Sub(c.at) >= lineStatsMaxAge {
+		return nil
+	}
+	value := *c.value
+	return &value
+}
+
+func (c *lineStatsCache) refresh(at time.Time, load func(context.Context) (*store.LineStats, error)) {
+	ctx, cancel := context.WithTimeout(context.Background(), lineStatsTimeout)
+	defer cancel()
+	value, err := load(ctx)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err == nil && value != nil {
+		valueCopy := *value
+		c.value = &valueCopy
+		c.at = at
+	}
+	if next := time.Now().Add(lineStatsRefreshInterval); next.After(c.next) {
+		c.next = next
+	}
+	c.refreshing = false
 }
 
 // Collect builds a snapshot of current scan/queue/media state. Individual
@@ -55,9 +104,7 @@ func (c *Collector) Collect() *Snapshot {
 	if cb, err := c.St.CacheBytes("clip", "thumb", "sub"); err == nil {
 		snap.CacheBytes = cb
 	}
-	if ls, err := c.St.LineStats(); err == nil {
-		snap.Lines = ls
-	}
+	snap.Lines = c.lines.get(time.Now(), c.St.LineStatsContext)
 	if jobs, err := c.St.ListJobs(50); err == nil {
 		snap.Recent = jobs
 	}
@@ -76,8 +123,9 @@ func (c *Collector) run() {
 	for range tick.C {
 		c.mu.Lock()
 		if c.users == 0 {
+			c.running = false
 			c.mu.Unlock()
-			continue
+			return
 		}
 		c.mu.Unlock()
 
@@ -88,6 +136,11 @@ func (c *Collector) run() {
 		}
 
 		c.mu.Lock()
+		if c.users == 0 {
+			c.running = false
+			c.mu.Unlock()
+			return
+		}
 		if !bytes.Equal(c.state, b) {
 			c.state = b
 			if c.notifyCh != nil {
@@ -96,6 +149,38 @@ func (c *Collector) run() {
 			c.notifyCh = make(chan struct{})
 		}
 		c.mu.Unlock()
+	}
+}
+
+func (c *Collector) subscribe() ([]byte, chan struct{}) {
+	c.mu.Lock()
+	c.users++
+	if c.notifyCh == nil {
+		c.notifyCh = make(chan struct{})
+	}
+	if !c.running {
+		c.running = true
+		go c.run()
+	}
+	if c.state == nil {
+		c.mu.Unlock()
+		b, err := json.Marshal(c.Collect())
+		c.mu.Lock()
+		if err == nil && c.state == nil {
+			c.state = b
+		}
+	}
+	state, notifyCh := c.state, c.notifyCh
+	c.mu.Unlock()
+	return state, notifyCh
+}
+
+func (c *Collector) unsubscribe() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.users--
+	if c.users == 0 {
+		c.state = nil
 	}
 }
 
@@ -108,40 +193,13 @@ func (c *Collector) Handler() http.HandlerFunc {
 			return
 		}
 
-		c.once.Do(func() {
-			c.notifyCh = make(chan struct{})
-			go c.run()
-		})
-
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
 
-		c.mu.Lock()
-		c.users++
-		if c.state == nil {
-			// Fast path to avoid DB block while holding lock
-			c.mu.Unlock()
-			snap := c.Collect()
-			if b, err := json.Marshal(snap); err == nil {
-				c.mu.Lock()
-				if c.state == nil {
-					c.state = b
-				}
-				c.mu.Unlock()
-			}
-			c.mu.Lock()
-		}
-		state := c.state
-		notifyCh := c.notifyCh
-		c.mu.Unlock()
-
-		defer func() {
-			c.mu.Lock()
-			c.users--
-			c.mu.Unlock()
-		}()
+		state, notifyCh := c.subscribe()
+		defer c.unsubscribe()
 
 		if state != nil {
 			// A write error here almost always means the client disconnected;

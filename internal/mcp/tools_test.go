@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -186,6 +187,15 @@ func TestSuggestAndCheckQuoteTools(t *testing.T) {
 	}
 }
 
+func waitForStatusLines(out statusOut, fetch func() statusOut) statusOut {
+	deadline := time.Now().Add(3 * time.Second)
+	for out.Lines == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		out = fetch()
+	}
+	return out
+}
+
 func TestProcessingStatusTool(t *testing.T) {
 	fx := newFixture(t)
 	if _, err := fx.st.EnqueueJob("probe", `{"mediaId":1}`, 1); err != nil {
@@ -202,6 +212,9 @@ func TestProcessingStatusTool(t *testing.T) {
 	if len(out.RecentJobs) != 1 || out.RecentJobs[0].Type != "probe" || out.RecentJobs[0].Status != "queued" {
 		t.Errorf("recent jobs = %+v", out.RecentJobs)
 	}
+	out = waitForStatusLines(out, func() statusOut {
+		return structured[statusOut](t, callTool(t, cs, "get_processing_status", map[string]any{}))
+	})
 	if out.Lines == nil || out.Lines.Chunks != 2 {
 		t.Errorf("lines = %+v", out.Lines)
 	}

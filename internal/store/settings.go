@@ -27,7 +27,7 @@ func (s *Store) GetSetting(key string) (string, bool, error) {
 
 // SetSetting stores a key/value pair, upserting over any previous value.
 func (s *Store) SetSetting(key, value string) error {
-	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	_, err := s.writeDB.Exec(`INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	return err
 }
 
@@ -79,9 +79,9 @@ func (s *Store) Recover() error {
 	// A process restart cannot preserve the goroutine that owned a running
 	// scan. Leaving the scans row "running" would pin the admin UI forever and
 	// make RunningScan report a phantom scan, so close it out as failed.
-	if _, err := s.db.Exec(`UPDATE jobs SET status='queued', worker_id='' WHERE status='running'`); err != nil {
+	if _, err := s.writeDB.Exec(`UPDATE jobs SET status='queued', worker_id='' WHERE status='running'`); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE scans SET status='error', finished_at=? WHERE status='running'`, nowMillis())
+	_, err := s.writeDB.Exec(`UPDATE scans SET status='error', finished_at=? WHERE status='running'`, nowMillis())
 	return err
 }

@@ -3,6 +3,7 @@ package jobs
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
@@ -20,10 +21,12 @@ type Handler func(ctx context.Context, j *store.Job, progress func(float64)) err
 //
 //nolint:govet // field grouping favors readability over optimal alignment.
 type Runner struct {
-	st          *store.Store
-	workerName  string
-	maxAttempts int
-	jobTimeout  time.Duration
+	st                 runnerStore
+	workerName         string
+	maxAttempts        int
+	jobTimeout         time.Duration
+	persistenceTimeout time.Duration
+	retryDelay         time.Duration
 
 	mu       sync.Mutex
 	handlers map[string]Handler
@@ -45,16 +48,23 @@ type activeJob struct {
 
 // NewRunner creates a Runner and starts its pause watcher.
 func NewRunner(st *store.Store, workerName string) *Runner {
+	return newRunner(st, workerName)
+}
+
+func newRunner(st runnerStore, workerName string) *Runner {
 	r := &Runner{
-		st:          st,
-		workerName:  workerName,
-		maxAttempts: 3,
-		jobTimeout:  3 * time.Hour,
-		handlers:    map[string]Handler{},
-		quits:       map[string][]chan struct{}{},
-		active:      map[int64]activeJob{},
-		stop:        make(chan struct{}),
+		st:                 st,
+		workerName:         workerName,
+		maxAttempts:        3,
+		jobTimeout:         3 * time.Hour,
+		persistenceTimeout: 5 * time.Second,
+		retryDelay:         250 * time.Millisecond,
+		handlers:           map[string]Handler{},
+		quits:              map[string][]chan struct{}{},
+		active:             map[int64]activeJob{},
+		stop:               make(chan struct{}),
 	}
+	r.wg.Add(1)
 	go r.pauseWatcher()
 	return r
 }
@@ -70,16 +80,21 @@ func (r *Runner) SetJobTimeout(d time.Duration) {
 func (r *Runner) Register(jobType string, n int, h Handler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	select {
+	case <-r.stop:
+		return
+	default:
+	}
 	r.handlers[jobType] = h
 	for i := 0; i < n; i++ {
 		quit := make(chan struct{})
 		r.quits[jobType] = append(r.quits[jobType], quit)
 		r.wg.Add(1)
-		go r.loop(jobType, fmt.Sprintf("%s-%s-%d", r.workerName, jobType, i), quit)
+		go r.loop(jobType, quit)
 	}
 }
 
-func (r *Runner) loop(jobType, workerID string, quit chan struct{}) {
+func (r *Runner) loop(jobType string, quit chan struct{}) {
 	defer r.wg.Done()
 	for {
 		select {
@@ -87,6 +102,13 @@ func (r *Runner) loop(jobType, workerID string, quit chan struct{}) {
 			return
 		default:
 		}
+		if paused, err := r.st.GetQueuePaused(); err == nil && paused {
+			if !waitForRetry(quit, 400*time.Millisecond) {
+				return
+			}
+			continue
+		}
+		workerID := fmt.Sprintf("local-%s-%s-%s", r.workerName, jobType, rand.Text())
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
 			select {
@@ -95,54 +117,28 @@ func (r *Runner) loop(jobType, workerID string, quit chan struct{}) {
 			case <-ctx.Done():
 			}
 		}()
-		if paused, err := r.st.GetQueuePaused(); err == nil && paused {
-			select {
-			case <-quit:
-				return
-			case <-time.After(400 * time.Millisecond):
-			}
-			continue
-		}
 		j, err := r.st.ClaimJob(ctx, workerID, []string{jobType})
 		cancel()
 		if err != nil {
 			log.Printf("[jobs] claim error (%s): %v", jobType, err)
-			time.Sleep(time.Second)
-			continue
-		}
-		if j == nil {
-			select {
-			case <-quit:
+			if !r.reconcileClaim(workerID) || !waitForRetry(quit, time.Second) {
 				return
-			case <-time.After(750 * time.Millisecond):
 			}
 			continue
 		}
+		if j == nil {
+			if !waitForRetry(quit, 750*time.Millisecond) {
+				return
+			}
+			continue
+		}
+		j.WorkerID = workerID
 		r.run(jobType, j)
 	}
 }
 
 func (r *Runner) run(jobType string, j *store.Job) {
-	r.mu.Lock()
-	h := r.handlers[jobType]
-	r.mu.Unlock()
-	if h == nil {
-		log.Printf("[jobs] no handler for job type %s", jobType)
-		if ferr := r.st.FinishJob(j.ID, "error", "no handler registered"); ferr != nil {
-			log.Printf("[jobs] finish error job %d: %v", j.ID, ferr)
-		}
-		return
-	}
-	last := time.Now()
-	progress := func(p float64) {
-		if time.Since(last) < 900*time.Millisecond && p < 1 {
-			return
-		}
-		last = time.Now()
-		if perr := r.st.SetJobProgress(j.ID, p); perr != nil {
-			log.Printf("[jobs] progress error job %d: %v", j.ID, perr)
-		}
-	}
+	claim := *j
 	ctx, cancel := context.WithTimeout(context.Background(), r.jobTimeout)
 	defer cancel()
 	r.activeMu.Lock()
@@ -150,18 +146,54 @@ func (r *Runner) run(jobType string, j *store.Job) {
 	r.activeMu.Unlock()
 	defer func() {
 		r.activeMu.Lock()
-		delete(r.active, j.ID)
+		delete(r.active, claim.ID)
 		r.activeMu.Unlock()
 	}()
-
-	err := runRecover(ctx, h, j, progress)
-	if err == nil {
-		if ferr := r.st.FinishJob(j.ID, "done", ""); ferr != nil {
-			log.Printf("[jobs] finish error job %d: %v", j.ID, ferr)
-		}
+	select {
+	case <-r.stop:
+		cancel()
+	default:
+	}
+	if err := ctx.Err(); err != nil {
+		r.handleRunError(&claim, err)
 		return
 	}
-	r.handleRunError(j, err)
+	r.mu.Lock()
+	h := r.handlers[jobType]
+	r.mu.Unlock()
+	if h == nil {
+		log.Printf("[jobs] no handler for job type %s", jobType)
+		r.persistResult(&claim, jobResult{status: "error", note: "no handler registered"})
+		return
+	}
+	err := runRecover(ctx, h, j, r.progressReporter(ctx, cancel, &claim))
+	cancel()
+	if err == nil {
+		r.persistResult(&claim, jobResult{status: "done"})
+		return
+	}
+	r.handleRunError(&claim, err)
+}
+
+func (r *Runner) progressReporter(ctx context.Context, cancel context.CancelFunc, j *store.Job) func(float64) {
+	var mu sync.Mutex
+	last := time.Now()
+	return func(p float64) {
+		mu.Lock()
+		defer mu.Unlock()
+		if ctx.Err() != nil || (time.Since(last) < 900*time.Millisecond && p < 1) {
+			return
+		}
+		last = time.Now()
+		progressCtx, progressCancel := context.WithTimeout(ctx, r.persistenceTimeout)
+		defer progressCancel()
+		matched, err := r.st.SetOwnedJobProgress(progressCtx, j.ID, j.WorkerID, j.Attempts, p)
+		if err != nil {
+			log.Printf("[jobs] progress error job %d: %v", j.ID, err)
+		} else if !matched {
+			cancel()
+		}
+	}
 }
 
 // handleRunError applies the retry policy: queue pauses and scan suspensions
@@ -170,9 +202,7 @@ func (r *Runner) run(jobType string, j *store.Job) {
 func (r *Runner) handleRunError(j *store.Job, err error) {
 	if paused, perr := r.st.GetQueuePaused(); perr == nil && paused {
 		log.Printf("[jobs] job %d (%s) interrupted by queue pause, requeueing", j.ID, j.Type)
-		if rerr := r.st.RequeueJobSoft(j.ID, "paused"); rerr != nil {
-			log.Printf("[jobs] soft requeue error job %d: %v", j.ID, rerr)
-		}
+		r.persistResult(j, jobResult{status: "queued", note: "paused", soft: true})
 		return
 	}
 	// The scan gate cancels in-flight probes to free storage I/O. Those are
@@ -181,9 +211,7 @@ func (r *Runner) handleRunError(j *store.Job, err error) {
 	if j.Type == "probe" && errors.Is(err, context.Canceled) {
 		if active, serr := r.st.HasActiveScanJob(); serr == nil && active {
 			log.Printf("[jobs] job %d (probe) suspended by active scan, requeueing without an attempt", j.ID)
-			if rerr := r.st.RequeueJobSoft(j.ID, "scan-active"); rerr != nil {
-				log.Printf("[jobs] soft requeue error job %d: %v", j.ID, rerr)
-			}
+			r.persistResult(j, jobResult{status: "queued", note: "scan-active", soft: true})
 			return
 		}
 	}
@@ -192,22 +220,16 @@ func (r *Runner) handleRunError(j *store.Job, err error) {
 	// excluded because a job that exhausted its own timeout is a real failure.
 	if errors.Is(err, context.Canceled) {
 		log.Printf("[jobs] job %d (%s) canceled, requeueing without an attempt", j.ID, j.Type)
-		if rerr := r.st.RequeueJobSoft(j.ID, "canceled"); rerr != nil {
-			log.Printf("[jobs] soft requeue error job %d: %v", j.ID, rerr)
-		}
+		r.persistResult(j, jobResult{status: "queued", note: "canceled", soft: true})
 		return
 	}
 	if j.Attempts < r.maxAttempts {
 		log.Printf("[jobs] job %d (%s) attempt %d failed, requeueing: %v", j.ID, j.Type, j.Attempts, err)
-		if rerr := r.st.RequeueJob(j.ID, err.Error()); rerr != nil {
-			log.Printf("[jobs] requeue error job %d: %v", j.ID, rerr)
-		}
+		r.persistResult(j, jobResult{status: "queued", note: err.Error()})
 		return
 	}
 	log.Printf("[jobs] job %d (%s) failed permanently after %d attempts: %v", j.ID, j.Type, j.Attempts, err)
-	if ferr := r.st.FinishJob(j.ID, "error", err.Error()); ferr != nil {
-		log.Printf("[jobs] finish error job %d: %v", j.ID, ferr)
-	}
+	r.persistResult(j, jobResult{status: "error", note: err.Error()})
 }
 
 // runRecover executes a handler and converts a panic into a job error. A
@@ -229,15 +251,13 @@ func runRecover(ctx context.Context, h Handler, j *store.Job, progress func(floa
 func (r *Runner) Stop() {
 	r.stopOnce.Do(func() {
 		r.mu.Lock()
-		quits := make([]chan struct{}, 0, 8)
+		close(r.stop)
 		for _, qs := range r.quits {
-			quits = append(quits, qs...)
+			for _, q := range qs {
+				close(q)
+			}
 		}
 		r.mu.Unlock()
-		close(r.stop)
-		for _, q := range quits {
-			close(q)
-		}
 		r.CancelActive()
 		r.wg.Wait()
 	})
@@ -271,6 +291,7 @@ func (r *Runner) CancelActiveType(jobType string) int {
 // pauseWatcher reacts to the persisted pause flag: workers in any role stop
 // their in-flight jobs within a second of a pause request.
 func (r *Runner) pauseWatcher() {
+	defer r.wg.Done()
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {

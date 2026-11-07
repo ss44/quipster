@@ -25,7 +25,7 @@ const chunkWriteBatchSize = 1000
 // released between commits. A partial failure is safe: the probe job retries
 // and replaces the whole set.
 func (s *Store) ReplaceChunks(mediaFileID int64, chunks []Chunk) error {
-	if _, err := s.db.Exec(`DELETE FROM chunks WHERE media_file_id=?`, mediaFileID); err != nil {
+	if _, err := s.writeDB.Exec(`DELETE FROM chunks WHERE media_file_id=?`, mediaFileID); err != nil {
 		return err
 	}
 	for start := 0; start < len(chunks); start += chunkWriteBatchSize {
@@ -40,7 +40,7 @@ func (s *Store) ReplaceChunks(mediaFileID int64, chunks []Chunk) error {
 // insertChunkBatch writes one bounded batch and relinks its cue ranges in its
 // own transaction.
 func (s *Store) insertChunkBatch(mediaFileID int64, chunks []Chunk) error {
-	tx, err := s.db.Begin()
+	tx, err := s.writeDB.Begin()
 	if err != nil {
 		return err
 	}
@@ -163,7 +163,7 @@ func (s *Store) MarkChunksIndexed(ids []int64, at int64) error {
 			args = append(args, id)
 		}
 		//nolint:gosec // the concatenated part is a "?" placeholder list built from the fixed-length batch slice; values are parameterized.
-		if _, err := s.db.Exec(`UPDATE chunks SET indexed_at=? WHERE id IN (`+ph+`)`, args...); err != nil {
+		if _, err := s.writeDB.Exec(`UPDATE chunks SET indexed_at=? WHERE id IN (`+ph+`)`, args...); err != nil {
 			return err
 		}
 	}
@@ -172,13 +172,13 @@ func (s *Store) MarkChunksIndexed(ids []int64, at int64) error {
 
 // ClearChunkIndexFlags resets indexed_at for all chunks of a media file.
 func (s *Store) ClearChunkIndexFlags(mediaFileID int64) error {
-	_, err := s.db.Exec(`UPDATE chunks SET indexed_at=0 WHERE media_file_id=?`, mediaFileID)
+	_, err := s.writeDB.Exec(`UPDATE chunks SET indexed_at=0 WHERE media_file_id=?`, mediaFileID)
 	return err
 }
 
 // EnsureAllChunksStale clears indexed_at on every chunk (used by full reindex).
 func (s *Store) EnsureAllChunksStale() error {
-	_, err := s.db.Exec(`UPDATE chunks SET indexed_at=0`)
+	_, err := s.writeDB.Exec(`UPDATE chunks SET indexed_at=0`)
 	return err
 }
 

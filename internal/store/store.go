@@ -17,7 +17,8 @@ import (
 // Store wraps the SQLite database and provides all persistence operations for
 // media files, jobs, subtitles, chunks, cache entries, and settings.
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	writeDB *sql.DB
 }
 
 // busyTimeoutMS bounds how long a writer waits for SQLite's single writer
@@ -42,37 +43,45 @@ func dsn(path string) string {
 // enables WAL journaling, foreign keys, a busy timeout, and immediate
 // transactions so concurrent readers work alongside serialized writers.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", dsn(path))
+	writeDB, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
 		return nil, err
 	}
-	// WAL supports concurrent readers; writes serialize via busy_timeout and
-	// BEGIN IMMEDIATE transactions.
+	writeDB.SetMaxOpenConns(1)
+	writeDB.SetMaxIdleConns(1)
+	if pingErr := writeDB.Ping(); pingErr != nil {
+		return nil, errors.Join(pingErr, writeDB.Close())
+	}
+	s := &Store{db: writeDB, writeDB: writeDB}
+	if migrateErr := s.migrate(); migrateErr != nil {
+		return nil, errors.Join(migrateErr, writeDB.Close())
+	}
+	if path == ":memory:" {
+		return s, nil
+	}
+	db, err := sql.Open("sqlite", dsn(path))
+	if err != nil {
+		return nil, errors.Join(err, writeDB.Close())
+	}
 	db.SetMaxOpenConns(16)
 	db.SetMaxIdleConns(16)
 	if err := db.Ping(); err != nil {
-		// The connection never worked; surface the ping error and log the
-		// close failure since the original error is the one that matters.
-		if cerr := db.Close(); cerr != nil {
-			log.Printf("store: close after ping failure: %v", cerr)
-		}
-		return nil, err
+		return nil, errors.Join(err, db.Close(), writeDB.Close())
 	}
-	s := &Store{db: db}
-	if err := s.migrate(); err != nil {
-		if cerr := db.Close(); cerr != nil {
-			log.Printf("store: close after migration failure: %v", cerr)
-		}
-		return nil, err
-	}
+	s.db = db
 	return s, nil
 }
 
 // Close closes the underlying database connection pool.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if s.db == s.writeDB {
+		return s.db.Close()
+	}
+	return errors.Join(s.db.Close(), s.writeDB.Close())
+}
 
 // DB exposes the underlying connection pool for callers that need raw access.
-func (s *Store) DB() *sql.DB { return s.db }
+func (s *Store) DB() *sql.DB { return s.writeDB }
 
 // closeRows closes query rows after iteration, logging a non-nil close error
 // since row data has already been consumed and the caller reports its own
@@ -219,7 +228,7 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status)`,
 	}
 	for _, stmt := range stmts {
-		if _, err := s.db.Exec(stmt); err != nil {
+		if _, err := s.writeDB.Exec(stmt); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
@@ -236,11 +245,11 @@ func (s *Store) migrate() error {
 	}
 	for _, m := range migrations {
 		var n int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('media_files') WHERE name=?`, m.name).Scan(&n); err != nil {
+		if err := s.writeDB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('media_files') WHERE name=?`, m.name).Scan(&n); err != nil {
 			return err
 		}
 		if n == 0 {
-			if _, err := s.db.Exec(`ALTER TABLE media_files ADD COLUMN ` + m.name + ` ` + m.ddl); err != nil {
+			if _, err := s.writeDB.Exec(`ALTER TABLE media_files ADD COLUMN ` + m.name + ` ` + m.ddl); err != nil {
 				return fmt.Errorf("migrate %s: %w", m.name, err)
 			}
 		}
@@ -248,7 +257,7 @@ func (s *Store) migrate() error {
 	// The archive index references columns that only exist after the ALTER
 	// pass above on databases created before archival existed, so it must be
 	// created here rather than in the table-statement list.
-	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_archived ON media_files(archived, deindexed, missing_at)`); err != nil {
+	if _, err := s.writeDB.Exec(`CREATE INDEX IF NOT EXISTS idx_media_archived ON media_files(archived, deindexed, missing_at)`); err != nil {
 		return fmt.Errorf("migrate idx_media_archived: %w", err)
 	}
 	return nil
