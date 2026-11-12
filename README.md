@@ -228,10 +228,12 @@ log buffer**, without querying SQLite. They remain useful when indexing is block
 - Logs are **memory-only, process-local, and lost on restart**. There is no disk archive,
   cross-process aggregation, or SQLite dependency. API processes cannot read separate
   worker/node processes' logs; use their stderr/container logs instead.
-- Both transports return `{ "lines": [...], "count": N }`: newest matching complete
-  lines, ordered oldest first. `limit` defaults to 500 (valid range 1–5000; values outside
-  that range use the default). Responses additionally cap returned log text at **256 KiB**;
-  JSON escaping/envelopes add bounded overhead. `count` counts only the returned lines.
+- Both transports retain `lines` and `count`, and add aligned `entries` containing
+  `{ "time": "<RFC3339Nano capture time>", "text": "<sanitized line>" }`. Results are the
+  newest matching complete lines, ordered oldest first. `limit` defaults to 500 (valid
+  range 1–5000; values outside that range use the default). The escaped JSON result,
+  including both representations and timestamps, is capped at **256 KiB**. MCP's outer
+  envelope/duplicate textual representation is additional transport overhead.
 - Optional `since` and `until` are inclusive **RFC3339 capture-time bounds**, not parsed
   message timestamps. They cannot extend the one-hour retention window. Optional
   `contains` is a case-sensitive literal substring (maximum 256 bytes), matched against
@@ -244,9 +246,12 @@ log buffer**, without querying SQLite. They remain useful when indexing is block
 
 REST follows existing admin authentication: configure `API_TOKEN` and send it as the
 bearer token (without one configured, admin REST routes retain their existing open behavior).
-MCP requires **both an admin-scoped MCP token and `MCP_ALLOW_ADMIN=1`**, even though
-`get_app_logs` is annotated read-only. Ordinary read/clip tokens cannot list or invoke it;
-stdio also obeys the admin master switch. For example:
+MCP accepts an explicit **`diagnostics` scope**, which grants only `get_app_logs` and
+`get_diagnostics` and works with `MCP_ALLOW_ADMIN=0`. It does not grant search/media
+resources, clip creation or queue control. Combine scopes explicitly when needed, e.g.
+`read+clip+diagnostics`. Existing admin-scoped access still requires `MCP_ALLOW_ADMIN=1`;
+ordinary read/clip tokens do not gain diagnostics implicitly. Stdio retains its existing
+admin/master-switch behavior. REST example:
 
 ```sh
 curl -H "Authorization: Bearer $API_TOKEN" \
@@ -255,6 +260,37 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 
 MCP arguments use the same names, for example
 `{"contains":"SQLITE_BUSY","limit":100,"since":"2026-11-12T12:00:00Z"}`.
+
+`get_diagnostics({})` returns a bounded, lightweight snapshot: build revision/runtime
+identity, uptime/goroutines, RAM, swap, load, and SQLite writer-pool statistics. It does
+not query SQLite, acquire the slow gauge/system collector locks, invoke external tools,
+walk configured directories, run benchmarks, or contact Meilisearch. Full swap alone
+does not establish active swapping, and zero connection-pool waits do not rule out slow
+queries, SQLite file locks or remote indexing delays.
+
+#### Indexing correctness and progress
+
+An unchanged, fully indexed nonempty media item is a remote no-op. If chunks are pending,
+replacement uses the complete coherent media snapshot, not only unlatched chunks: retries
+after a partially successful 500-ID latch batch must not drop earlier documents. Genuinely
+empty replacements still remove old documents. Never-indexed media retains its deliberate
+delete-skip fast path; successful remote tasks precede bounded, context-aware local latches.
+Coherence here means one SQLite read snapshot and retry completeness, not a generation
+fence against a concurrent reprobe. Chunk replacement during an in-flight upload remains
+tracked in [#79](https://github.com/ss44/quipster/issues/79); avoid concurrently
+reprobing the same media being indexed.
+
+Indexer logs now separate snapshot, document build, delete/add submission, remote task
+status and local latch stages. Remote waits carry a task UID and periodic five-second
+heartbeats, including slow task-status HTTP calls. Job progress is a completed-stage
+estimate, not a claim that a pending Meilisearch task is making measurable progress.
+Existing low concurrency and the single SQLite writer remain unchanged.
+
+This prevents new destructive duplicate/retry behavior; it does **not** automatically
+repair documents previously lost while local flags were completed. Use an explicit,
+operator-approved reindex for verified affected media rather than blindly resetting the
+whole library. See [the indexing/query audit](docs/indexing-query-audit.md) for measured
+query plans, trade-offs and remaining production measurements.
 
 ### Semantic (vector) search
 
@@ -389,7 +425,7 @@ Set `NODE_SERVER_URL` to the main app's URL and mount the library the same way t
 | `HWACCEL` | `auto` | `auto` (probe NVENC/QSV/VAAPI/VideoToolbox), `none`/`cpu` (software only), or force a backend: `nvenc`, `qsv`, `vaapi`, `videotoolbox` |
 | `API_TOKEN` | — | when set, guards `/api/admin/*` (header `X-API-Token`) |
 | `MCP_ENABLED` | `false` | expose Quipster to AI agents over MCP (see below) |
-| `MCP_TOKENS` | — | scoped agent tokens: `token:scopes` comma-separated, scopes are `read`, `clip`, `admin` joined by `+` (e.g. `secret1:read+clip,secret2:admin`); bare tokens default to `read` |
+| `MCP_TOKENS` | — | scoped agent tokens: `token:scopes` comma-separated; media scopes `read`, `clip`, `admin` plus independent `diagnostics`, joined by `+` (e.g. `secret1:read+clip,diag-secret:diagnostics`); bare tokens default to `read` |
 | `MCP_ALLOW_ADMIN` | `false` | master switch for MCP admin tools (admin-scoped tokens still required) |
 | `MCP_RATE_LIMIT` | `120` | MCP requests per minute per token |
 | `MCP_TRANSPORT` | `http` | `http` mounts `/mcp` on API roles; `stdio` serves MCP over stdin/stdout (replaces the HTTP server) |
@@ -466,7 +502,7 @@ search dialogue and cut clips directly. It is **off by default**; enable it with
 
 ```sh
 MCP_ENABLED=1
-MCP_TOKENS=agent-secret:read+clip,ops-secret:admin
+MCP_TOKENS=agent-secret:read+clip,diag-secret:diagnostics,ops-secret:admin
 MCP_ALLOW_ADMIN=0        # 1 additionally exposes admin tools to admin-scoped tokens
 MCP_RATE_LIMIT=120       # requests per minute per token (default 120)
 ```
@@ -474,7 +510,10 @@ MCP_RATE_LIMIT=120       # requests per minute per token (default 120)
 Then point any streamable-HTTP MCP client at `http://<host>:8080/mcp` with
 `Authorization: Bearer <token>` (or `X-API-Token`). A `read` token grants the search/status tools,
 `clip` adds clip creation and thumbnails, `admin` adds queue/scan/config tools (which also require
-`MCP_ALLOW_ADMIN=1`).
+`MCP_ALLOW_ADMIN=1`). The independent `diagnostics` grant exposes only sanitized logs
+and a lightweight diagnostic snapshot, without requiring the admin master switch or
+granting media/mutation tools. A token needs an explicit diagnostics grant (or enabled
+legacy admin access); updating the binary does not expand an existing read/clip token.
 
 Local single-process integrations can run MCP over stdio instead of HTTP:
 
@@ -495,7 +534,8 @@ MCP_ENABLED=1 MCP_TRANSPORT=stdio quipster
 | `get_job` | read | poll one processing job |
 | `create_clip` | clip | render or queue a clip; returns a ready URL or a `jobId` to poll |
 | `get_thumbnail` | clip | thumbnail URL for a timestamp |
-| `get_app_logs` | admin | read-only, sanitized last-hour process-local logs; also requires `MCP_ALLOW_ADMIN=1` |
+| `get_app_logs` | diagnostics, or enabled admin | sanitized last-hour process-local logs with structured capture timestamps |
+| `get_diagnostics` | diagnostics, or enabled admin | bounded RAM/swap/load, writer-pool and build/runtime snapshot; no SQL or probes |
 | `trigger_scan`, `reindex_library`, `queue_control`, `list_jobs`, `get_library_config`, `set_library_config` | admin | the operator surface |
 
 Resources (`quipster://media/{id}`, `quipster://chunk/{chunkId}`, `quipster://thumb/{mediaId}`,

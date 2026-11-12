@@ -28,7 +28,8 @@ type request struct {
 // per-test failure knobs so error paths can be exercised without a live
 // Meilisearch instance.
 type fakeMeili struct {
-	srv *httptest.Server
+	srv          *httptest.Server
+	pendingUntil time.Time
 	// onDelete, when set, runs synchronously while a deletion request is in
 	// flight, simulating state changes that race the delete (e.g. a restore).
 	onDelete      func()
@@ -36,6 +37,7 @@ type fakeMeili struct {
 	docs          map[string]map[string]any
 	requests      []request
 	nextUID       int64
+	taskGetPause  time.Duration
 	settingsCalls int
 	typoCalls     int
 	embedderCalls int
@@ -193,7 +195,7 @@ func (f *fakeMeili) routeGet(rw *respWriter, r *http.Request) {
 		f.handleGetIndex(rw)
 	default:
 		if strings.HasPrefix(r.URL.Path, "/tasks/") {
-			f.handleGetTask(rw, r.URL.Path)
+			f.handleGetTask(rw, r)
 			return
 		}
 		rw.fail(http.StatusNotFound, "not_found", "no route for "+r.Method+" "+r.URL.Path)
@@ -207,7 +209,7 @@ func (f *fakeMeili) routePost(rw *respWriter, r *http.Request, body []byte) {
 	case "/indexes/" + IndexName + "/documents":
 		f.handleAddDocuments(rw, body)
 	case "/indexes/" + IndexName + "/documents/delete":
-		f.handleDeleteDocuments(rw)
+		f.handleDeleteDocuments(rw, body)
 	default:
 		rw.fail(http.StatusNotFound, "not_found", "no route for "+r.Method+" "+r.URL.Path)
 	}
@@ -244,14 +246,26 @@ func (f *fakeMeili) handleCreateIndex(rw *respWriter) {
 	f.writeTaskInfo(rw, uid)
 }
 
-func (f *fakeMeili) handleGetTask(rw *respWriter, path string) {
-	uid, err := strconv.ParseInt(strings.TrimPrefix(path, "/tasks/"), 10, 64)
+func (f *fakeMeili) handleGetTask(rw *respWriter, r *http.Request) {
+	f.mu.Lock()
+	pause := f.taskGetPause
+	f.mu.Unlock()
+	if pause > 0 {
+		timer := time.NewTimer(pause)
+		defer timer.Stop()
+		select {
+		case <-r.Context().Done():
+			return
+		case <-timer.C:
+		}
+	}
+	uid, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/tasks/"), 10, 64)
 	if err != nil {
 		rw.fail(http.StatusBadRequest, "invalid_task_uid", "bad task uid")
 		return
 	}
 	f.mu.Lock()
-	failGet, delay := f.failTaskGet, f.delayNextGet
+	failGet, delay := f.failTaskGet, f.delayNextGet || time.Now().Before(f.pendingUntil)
 	if delay {
 		f.delayNextGet = false
 	}
@@ -287,9 +301,11 @@ func (f *fakeMeili) handleAddDocuments(rw *respWriter, body []byte) {
 		return
 	}
 	f.mu.Lock()
-	for _, d := range docs {
-		if id, ok := d["id"].(string); ok {
-			f.docs[id] = d
+	if !f.addTasksFail {
+		for _, d := range docs {
+			if id, ok := d["id"].(string); ok {
+				f.docs[id] = d
+			}
 		}
 	}
 	f.mu.Unlock()
@@ -297,7 +313,7 @@ func (f *fakeMeili) handleAddDocuments(rw *respWriter, body []byte) {
 	f.writeTaskInfo(rw, uid)
 }
 
-func (f *fakeMeili) handleDeleteDocuments(rw *respWriter) {
+func (f *fakeMeili) handleDeleteDocuments(rw *respWriter, body []byte) {
 	f.mu.Lock()
 	fail, taskFail := f.failDelete, f.deleteTasksFail
 	f.mu.Unlock()
@@ -307,6 +323,27 @@ func (f *fakeMeili) handleDeleteDocuments(rw *respWriter) {
 	}
 	if f.onDelete != nil {
 		f.onDelete()
+	}
+	if !taskFail {
+		var payload struct {
+			Filter string `json:"filter"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			rw.fail(http.StatusBadRequest, "bad_request", "bad delete body")
+			return
+		}
+		id, err := strconv.ParseInt(strings.TrimPrefix(payload.Filter, "mediaId = "), 10, 64)
+		if err != nil {
+			rw.fail(http.StatusBadRequest, "bad_request", "bad media filter")
+			return
+		}
+		f.mu.Lock()
+		for key, doc := range f.docs {
+			if doc["mediaId"] == float64(id) {
+				delete(f.docs, key)
+			}
+		}
+		f.mu.Unlock()
 	}
 	uid := f.enqueue("documentDeletion", taskFail)
 	f.writeTaskInfo(rw, uid)

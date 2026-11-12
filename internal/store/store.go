@@ -190,6 +190,11 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(status, priority DESC, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_jobs_type_status_finished ON jobs(type, status, finished_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_jobs_dedupe ON jobs(type, payload, status)`,
+		// Diagnostics fetch a bounded recent time range across all job types.
+		// The type-leading index cannot seek that range, and idx_jobs_claim
+		// scans/sorts every completed job. Keep active claims/heartbeats out
+		// of this index; status leads so SQLite chooses it without ANALYZE.
+		`CREATE INDEX IF NOT EXISTS idx_jobs_done_finished ON jobs(status, finished_at) WHERE status='done'`,
 		`CREATE TABLE IF NOT EXISTS scans (
 			id INTEGER PRIMARY KEY,
 			root_path TEXT NOT NULL,
