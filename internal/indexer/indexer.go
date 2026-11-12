@@ -243,67 +243,7 @@ func (ix *Indexer) IndexMedia(mediaID int64) error {
 // document vectors during this add phase from the embedder's document
 // template, so no local embedding step is required here.
 func (ix *Indexer) IndexMediaContext(ctx context.Context, mediaID int64) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	chunkList, err := ix.st.PendingIndexChunks(mediaID, 200000)
-	if err != nil {
-		return err
-	}
-	// Docs for a never-indexed media cannot exist; skip the delete round-trip.
-	ever, eerr := ix.st.EverIndexed(mediaID)
-	if eerr != nil {
-		return eerr
-	}
-	if ever {
-		filter := fmt.Sprintf(`mediaId = %d`, mediaID)
-		task, derr := ix.client.Index(IndexName).DeleteDocumentsByFilterWithContext(ctx, filter, nil)
-		if derr != nil {
-			return fmt.Errorf("delete docs %d: %w", mediaID, derr)
-		}
-		if _, werr := ix.client.WaitForTaskWithContext(ctx, task.TaskUID, 200*time.Millisecond); werr != nil {
-			return fmt.Errorf("delete wait %d: %w", mediaID, werr)
-		}
-	}
-	if len(chunkList) == 0 {
-		return nil
-	}
-	docs := make([]LineDoc, len(chunkList))
-	ids := make([]int64, len(chunkList))
-	for i, ch := range chunkList {
-		docs[i] = LineDoc{
-			ID:            DocID(ch.MediaFileID, ch.StartCueIdx, ch.EndCueIdx),
-			Text:          ch.Text,
-			MediaID:       ch.MediaFileID,
-			MediaTitle:    displayTitle(ch.MediaTitle, ch.ShowTitle, ch.Season, ch.Episode, ch.Year),
-			ShowTitle:     ch.ShowTitle,
-			Season:        ch.Season,
-			Episode:       ch.Episode,
-			Year:          ch.Year,
-			StartCueIdx:   ch.StartCueIdx,
-			EndCueIdx:     ch.EndCueIdx,
-			ChunkStartSec: ch.StartSec,
-			ChunkEndSec:   ch.EndSec,
-		}
-		ids[i] = ch.ID
-	}
-	tasks, err := ix.client.Index(IndexName).AddDocumentsInBatchesWithContext(ctx, docs, ix.batch, nil)
-	if err != nil {
-		return fmt.Errorf("add docs %d: %w", mediaID, err)
-	}
-	for _, t := range tasks {
-		res, err := ix.client.WaitForTaskWithContext(ctx, t.TaskUID, 300*time.Millisecond)
-		if err != nil {
-			return fmt.Errorf("add wait %d: %w", mediaID, err)
-		}
-		if res.Status == meili.TaskStatusFailed {
-			return fmt.Errorf("add failed %d: %s", mediaID, res.Error)
-		}
-	}
-	if err := ix.st.MarkChunksIndexed(ids, time.Now().Unix()); err != nil {
-		return err
-	}
-	return nil
+	return ix.indexMedia(ctx, mediaID, 0, nil)
 }
 
 func displayTitle(title, showTitle string, season, episode, year int) string {
@@ -349,7 +289,7 @@ func (ix *Indexer) DeleteMedia(ids []int64) error {
 // handler honors the runner context so every remote task wait can be canceled
 // by a queue pause, shutdown or the job timeout.
 func (ix *Indexer) JobHandler() func(ctx context.Context, j *store.Job, progress func(float64)) error {
-	return func(ctx context.Context, j *store.Job, _ func(float64)) error {
+	return func(ctx context.Context, j *store.Job, progress func(float64)) error {
 		var payload struct {
 			MediaID int64 `json:"mediaId"`
 		}
@@ -365,15 +305,18 @@ func (ix *Indexer) JobHandler() func(ctx context.Context, j *store.Job, progress
 		}
 		started := time.Now()
 		log.Printf("[indexer] media %d job %d: start", payload.MediaID, j.ID)
-		if err := ix.IndexMediaContext(ctx, payload.MediaID); err != nil {
-			log.Printf("[indexer] media %d job %d: failed elapsed=%s error=%q",
-				payload.MediaID, j.ID, time.Since(started).Round(time.Millisecond), err)
+		if err := ix.indexMedia(ctx, payload.MediaID, j.ID, progress); err != nil {
+			log.Printf("[indexer] media %d job %d: failed elapsed=%s",
+				payload.MediaID, j.ID, time.Since(started).Round(time.Millisecond))
 			return err
 		}
-		if err := ix.st.MarkIndexed(payload.MediaID); err != nil {
-			log.Printf("[indexer] media %d job %d: mark indexed elapsed=%s error=%q",
-				payload.MediaID, j.ID, time.Since(started).Round(time.Millisecond), err)
+		if err := ix.st.MarkIndexSnapshotComplete(ctx, payload.MediaID); err != nil {
+			log.Printf("[indexer] media %d job %d: mark indexed failed elapsed=%s",
+				payload.MediaID, j.ID, time.Since(started).Round(time.Millisecond))
 			return err
+		}
+		if progress != nil {
+			progress(1)
 		}
 		log.Printf("[indexer] media %d job %d: indexed elapsed=%s",
 			payload.MediaID, j.ID, time.Since(started).Round(time.Millisecond))

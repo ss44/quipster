@@ -31,14 +31,14 @@ import (
 	"quipster/internal/thumbs"
 )
 
-// Tool scopes, ordered from least to most privileged. A grant of a higher
-// scope implies every lower one, mirroring the read/clip/admin split from the
-// design notes: read covers search and metadata, clip adds clip creation and
-// thumbnails, admin adds queue/scan/config control.
+// Media scopes retain the read < clip < admin hierarchy. Diagnostics is an
+// independent, explicit read-only grant: it implies no media or mutation scope.
+// Legacy admin diagnostics access still requires the admin master switch.
 const (
-	ScopeRead  = "read"
-	ScopeClip  = "clip"
-	ScopeAdmin = "admin"
+	ScopeDiagnostics = "diagnostics"
+	ScopeRead        = "read"
+	ScopeClip        = "clip"
+	ScopeAdmin       = "admin"
 )
 
 // DefaultRateLimit is the per-token request-per-minute budget applied when
@@ -118,7 +118,7 @@ func tokenID(token string) string {
 
 // ParseTokens decodes the MCP_TOKENS environment variable into the token map
 // Config.Tokens expects. Tokens are comma-separated, each entry
-// "token:scopes" where scopes is a plus-separated list of read/clip/admin
+// "token:scopes" where scopes is a plus-separated list of read/clip/admin/diagnostics
 // defaulting to read. Example:
 //
 //	MCP_TOKENS=secret1:read+clip,secret2:admin
@@ -187,7 +187,8 @@ func (s *Server) serverForRequest(r *http.Request) *mcpsdk.Server {
 
 // ConnectStdio runs a single MCP session over stdin/stdout for local
 // single-process integrations. Stdio is operator-launched, so it receives the
-// full scope set; admin tools still require Config.AllowAdmin.
+// admin media scope; legacy admin diagnostics and mutations still require
+// Config.AllowAdmin. Explicit diagnostics grants are configured for HTTP tokens.
 func (s *Server) ConnectStdio(ctx context.Context) error {
 	srv := s.serverFor("stdio", ScopeAdmin)
 	return srv.Run(ctx, &mcpsdk.StdioTransport{})
@@ -213,8 +214,10 @@ func (s *Server) serverFor(id, scopes string) *mcpsdk.Server {
 			"create_clip returns ready or queued status with a playback URL.",
 	})
 	s.registerTools(srv, id, scopes)
-	s.addResources(srv)
-	s.addPrompts(srv)
+	if hasScope(scopes, ScopeRead) {
+		s.addResources(srv)
+		s.addPrompts(srv)
+	}
 	s.servers[key] = srv
 	return srv
 }
@@ -229,7 +232,13 @@ func (s *Server) registerTools(srv *mcpsdk.Server, token, scopes string) {
 	if hasScope(scopes, ScopeClip) {
 		s.addClipTools(srv, token)
 	}
-	if hasScope(scopes, ScopeAdmin) && s.cfg.AllowAdmin {
+	adminEnabled := hasScope(scopes, ScopeAdmin) && s.cfg.AllowAdmin
+	// Explicit diagnostics never enables mutation. Keep the legacy admin route
+	// gated so adding this grant does not silently expose logs to old tokens.
+	if hasScope(scopes, ScopeDiagnostics) || adminEnabled {
+		s.addDiagnosticTools(srv, token)
+	}
+	if adminEnabled {
 		s.addAdminTools(srv, token)
 	}
 }
@@ -281,9 +290,12 @@ func scopeRank(scope string) int {
 }
 
 // allows reports whether a granted scope satisfies the required scope,
-// treating higher scopes as supersets of lower ones.
+// treating higher media scopes as supersets; diagnostics is orthogonal.
 func allows(granted, required string) bool {
-	return scopeRank(granted) >= scopeRank(required)
+	if granted == ScopeDiagnostics || required == ScopeDiagnostics {
+		return granted == required
+	}
+	return scopeRank(required) > 0 && scopeRank(granted) >= scopeRank(required)
 }
 
 // hasScope checks a plus-separated grant list for the required scope.

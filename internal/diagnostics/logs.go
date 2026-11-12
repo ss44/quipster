@@ -1,11 +1,14 @@
 package diagnostics
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 	"time"
+
+	"quipster/internal/logbuf"
 )
 
 // LogQuery selects recent application logs. Times are RFC3339 capture times,
@@ -18,15 +21,18 @@ type LogQuery struct {
 }
 
 // LogResult contains sanitized application log lines in oldest-first order.
+// Entries aligns one-for-one with Lines and preserves process capture timestamps.
+// The escaped JSON envelope is capped at 256 KiB, including both representations.
 type LogResult struct {
-	Lines []string `json:"lines"`
-	Count int      `json:"count"`
+	Entries []logbuf.Entry `json:"entries"`
+	Lines   []string       `json:"lines"`
+	Count   int            `json:"count"`
 }
 
 // AppLogs serves REST and MCP from the same memory-only snapshot. It never
 // queries SQLite, even when indexing has exhausted the database's busy timeout.
 func (c *Collector) AppLogs(q LogQuery) (LogResult, error) {
-	out := LogResult{Lines: []string{}}
+	out := LogResult{Lines: []string{}, Entries: []logbuf.Entry{}}
 	since, until, limit, err := q.bounds()
 	if err != nil {
 		return out, err
@@ -40,19 +46,29 @@ func (c *Collector) AppLogs(q LogQuery) (LogResult, error) {
 		}
 		line := redactLog(e.Text)
 		if strings.Contains(line, q.Contains) {
-			out.Lines = append(out.Lines, line)
+			out.Entries = append(out.Entries, logbuf.Entry{Time: e.Time, Text: line})
 		}
 	}
-	start, budget := len(out.Lines), 0
-	for start > 0 && len(out.Lines)-start < limit {
-		n := len(out.Lines[start-1]) + 1
+	// Budget the escaped JSON of both representations, including timestamps,
+	// rather than raw text alone. Reserve envelope/comma/count overhead.
+	start, budget := len(out.Entries), 128
+	for start > 0 && len(out.Entries)-start < limit {
+		e := out.Entries[start-1]
+		encoded, err := json.Marshal([]any{e, e.Text})
+		if err != nil {
+			return LogResult{}, fmt.Errorf("encode log entry: %w", err)
+		}
+		n := len(encoded) // array brackets conservatively cover both commas
 		if budget+n > 256<<10 {
 			break
 		}
 		budget += n
 		start--
 	}
-	out.Lines = out.Lines[start:]
+	out.Entries = out.Entries[start:]
+	for _, e := range out.Entries {
+		out.Lines = append(out.Lines, e.Text)
+	}
 	out.Count = len(out.Lines)
 	return out, nil
 }
@@ -97,9 +113,9 @@ func logTime(value string) (time.Time, error) {
 var (
 	logBearer         = regexp.MustCompile(`(?i)\b(Bearer|Basic)\s+[^\s,;]+`)
 	logSecret         = regexp.MustCompile(`(?i)\b([a-z0-9_-]*(?:token|api[_-]?key|password|secret)|authorization|bearer)["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
-	logQuotedPath     = regexp.MustCompile(`"(?:[A-Za-z]:[\\/]|/)[^"]*"|'(?:[A-Za-z]:[\\/]|/)[^']*'`)
+	logQuotedString   = regexp.MustCompile(`"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'`)
 	logURLCredentials = regexp.MustCompile(`(https?://)[^\s/@]+@`)
-	logPath           = regexp.MustCompile(`(?:[A-Za-z]:[\\/]|/)[^\s"'<>]*`)
+	logPath           = regexp.MustCompile(`[^\s"'<>=,;]*[\\/][^\s"'<>]*`)
 )
 
 // redactLog reuses diagnostic secret scrubbing and additionally removes paths
@@ -113,9 +129,29 @@ func redactLog(line string) string {
 			line = strings.ReplaceAll(line, token, "[redacted]")
 		}
 	}
-	line = logQuotedPath.ReplaceAllString(line, "<redacted>")
+	// Consume every complete quoted string, including escapes, so a non-path's
+	// closing quote cannot become a path's opening quote. Redact paths whole
+	// before token matching can leak fragments; keep the shared date exemption.
+	line = logQuotedString.ReplaceAllStringFunc(line, func(quoted string) string {
+		inner := quoted[1 : len(quoted)-1]
+		if !strings.ContainsAny(inner, `\/`) || redactLogPath(inner) == inner {
+			return quoted
+		}
+		return "<redacted>"
+	})
 	line = logURLCredentials.ReplaceAllString(line, "${1}[redacted]@")
 	line = logBearer.ReplaceAllString(line, "Bearer [redacted]")
 	line = logSecret.ReplaceAllString(line, "$1=[redacted]")
-	return logPath.ReplaceAllString(line, "<redacted>")
+	return logPath.ReplaceAllStringFunc(line, redactLogPath)
+}
+
+// redactLogPath exempts only a complete calendar date, never a date-shaped
+// prefix or suffix of a path, so private path suffixes cannot leak.
+func redactLogPath(candidate string) string {
+	for _, layout := range []string{"2006/01/02", "01/02/2006"} {
+		if _, err := time.Parse(layout, strings.Trim(candidate, "[]():.,;")); err == nil {
+			return candidate
+		}
+	}
+	return "<redacted>"
 }
