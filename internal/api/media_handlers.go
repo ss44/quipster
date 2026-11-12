@@ -106,6 +106,38 @@ func (d Deps) handleMedia(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleMediaCues exposes a bounded subtitle window independently of chunk
+// boundaries, so trimming can extend into neighboring scenes without loading
+// an entire episode's transcript.
+func (d Deps) handleMediaCues(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	start, startErr := strconv.Atoi(r.URL.Query().Get("startIdx"))
+	end, endErr := strconv.Atoi(r.URL.Query().Get("endIdx"))
+	if startErr != nil || endErr != nil || start < 0 || end < start || end-start >= 100 {
+		writeErr(w, http.StatusBadRequest, "cue range must contain 1 to 100 non-negative indices")
+		return
+	}
+	m, err := d.St.GetMedia(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if m == nil || m.Archived {
+		writeErr(w, http.StatusNotFound, "media not found")
+		return
+	}
+	cues, _, _, err := d.St.CuesAround(id, start, end, 0)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"cues": search.CueDTOs(cues)})
+}
+
 func (d Deps) handleThumb(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "mediaId"), 10, 64)
 	if err != nil {
