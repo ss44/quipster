@@ -99,13 +99,11 @@ func (d Deps) handleDiagnosticsBundle(w http.ResponseWriter, r *http.Request) {
 
 // handleLogs returns recent application log lines from the in-memory buffer.
 func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
-	limit := atoiQuery(r.URL.Query().Get("limit"))
-	if limit < 1 || limit > 5000 {
-		limit = 500
+	q := r.URL.Query()
+	out, err := d.Diagnostics.AppLogs(diagnostics.LogQuery{Limit: atoiQuery(q.Get("limit")), Since: q.Get("since"), Until: q.Get("until"), Contains: q.Get("contains")})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	lines := d.Diagnostics.Logs(limit)
-	if lines == nil {
-		lines = []string{}
-	}
-	writeJSON(w, map[string]any{"lines": lines, "count": len(lines)})
+	writeJSON(w, out)
 }
