@@ -38,7 +38,7 @@ Related: #12 (notable/popular dialogue), Epic #8. Existing implementation triage
 ## AI / search policy
 Metadata identity should be deterministic first. No AI is required for Phase 1. An optional AI match suggestion can be reviewed, but cannot override pinned IDs or fabricate provider IDs.
 
-The detailed candidate-ranking, external quote evidence and global token ledger belong in #12. Metadata enables accurate episode association; it is **not** evidence that a particular line is famous. The reviewed TheTVDB v4 schema has no dedicated quote endpoint, and TheTVDB describes its content score as reflecting site interactions on the content, not line-level quote popularity.[9][10]
+The detailed candidate-ranking, external quote evidence and global token ledger belong in #12. Metadata enables accurate episode association; it is **not** evidence that a particular line is famous. The reviewed TheTVDB v4 schema has no dedicated quote endpoint, and TheTVDB describes its content score as a relative-popularity value for the record, not line-level quote popularity.[9][10]
 
 ## Operational and provider requirements
 - Provider enablement and credentials must be explicitly configured. Do not change production settings or send existing transcripts to an AI provider as part of this planning task.
