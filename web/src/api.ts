@@ -327,6 +327,8 @@ export const api = {
       `/api/search?q=${encodeURIComponent(q)}&show=${encodeURIComponent(show)}&page=${page}&mode=${encodeURIComponent(mode)}`
     ),
   chunk: (id: string) => getJSON<ChunkDetail>(`/api/chunks/${encodeURIComponent(id)}`),
+  mediaCues: (mediaId: number, startIdx: number, endIdx: number) =>
+    getJSON<{ cues: CueDTO[] }>(`/api/media/${mediaId}/cues?startIdx=${startIdx}&endIdx=${endIdx}`),
   scan: (root: string) =>
     fetch(`/api/admin/scan${root ? `?root=${encodeURIComponent(root)}` : ''}`, { method: 'POST' }).then((r) => r.json()),
   config: () => getJSON<AdminConfig>('/api/admin/config'),

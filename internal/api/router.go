@@ -103,6 +103,7 @@ func Router(d Deps) http.Handler {
 	r.Get("/api/examples", d.handleExamples)
 	r.Get("/api/media", d.handleMediaList)
 	r.Get("/api/media/{id}", d.handleMedia)
+	r.Get("/api/media/{id}/cues", d.handleMediaCues)
 	r.Get("/api/thumb/{mediaId}", d.handleThumb)
 	r.Get("/api/chunks/{id}", d.handleChunk)
 	r.Get("/api/quotes", d.handleQuotes)

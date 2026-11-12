@@ -36,7 +36,21 @@
 
           <div class="trim">
             <div class="clip-section-head">
-              <span class="section-label">Clip range</span>
+              <div class="range-heading">
+                <span class="section-label">Clip range</span>
+                <button type="button" class="range-extend" aria-label="Include previous subtitle line"
+                  title="Include previous subtitle line" :disabled="!canExtendBefore || extending" @click="extendLine(-1)">
+                  <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M7 3L2 8l5 5M2 8h12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+                <button type="button" class="range-extend" aria-label="Include next subtitle line"
+                  title="Include next subtitle line" :disabled="!canExtendAfter || extending" @click="extendLine(1)">
+                  <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M9 3l5 5-5 5M14 8H2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+              </div>
               <span class="trim-meta">
                 <span class="mono">{{ fmt(selStart) }} – {{ fmt(selEnd) }}</span>
                 <span class="sep">·</span>
@@ -48,6 +62,7 @@
               :min="0"
               :max="Math.max(cues.length - 1, 0)"
               :step="1"
+              :disabled="cues.length === 0"
               hide-details
               density="compact"
               track-color="rgba(255,255,255,0.10)"
@@ -57,7 +72,7 @@
             />
             <div class="trim-hint">
               <span>Drag to include more or fewer subtitle lines.</span>
-              <button type="button" class="link-btn" @click="selectAll">Select all</button>
+              <button type="button" class="link-btn" :disabled="cues.length === 0" @click="selectAll">Select all</button>
             </div>
           </div>
 
@@ -83,10 +98,10 @@
               </v-btn-toggle>
             </div>
             <div class="buttons">
-              <button type="button" class="btn-secondary" :disabled="downloading" @click="copyLink">
+              <button type="button" class="btn-secondary" :disabled="downloading || cues.length === 0" @click="copyLink">
                 Copy link
               </button>
-              <button type="button" class="btn-primary" :disabled="downloading" @click="download">
+              <button type="button" class="btn-primary" :disabled="downloading || cues.length === 0" @click="download">
                 {{ downloading ? 'Working…' : 'Download' }}
               </button>
             </div>
@@ -123,10 +138,6 @@
             <span class="mono muted">{{ selectedCount }}/{{ cues.length }}</span>
           </header>
           <div class="scroll">
-            <div v-for="c in detail.contextBefore" :key="'b' + c.idx" class="line is-context">
-              <span class="line-time">{{ fmt(c.start) }}</span>
-              <span class="line-text">{{ c.text }}</span>
-            </div>
             <button
               v-for="(c, i) in cues"
               :key="c.idx"
@@ -138,10 +149,6 @@
               <span class="line-time">{{ fmt(c.start) }}</span>
               <span class="line-text">{{ c.text }}</span>
             </button>
-            <div v-for="c in detail.contextAfter" :key="'a' + c.idx" class="line is-context">
-              <span class="line-time">{{ fmt(c.start) }}</span>
-              <span class="line-text">{{ c.text }}</span>
-            </div>
           </div>
         </aside>
       </div>
@@ -150,8 +157,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api, clipStreamURL, type ChunkDetail, type Hit } from '../api'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { api, clipStreamURL, type ChunkDetail, type CueDTO, type Hit } from '../api'
 
 const open = ref(false)
 const detail = ref<ChunkDetail | null>(null)
@@ -173,10 +180,21 @@ const posterURL = ref('')
 // previous load is still in flight.
 const MEDIA_ERR_ABORTED = 1
 
-const cues = computed(() => detail.value?.cues ?? [])
+const cues = ref<CueDTO[]>([])
+const extending = ref(false)
+const exhaustedBefore = ref(false)
+const exhaustedAfter = ref(false)
+let session = 0
+let selectionVersion = 0
+const canExtendBefore = computed(() => cues.value.length > 0 && (
+  sel.value[0] > 0 || (!exhaustedBefore.value && cues.value[0].idx > 0)
+))
+const canExtendAfter = computed(() => cues.value.length > 0 && (
+  sel.value[1] < cues.value.length - 1 || !exhaustedAfter.value
+))
 const selStart = computed(() => cues.value[Math.min(sel.value[0], cues.value.length - 1)]?.start ?? 0)
 const selEnd = computed(() => cues.value[Math.min(sel.value[1], cues.value.length - 1)]?.end ?? 0)
-const selectedCount = computed(() => Math.max(0, sel.value[1] - sel.value[0] + 1))
+const selectedCount = computed(() => cues.value.length ? Math.max(0, sel.value[1] - sel.value[0] + 1) : 0)
 const downloading = computed(() => downloadPending.value)
 const mode = computed({
   get: () => (accurate.value ? 'accurate' : 'fast'),
@@ -195,7 +213,12 @@ const titleLine = computed(() => {
 })
 
 onMounted(() => window.addEventListener('open-clip', onOpenClip as EventListener))
-onUnmounted(() => window.removeEventListener('open-clip', onOpenClip as EventListener))
+onUnmounted(() => {
+  session++
+  window.removeEventListener('open-clip', onOpenClip as EventListener)
+})
+watch(open, value => { if (!value) session++ }, { flush: 'sync' })
+watch(sel, () => { selectionVersion++ }, { deep: true, flush: 'sync' })
 
 function setMode(value: unknown) {
   mode.value = String(value)
@@ -206,17 +229,35 @@ function inRange(index: number): boolean {
 }
 
 async function onOpenClip(e: Event) {
+  const requestSession = ++session
   const next = (e as CustomEvent).detail as Hit
   hit.value = next
   open.value = true
+  extending.value = false
+  exhaustedBefore.value = false
+  exhaustedAfter.value = false
+  cues.value = []
+  previewURL.value = ''
+  posterURL.value = ''
+  previewLoading.value = false
   clipError.value = ''
   previewFailed.value = false
   jobProgress.value = null
   try {
-    detail.value = await api.chunk(next.chunkId)
-    sel.value = [0, Math.max(cues.value.length - 1, 0)]
+    const result = await api.chunk(next.chunkId)
+    if (requestSession !== session || !open.value) return
+    detail.value = result
+    const scene = detail.value.cues
+    cues.value = scene.length ? [...new Map([
+      ...detail.value.contextBefore, ...scene, ...detail.value.contextAfter,
+    ].map(cue => [cue.idx, cue])).values()].sort((a, b) => a.idx - b.idx) : []
+    sel.value = scene.length ? [
+      cues.value.findIndex(cue => cue.idx === scene[0].idx),
+      cues.value.findIndex(cue => cue.idx === scene[scene.length - 1].idx),
+    ] : [0, 0]
     updatePreview()
   } catch (err) {
+    if (requestSession !== session || !open.value) return
     clipError.value = (err as Error).message
   }
 }
@@ -251,6 +292,40 @@ function onPreviewError(e: Event) {
   previewFailed.value = true
 }
 
+async function extendLine(direction: -1 | 1) {
+  if (!hit.value || extending.value || !(direction === -1 ? canExtendBefore.value : canExtendAfter.value)) return
+  const [start, end] = sel.value
+  if (direction === -1 && start > 0) sel.value = [start - 1, end]
+  else if (direction === 1 && end < cues.value.length - 1) sel.value = [start, end + 1]
+  else {
+    const idx = direction === -1 ? cues.value[0].idx - 1 : cues.value[cues.value.length - 1].idx + 1
+    const requestSession = session
+    const requestSelection = selectionVersion
+    const isCurrent = () => requestSession === session && requestSelection === selectionVersion && open.value
+    extending.value = true
+    clipError.value = ''
+    try {
+      const result = await api.mediaCues(hit.value.mediaId, idx, idx)
+      if (!isCurrent()) return
+      if (!result.cues.length) {
+        if (direction === -1) exhaustedBefore.value = true
+        else exhaustedAfter.value = true
+        return
+      }
+      // Prepending shifts the old scene right by one; keeping the start index
+      // includes exactly the new neighbor without dropping any selected lines.
+      cues.value = direction === -1 ? [...result.cues, ...cues.value] : [...cues.value, ...result.cues]
+      sel.value = [start, end + 1]
+    } catch (err) {
+      if (!isCurrent()) return
+      clipError.value = (err as Error).message
+    } finally {
+      if (requestSession === session) extending.value = false
+    }
+  }
+  updatePreview()
+}
+
 function selectAll() {
   sel.value = [0, Math.max(cues.value.length - 1, 0)]
   updatePreview()
@@ -265,7 +340,7 @@ function expandTo(index: number) {
 }
 
 async function download() {
-  if (!hit.value) return
+  if (!hit.value || !cues.value.length) return
   downloadPending.value = true
   clipError.value = ''
   const url = clipStreamURL(hit.value, selStart.value, selEnd.value, accurate.value ? 'accurate' : 'fast', true)
@@ -325,7 +400,7 @@ function triggerBlobDownload(blob: Blob, name: string) {
 }
 
 async function copyLink() {
-  if (!hit.value) return
+  if (!hit.value || !cues.value.length) return
   const url =
     window.location.origin +
     clipStreamURL(hit.value, selStart.value, selEnd.value, accurate.value ? 'accurate' : 'fast', false)
@@ -464,6 +539,33 @@ function pad(value: number): string {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--faint);
+}
+.range-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.range-extend {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+}
+.range-extend:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+.range-extend:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.range-extend:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 .trim-meta {
   font-size: 12px;
@@ -625,10 +727,7 @@ function pad(value: number): string {
 .line.dim {
   opacity: 0.5;
 }
-.line.is-context {
-  opacity: 0.32;
-  cursor: default;
-}
+
 .line-time {
   font-family: var(--font-mono);
   font-size: 10.5px;
