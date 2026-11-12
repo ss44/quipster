@@ -210,6 +210,52 @@ cached briefly, so opening several tabs does not multiply vendor tool invocation
 `ROLE=api`/`ROLE=worker` deployment the diagnostics page describes the API process; check each
 worker's logs separately.
 
+#### Application logs
+
+`GET /api/admin/logs` and MCP `get_app_logs` read the **same in-memory application
+log buffer**, without querying SQLite. They remain useful when indexing is blocked by
+`SQLITE_BUSY`. Standard-library application logs still go to stderr unchanged.
+
+- Retention is **at most one hour**, and can be shorter under load: the process retains
+  at most **2 MiB of log text** and **10,000 complete lines**, whichever cap is reached
+  first. The text budget includes incomplete-line backing capacity, not just its length;
+  line metadata and Go allocation overhead are additional but bounded. Evicted references
+  are cleared. Logical lines exceeding **16 KiB** (including fragmented writes) are
+  replaced with `[log line truncated]`, rather than exposing a potentially sensitive suffix.
+- A dedicated goroutine expires idle logs every minute. App shutdown cancels and joins
+  that goroutine. Reads and writes also enforce the age cutoff, so an expired line is
+  never returned while waiting for the next sweep. An incomplete line expires too.
+- Logs are **memory-only, process-local, and lost on restart**. There is no disk archive,
+  cross-process aggregation, or SQLite dependency. API processes cannot read separate
+  worker/node processes' logs; use their stderr/container logs instead.
+- Both transports return `{ "lines": [...], "count": N }`: newest matching complete
+  lines, ordered oldest first. `limit` defaults to 500 (valid range 1–5000; values outside
+  that range use the default). Responses additionally cap returned log text at **256 KiB**;
+  JSON escaping/envelopes add bounded overhead. `count` counts only the returned lines.
+- Optional `since` and `until` are inclusive **RFC3339 capture-time bounds**, not parsed
+  message timestamps. They cannot extend the one-hour retention window. Optional
+  `contains` is a case-sensitive literal substring (maximum 256 bytes), matched against
+  sanitized text. Invalid times, reversed bounds, or oversized filters are rejected.
+- Returned text uses diagnostics' known-secret redaction, also scrubs configured MCP
+  tokens, labeled credentials, HTTP auth credentials, and absolute Unix/Windows paths
+  (including quoted paths). There is **no raw/path opt-in** on either log transport.
+  Redaction is best-effort and may over-redact; arbitrary unlabeled secrets cannot be
+  identified reliably, so treat logs as sensitive operator data and do not log credentials.
+
+REST follows existing admin authentication: configure `API_TOKEN` and send it as the
+bearer token (without one configured, admin REST routes retain their existing open behavior).
+MCP requires **both an admin-scoped MCP token and `MCP_ALLOW_ADMIN=1`**, even though
+`get_app_logs` is annotated read-only. Ordinary read/clip tokens cannot list or invoke it;
+stdio also obeys the admin master switch. For example:
+
+```sh
+curl -H "Authorization: Bearer $API_TOKEN" \
+  'http://localhost:8080/api/admin/logs?contains=SQLITE_BUSY&limit=100'
+```
+
+MCP arguments use the same names, for example
+`{"contains":"SQLITE_BUSY","limit":100,"since":"2026-11-12T12:00:00Z"}`.
+
 ### Semantic (vector) search
 
 Quipster can search dialogue by meaning, not just exact words. Meilisearch generates the vectors
@@ -449,6 +495,7 @@ MCP_ENABLED=1 MCP_TRANSPORT=stdio quipster
 | `get_job` | read | poll one processing job |
 | `create_clip` | clip | render or queue a clip; returns a ready URL or a `jobId` to poll |
 | `get_thumbnail` | clip | thumbnail URL for a timestamp |
+| `get_app_logs` | admin | read-only, sanitized last-hour process-local logs; also requires `MCP_ALLOW_ADMIN=1` |
 | `trigger_scan`, `reindex_library`, `queue_control`, `list_jobs`, `get_library_config`, `set_library_config` | admin | the operator surface |
 
 Resources (`quipster://media/{id}`, `quipster://chunk/{chunkId}`, `quipster://thumb/{mediaId}`,

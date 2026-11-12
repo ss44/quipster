@@ -18,6 +18,7 @@ import (
 // addAdminTools registers the operator tools. Callers are gated twice: the
 // token must carry the admin scope and Config.AllowAdmin must be enabled.
 func (s *Server) addAdminTools(srv *mcpsdk.Server, token string) {
+	addTool(srv, "get_app_logs", "Read sanitized process-local application logs from at most the last hour, subject to memory caps. Newest matches, oldest first. Requires admin scope and MCP_ALLOW_ADMIN; no SQLite access.", readOnly(), token, s.getAppLogs)
 	addTool(srv, "trigger_scan",
 		"Enqueue a library scan. Deduplicated while a scan is already queued or running.",
 		&mcpsdk.ToolAnnotations{IdempotentHint: true}, token, s.triggerScan)

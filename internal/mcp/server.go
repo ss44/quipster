@@ -22,6 +22,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"quipster/internal/clips"
+	"quipster/internal/diagnostics"
 	"quipster/internal/events"
 	"quipster/internal/indexer"
 	"quipster/internal/jobs"
@@ -50,6 +51,7 @@ const DefaultRateLimit = 120
 //
 //nolint:govet // field grouping favors readability over optimal alignment.
 type Deps struct {
+	Diagnostics *diagnostics.Collector
 	St          *store.Store
 	Search      *search.Service
 	Indexer     *indexer.Indexer

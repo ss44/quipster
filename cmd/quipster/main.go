@@ -198,10 +198,11 @@ func buildProbePipeline(cfg config, st *store.Store) *probe.Pipeline {
 // assembly separate from main() makes the whole wiring testable without
 // starting an HTTP server or waiting for a signal.
 type app struct {
-	Runner *jobs.Runner
-	Stop   func()
-	Deps   api.Deps
-	MCP    *mcp.Server
+	logDone <-chan struct{} // closed when the owned log-expiry goroutine exits
+	Runner  *jobs.Runner
+	Stop    func()
+	Deps    api.Deps
+	MCP     *mcp.Server
 }
 
 // assembleApp wires every service around the shared store: clip/thumbnail
@@ -211,6 +212,8 @@ type app struct {
 // the runner, and must be called on shutdown.
 func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexer.Indexer) *app {
 	ctx, cancel := context.WithCancel(parent)
+	logDone := make(chan struct{})
+	go func() { defer close(logDone); cfg.logs.Run(ctx) }()
 	lru := &cache.LRU{St: st, MaxBytes: int64(cfg.cacheMaxGB * 1024 * 1024 * 1024), Kinds: []string{"clip", "thumb", "sub"}}
 	cache.RunDaemon(ctx, lru, 5*time.Minute)
 
@@ -283,7 +286,7 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 		mcpTokens := mcp.ParseTokens(cfg.mcpTokens)
 		mcpSrv = mcp.New(mcp.Deps{
 			St: st, Search: searchSvc, Indexer: ix, Clips: clipSvc, Thumbs: thumbSvc,
-			Events: collector, Runner: runner, MediaDir: cfg.mediaDir, ClipWorkers: cfg.clipWorkers,
+			Events: collector, Runner: runner, MediaDir: cfg.mediaDir, ClipWorkers: cfg.clipWorkers, Diagnostics: diag,
 		}, mcp.Config{
 			Tokens: mcpTokens, AllowAdmin: cfg.mcpAllowAdmin,
 			RateLimit: cfg.mcpRateLimit, Version: version,
@@ -296,9 +299,10 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	} else if cfg.mcpEnabled {
 		log.Printf("mcp requested but disabled: set MCP_TOKENS to grant agent access")
 	}
-	return &app{Deps: deps, Runner: runner, MCP: mcpSrv, Stop: func() {
+	return &app{Deps: deps, Runner: runner, MCP: mcpSrv, logDone: logDone, Stop: func() {
 		cancel()
 		runner.Stop()
+		<-logDone
 	}}
 }
 
