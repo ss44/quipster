@@ -1,10 +1,17 @@
 <template>
   <header class="results-head">
     <div class="results-summary">
-      <span class="results-count">{{ results?.totalHits ?? 0 }}</span>
-      <span class="results-label">{{ (results?.totalHits ?? 0) === 1 ? 'match' : 'matches' }} for</span>
+      <template v-if="loading">
+        <HazeText label="Loading match count" text="Matches" />
+        <span class="results-label">for</span>
+      </template>
+      <template v-else-if="results">
+        <span class="results-count">{{ results.totalHits }}</span>
+        <span class="results-label">{{ results.totalHits === 1 ? 'match' : 'matches' }} for</span>
+      </template>
+      <span v-else class="results-label">Results unavailable for</span>
       <span class="results-query">“{{ query }}”</span>
-      <span v-if="heroTitles" class="results-heroes">in {{ heroTitles }} {{ heroTitles === 1 ? 'title' : 'titles' }}</span>
+      <span v-if="!loading && heroTitles" class="results-heroes">in {{ heroTitles }} {{ heroTitles === 1 ? 'title' : 'titles' }}</span>
     </div>
     <div class="results-tools">
       <div v-if="results?.semanticAvailable" class="mode-toggle" role="group" aria-label="Search mode">
@@ -31,10 +38,12 @@
 import { computed } from 'vue'
 import type { SearchMode, SearchResponse } from '../../api'
 import { SEARCH_MODE_OPTIONS, heroCount, searchModeHint } from '../../lib/search'
+import HazeText from '../HazeText.vue'
 
 const props = defineProps<{
   query: string
   results: SearchResponse | null
+  loading: boolean
   activeMode: Exclude<SearchMode, ''>
 }>()
 

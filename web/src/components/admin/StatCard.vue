@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import StatProgress from './StatProgress.vue'
+import HazeText from '../HazeText.vue'
 import type { StatProgressModel } from '../../lib/progress'
 
 // One card of the admin overview row: label, headline value, a free-form sub
@@ -13,15 +14,26 @@ defineProps<{
   unit?: string
   /** Present when the card has countable work to show; omitted otherwise. */
   progress?: StatProgressModel
+  state?: 'loading' | 'unavailable'
+  progressState?: 'loading' | 'unavailable'
 }>()
 </script>
 
 <template>
   <div class="stat">
     <p class="stat-label">{{ label }}</p>
-    <p class="stat-value">{{ value }}<span v-if="unit" class="stat-unit">{{ unit }}</span></p>
-    <p class="stat-sub"><slot /></p>
-    <StatProgress v-if="progress" v-bind="progress" />
+    <template v-if="state === 'loading'">
+      <p class="stat-value"><HazeText :label="`Loading ${label.toLowerCase()} statistics`" text="12,480" /></p>
+      <p class="stat-sub"><HazeText text="Collecting current statistics" /></p>
+    </template>
+    <p v-else-if="state === 'unavailable'" class="stat-sub">Unavailable</p>
+    <template v-else>
+      <p class="stat-value">{{ value }}<span v-if="unit" class="stat-unit">{{ unit }}</span></p>
+      <p class="stat-sub"><slot /></p>
+      <p v-if="progressState === 'loading'" class="stat-sub"><HazeText :label="`Loading ${label.toLowerCase()} progress`" text="Current usage and limit" /></p>
+      <p v-else-if="progressState === 'unavailable'" class="stat-sub">Progress unavailable</p>
+      <StatProgress v-else-if="progress" v-bind="progress" />
+    </template>
   </div>
 </template>
 

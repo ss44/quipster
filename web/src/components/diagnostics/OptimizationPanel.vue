@@ -2,11 +2,17 @@
   <section class="panel optimization-panel">
     <header class="panel-header">
       <span>Media optimization checks</span>
-      <span class="panel-hint">{{ optimization?.recommended ?? 0 }} of {{ optimization?.scanned ?? 0 }} probed files flagged</span>
+      <span class="panel-hint">
+        <HazeText v-if="pending" label="Loading optimization counts" text="Probed files flagged" />
+        <template v-else-if="optimization">{{ optimization.recommended }} of {{ optimization.scanned }} probed files flagged</template>
+        <template v-else>Counts unavailable</template>
+      </span>
     </header>
     <div class="panel-body">
       <p class="optimization-note">Metadata-only heuristics; Quipster never modifies source media. Counts refresh with this view after media is reprobed.</p>
-      <div v-if="findings.length" class="optimization-list">
+      <p v-if="pending" class="idle"><HazeText label="Loading optimization findings" text="Media optimization findings" /></p>
+      <p v-else-if="!optimization" class="idle">Optimization checks unavailable.</p>
+      <div v-else-if="findings.length" class="optimization-list">
         <div v-for="finding in findings" :key="finding.code" class="optimization-item">
           <div class="optimization-top"><strong>{{ finding.title }}</strong><span class="mini-chip mono">{{ finding.count }} files</span></div>
           <p>{{ finding.detail }}</p>
@@ -23,8 +29,9 @@
 import { computed } from 'vue'
 import type { MediaOptimizationStats } from '../../api'
 import { optimizationFindings } from '../../lib/diagnostics'
+import HazeText from '../HazeText.vue'
 
-const props = defineProps<{ optimization: MediaOptimizationStats | null }>()
+const props = defineProps<{ optimization: MediaOptimizationStats | null; pending?: boolean }>()
 
 const findings = computed(() => optimizationFindings(props.optimization))
 </script>

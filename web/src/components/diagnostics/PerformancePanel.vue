@@ -8,6 +8,7 @@
         density="compact"
         variant="outlined"
         hide-details
+        :disabled="pending"
         class="window-select"
         @update:model-value="emit('change')"
       />
@@ -15,11 +16,19 @@
     <div class="panel-body">
       <div class="perf-top">
         <div>
-          <p class="perf-value">{{ throughputLabel(bench) }}<span class="perf-unit">jobs/min</span></p>
+          <p class="perf-value">
+            <HazeText v-if="pending" label="Loading throughput" text="0.00" />
+            <template v-else>{{ bench ? throughputLabel(bench) : 'n/a' }}</template>
+            <span class="perf-unit">jobs/min</span>
+          </p>
           <p class="perf-sub">completed throughput</p>
         </div>
         <div>
-          <p class="perf-value">{{ readThroughputLabel(bench) }}<span v-if="bench?.readAvailable" class="perf-unit">MB/s</span></p>
+          <p class="perf-value">
+            <HazeText v-if="pending" label="Loading source read" text="0.00" />
+            <template v-else>{{ readThroughputLabel(bench) }}</template>
+            <span v-if="bench?.readAvailable" class="perf-unit">MB/s</span>
+          </p>
           <p class="perf-sub">{{ bench?.readAvailable ? 'derived source read' : bench?.readReason || 'source read' }}</p>
         </div>
       </div>
@@ -47,7 +56,8 @@
             </tr>
           </tbody>
         </table>
-        <p v-if="!bench?.jobs?.length" class="idle">No completed jobs in this window.</p>
+        <p v-if="pending" class="idle"><HazeText label="Loading benchmarks" text="Job timings and counts" /></p>
+        <p v-else-if="!bench?.jobs?.length" class="idle">{{ bench ? 'No completed jobs in this window.' : 'Performance unavailable.' }}</p>
       </div>
     </div>
   </section>
@@ -56,8 +66,9 @@
 <script setup lang="ts">
 import type { Benchmarks } from '../../api'
 import { fmtMs, readThroughputLabel, throughputLabel } from '../../lib/diagnostics'
+import HazeText from '../HazeText.vue'
 
-defineProps<{ bench: Benchmarks | null }>()
+defineProps<{ bench: Benchmarks | null; pending?: boolean }>()
 
 const emit = defineEmits<{ (event: 'change'): void }>()
 

@@ -4,6 +4,8 @@
       v-if="!query"
       :quotes="quotes"
       :examples="examples"
+      :loading="quotesLoading || examplesLoading"
+      :failed="landingFailed"
       @open-quote="openQuote"
       @run-query="runQuery"
     />
@@ -37,6 +39,9 @@ const router = useRouter()
 
 const examples = ref<string[]>([])
 const quotes = ref<Quote[]>([])
+const quotesLoading = ref(true)
+const examplesLoading = ref(true)
+const landingFailed = ref(false)
 
 // mode mirrors the ?mode= query param so the chosen retrieval strategy is
 // shareable; '' defers to the server (hybrid when an embedder is configured).
@@ -64,15 +69,17 @@ onMounted(() => {
       quotes.value = nextQuotes ?? []
     })
     .catch(() => {
-      quotes.value = []
+      landingFailed.value = true
     })
+    .finally(() => { quotesLoading.value = false })
   void api.examples()
     .then(({ examples: nextExamples }) => {
       examples.value = nextExamples
     })
     .catch(() => {
-      examples.value = []
+      landingFailed.value = true
     })
+    .finally(() => { examplesLoading.value = false })
 })
 
 function openQuote(quote: Quote) {

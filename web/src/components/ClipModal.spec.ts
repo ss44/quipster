@@ -129,7 +129,7 @@ describe('ClipModal preview warning (issue #32)', () => {
     fireMediaEvent(video, 'error', MEDIA_ERR_SRC_NOT_SUPPORTED)
     await wrapper.vm.$nextTick()
     expect(warningText()).toBe(PREVIEW_WARNING)
-    // The spinner must not stay up for a preview that failed for good.
+    // The loading haze must not stay up for a preview that failed for good.
     expect(qs('.preview-overlay')).toBeNull()
   })
 
@@ -140,7 +140,7 @@ describe('ClipModal preview warning (issue #32)', () => {
     expect(qs('.error-msg')).toBeNull()
   })
 
-  it('ignores errors from a replaced preview and keeps the spinner for the new one', async () => {
+  it('ignores errors from a replaced preview and keeps the haze for the new one', async () => {
     const staleVideo = qs<HTMLVideoElement>('video')!
     const staleSrc = staleVideo.getAttribute('src')
 
@@ -158,7 +158,7 @@ describe('ClipModal preview warning (issue #32)', () => {
     fireMediaEvent(staleVideo, 'error', MEDIA_ERR_SRC_NOT_SUPPORTED)
     await wrapper.vm.$nextTick()
     expect(qs('.error-msg')).toBeNull()
-    // The new preview is still loading, so the spinner must stay up.
+    // The new preview is still loading, so the haze must stay up.
     expect(qs('.preview-overlay')).not.toBeNull()
 
     fireMediaEvent(freshVideo, 'loadeddata')
@@ -189,5 +189,32 @@ describe('ClipModal preview warning (issue #32)', () => {
     window.dispatchEvent(new CustomEvent('open-clip', { detail: hit }))
     await flushPromises()
     expect(qs('.error-msg')).toBeNull()
+  })
+
+  it('clears previous detail and shows haze until a newly opened clip resolves', async () => {
+    let resolve!: (value: ChunkDetail) => void
+    vi.mocked(api.chunk).mockReturnValueOnce(new Promise(done => { resolve = done }))
+    window.dispatchEvent(new CustomEvent('open-clip', { detail: hit }))
+    await flushPromises()
+    expect(qs('[aria-label="Loading clip title"]')).not.toBeNull()
+    expect(qs('.clip-path')).toBeNull()
+    expect(qs('video')).toBeNull()
+    expect(qs('.transcript button')).toBeNull()
+    expect(document.querySelectorAll('[aria-label="Loading subtitle line"]')).toHaveLength(4)
+    expect(document.querySelectorAll('.line-pending > .haze-text')).toHaveLength(4)
+    resolve(detail)
+    await flushPromises()
+    expect(qs('[aria-label="Loading clip title"]')).toBeNull()
+    expect(qs('.clip-path')?.textContent).toBe('/media/sample.mkv')
+    expect(qs('[aria-label="Preparing preview"]')).not.toBeNull()
+  })
+
+  it('shows chunk failures in the dialog instead of an endless haze', async () => {
+    vi.mocked(api.chunk).mockRejectedValueOnce(new Error('Clip details unavailable'))
+    window.dispatchEvent(new CustomEvent('open-clip', { detail: hit }))
+    await flushPromises()
+    expect(qs('.haze-text')).toBeNull()
+    expect(qs('[role="alert"]')?.textContent).toContain('Clip details unavailable')
+    expect(qs('.close-btn')).not.toBeNull()
   })
 })

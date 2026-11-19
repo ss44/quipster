@@ -7,7 +7,12 @@
       and download or share the clip.
     </p>
 
-    <QuoteGrid v-if="quotes.length" :quotes="quotes" @open-quote="emit('open-quote', $event)" />
+    <QuoteGrid
+      v-if="quotes.length || (loading && !examples.length)"
+      :quotes="quotes"
+      :loading="!quotes.length"
+      @open-quote="emit('open-quote', $event)"
+    />
 
     <div v-if="!quotes.length && examples.length > 0" class="examples">
       <button
@@ -26,7 +31,10 @@
       </button>
     </div>
 
-    <p v-if="!quotes.length && !examples.length" class="landing-empty">
+    <p v-if="!loading && !quotes.length && !examples.length && failed" class="landing-empty" role="alert">
+      Library quotes could not be loaded. Search is still available; reload to try again.
+    </p>
+    <p v-else-if="!loading && !quotes.length && !examples.length" class="landing-empty">
       No indexed dialogue yet. Choose your library folders in
       <RouterLink to="/admin">Library</RouterLink> and run a scan — real lines will appear here.
     </p>
@@ -45,6 +53,8 @@ import QuoteGrid from './QuoteGrid.vue'
 defineProps<{
   quotes: Quote[]
   examples: string[]
+  loading: boolean
+  failed: boolean
 }>()
 
 const emit = defineEmits<{

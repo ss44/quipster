@@ -1,14 +1,21 @@
 <template>
   <div class="hw">
     <div class="hw-top">
-      <span class="hw-pill" :class="tone">
+      <HazeText v-if="pending" label="Loading hardware" text="Hardware pipeline" />
+      <span v-else class="hw-pill" :class="tone">
         <span class="hw-dot"></span>
         {{ label }}
       </span>
       <span v-if="detail" class="hw-detail">{{ detail }}</span>
     </div>
-    <p class="hw-pipeline mono">{{ pipeline }}</p>
-    <p class="hw-sub">{{ subline }}</p>
+    <p class="hw-pipeline mono">
+      <HazeText v-if="pending" label="Loading pipeline" text="Decode to encode pipeline" />
+      <template v-else>{{ pipeline }}</template>
+    </p>
+    <p class="hw-sub">
+      <HazeText v-if="pending" label="Loading hardware details" text="Encoder and device details" />
+      <template v-else>{{ subline }}</template>
+    </p>
     <div v-if="fallbacks > 0" class="hw-fallback">
       <v-icon icon="mdi-alert-outline" size="14" class="mr-1" />
       {{ fallbacks }} CPU fallback{{ fallbacks === 1 ? '' : 's' }} since start
@@ -22,10 +29,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { GPUSummary, HardwareStatus } from '../../api'
+import HazeText from '../HazeText.vue'
 
 const props = defineProps<{
   hardware: HardwareStatus | null
   gpu?: GPUSummary | null
+  pending?: boolean
 }>()
 
 const hw = computed(() => props.hardware)
@@ -40,7 +49,7 @@ const backendNames: Record<string, string> = {
 
 const label = computed(() => {
   const h = hw.value
-  if (!h) return 'CHECKING HARDWARE'
+  if (!h) return 'HARDWARE UNAVAILABLE'
   if (h.available) return `HARDWARE · ${backendNames[h.backend] ?? h.backend.toUpperCase()}`
   if (h.requested !== 'auto' && h.requested !== 'none') return 'FALLBACK · CPU'
   return 'SOFTWARE · CPU'
@@ -66,14 +75,14 @@ const detail = computed(() => {
 
 const pipeline = computed(() => {
   const h = hw.value
-  if (!h) return 'detecting decode → encode pipeline…'
+  if (!h) return 'Pipeline unavailable'
   if (!h.available) return 'software decode → libx264'
   return `${h.decoder || 'software'} → ${h.encoder}`
 })
 
 const subline = computed(() => {
   const h = hw.value
-  if (!h) return 'Hardware detection runs once at startup.'
+  if (!h) return 'No hardware details reported.'
   const parts = [`requested: ${h.requested}`, `encoder: ${h.encoder}`]
   if (h.device) parts.push(`device: ${h.device}`)
   if (!h.available && h.reason) parts.push(h.reason)

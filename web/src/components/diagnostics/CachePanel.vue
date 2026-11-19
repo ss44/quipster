@@ -2,7 +2,10 @@
   <section class="panel">
     <header class="panel-header">
       <span>Storage &amp; cache</span>
-      <span class="panel-hint">{{ fmtBytes(gauge?.cacheBytes ?? 0) }} cached</span>
+      <span class="panel-hint">
+        <HazeText v-if="pending" label="Loading cache size" text="Cache size" />
+        <template v-else>{{ gauge ? `${fmtBytes(gauge.cacheBytes)} cached` : 'Cache unavailable' }}</template>
+      </span>
     </header>
     <div class="panel-body">
       <div v-for="d in disks" :key="d.name" class="disk-row">
@@ -13,18 +16,22 @@
         <div class="disk-path mono truncate">{{ d.path || '—' }}</div>
         <div class="bar"><div class="fill" :style="{ width: `${diskUsedPct(d)}%` }"></div></div>
       </div>
-      <div v-if="!disks.length" class="idle">Waiting for storage sample…</div>
+      <div v-if="pending" class="idle"><HazeText label="Loading storage" text="Storage usage and free space" /></div>
+      <div v-else-if="!disks.length" class="idle">{{ gauge ? 'No storage details reported.' : 'Storage unavailable.' }}</div>
 
       <div class="cache-row">
         <span class="cache-label">Cache breakdown</span>
         <div class="chips">
+          <HazeText v-if="pending" label="Loading cache breakdown" text="Cached files" />
+          <span v-else-if="!Object.keys(gauge?.cacheParts ?? {}).length" class="faint">{{ gauge ? 'No cache entries.' : 'unavailable' }}</span>
           <span v-for="(bytes, kind) in gauge?.cacheParts ?? {}" :key="kind" class="mini-chip mono">
             {{ kind }} {{ fmtBytes(bytes) }}
           </span>
         </div>
       </div>
       <div class="load-row mono">
-        load {{ gauge?.load?.available ? `${gauge.load.one.toFixed(2)} ${gauge.load.five.toFixed(2)} ${gauge.load.fifteen.toFixed(2)}` : 'n/a' }}
+        load <HazeText v-if="pending" label="Loading load average" text="0.00 0.00 0.00" />
+        <template v-else>{{ gauge?.load?.available ? `${gauge.load.one.toFixed(2)} ${gauge.load.five.toFixed(2)} ${gauge.load.fifteen.toFixed(2)}` : 'n/a' }}</template>
       </div>
     </div>
   </section>
@@ -35,8 +42,9 @@ import { computed } from 'vue'
 import type { DiskMetric, GaugeSnapshot } from '../../api'
 import { diskUsedPct } from '../../lib/diagnostics'
 import { fmtBytes } from '../../lib/format'
+import HazeText from '../HazeText.vue'
 
-const props = defineProps<{ gauge: GaugeSnapshot | null }>()
+const props = defineProps<{ gauge: GaugeSnapshot | null; pending?: boolean }>()
 
 const disks = computed<DiskMetric[]>(() => Object.values(props.gauge?.disks ?? {}))
 </script>

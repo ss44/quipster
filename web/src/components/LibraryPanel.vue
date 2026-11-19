@@ -7,22 +7,27 @@
         <p class="page-sub">Folders, ingestion and processing status.</p>
       </div>
       <div class="head-status">
-        <span class="status-dot" :class="running.length ? 'run' : 'ok'"></span>
-        <span class="status-text">{{ running.length ? `${running.length} processing` : 'Idle' }}</span>
-        <span class="divider-y"></span>
-        <span class="status-dot" :class="snap?.meiliUp ? 'ok' : 'err'"></span>
-        <span class="status-text">Search {{ snap?.meiliUp ? 'online' : 'offline' }}</span>
+        <HazeText v-if="snapshotState === 'loading'" label="Loading library status" text="Processing and search status" />
+        <template v-else-if="snap">
+          <span class="status-dot" :class="running.length ? 'run' : 'ok'"></span>
+          <span class="status-text">{{ running.length ? `${running.length} processing` : 'Idle' }}</span>
+          <span class="divider-y"></span>
+          <span class="status-dot" :class="snap.meiliUp ? 'ok' : 'err'"></span>
+          <span class="status-text">Search {{ snap.meiliUp ? 'online' : 'offline' }}</span>
+        </template>
+        <span v-if="streamError" role="alert">Live status unavailable. Waiting for reconnect.</span>
       </div>
     </header>
 
     <section class="stats">
-      <StatCard label="Library" :value="total.toLocaleString()" unit="files" :progress="libraryProgress">
+      <StatCard label="Library" :state="snapshotState" :value="total.toLocaleString()" unit="files" :progress="libraryProgress">
         {{ n('indexed').toLocaleString() }} searchable · {{ n('pending').toLocaleString() }} queued ·
         {{ n('no_subs').toLocaleString() }} without subs
         <span v-if="n('error')" class="stat-error">· {{ n('error') }} failed</span>
       </StatCard>
       <StatCard
         label="Dialogue"
+        :state="snap?.lines ? undefined : streamError ? 'unavailable' : 'loading'"
         :value="(snap?.lines?.cues ?? 0).toLocaleString()"
         unit="lines"
         :progress="dialogue.progress"
@@ -31,6 +36,7 @@
       </StatCard>
       <StatCard
         label="Queue"
+        :state="snap?.queue ? undefined : streamError ? 'unavailable' : 'loading'"
         :value="(snap?.queue?.queued ?? 0).toLocaleString()"
         unit="waiting"
         :progress="queueProgress"
@@ -41,7 +47,7 @@
           <span v-if="snap?.queue?.error" class="stat-error">· {{ snap.queue.error }} failed</span>
         </template>
       </StatCard>
-      <StatCard label="Clip cache" :value="fmtBytes(snap?.cacheBytes ?? 0)" :progress="cacheProgress">
+      <StatCard label="Clip cache" :state="snapshotState" :progress-state="configState" :value="fmtBytes(snap?.cacheBytes ?? 0)" :progress="cacheProgress">
         Clips, thumbnails and extracted subtitles, LRU-evicted.
       </StatCard>
     </section>
@@ -50,15 +56,21 @@
       <section class="panel folders">
         <header class="panel-header">
           <span>Library folders</span>
-          <span class="panel-hint">{{ folders.length ? `${folders.length} selected` : 'Whole root' }}</span>
+          <span class="panel-hint">
+            <HazeText v-if="configState === 'loading'" label="Loading selected folders" text="Selected folders" />
+            <template v-else-if="config">{{ folders.length ? `${folders.length} selected` : 'Whole root' }}</template>
+            <template v-else>Unavailable</template>
+          </span>
         </header>
         <div class="panel-body">
           <p class="field-hint">
-            Root: <span class="mono">{{ config?.mediaDir || '—' }}</span>. Only the folders below are
+            Root: <HazeText v-if="configState === 'loading'" label="Loading library root" text="/media/library" />
+            <span v-else class="mono">{{ config?.mediaDir || 'Unavailable' }}</span>. Only the folders below are
             indexed; anything else under the root is pruned on scan. Leave empty to index everything.
           </p>
           <v-combobox
             v-model="folders"
+            :disabled="!config"
             :items="config?.available || []"
             label="Folders to index"
             multiple
@@ -71,7 +83,7 @@
             prepend-inner-icon="mdi-folder-multiple-outline"
           />
           <div class="field-actions">
-            <button type="button" class="btn-secondary" :disabled="!dirty || savingConfig" @click="saveFolders">
+            <button type="button" class="btn-secondary" :disabled="!config || !dirty || savingConfig" @click="saveFolders">
               {{ savingConfig ? 'Saving…' : 'Save folders' }}
             </button>
             <span v-if="dirty" class="dirty-hint">Unsaved changes</span>
@@ -90,7 +102,7 @@
               <span class="op-title">Scan library</span>
               <span class="op-sub">Walk the selected folders, index new or changed files.</span>
             </div>
-            <button type="button" class="btn-primary" :disabled="scanning" @click="doScan">
+            <button type="button" class="btn-primary" :disabled="!config || scanning" @click="doScan">
               {{ scanning ? 'Starting…' : 'Scan' }}
             </button>
           </div>
@@ -117,14 +129,16 @@
             <div class="op-copy">
               <span class="op-title">Queue control</span>
               <span class="op-sub">
-                {{ paused ? 'Workers are paused — nothing new is claimed.' : 'Pause workers or stop and clear everything queued.' }}
+                <HazeText v-if="!snap?.queue && !streamError" label="Loading queue status" text="Current worker queue status" />
+                <template v-else-if="!snap?.queue">Queue status unavailable.</template>
+                <template v-else>{{ paused ? 'Workers are paused — nothing new is claimed.' : 'Pause workers or stop and clear everything queued.' }}</template>
               </span>
             </div>
             <div class="queue-actions">
-              <button type="button" class="btn-secondary" @click="togglePause">
+              <button type="button" class="btn-secondary" :disabled="!snap?.queue" @click="togglePause">
                 {{ paused ? 'Resume' : 'Pause' }}
               </button>
-              <button type="button" class="btn-danger" @click="confirmOpen = true">Stop &amp; clear</button>
+              <button type="button" class="btn-danger" :disabled="!snap?.queue" @click="confirmOpen = true">Stop &amp; clear</button>
             </div>
           </div>
 
@@ -141,10 +155,12 @@
       <section class="panel activity">
         <header class="panel-header">
           <span>Processing now</span>
-          <span class="panel-hint">{{ running.length }}</span>
+          <span v-if="snap" class="panel-hint">{{ running.length }}</span>
         </header>
         <div class="panel-body activity-body">
-          <p v-if="!running.length" class="idle">Nothing is being decoded right now.</p>
+          <p v-if="snapshotState === 'loading'" class="idle"><HazeText label="Loading current processing" text="Current processing jobs" /></p>
+          <p v-else-if="snapshotState === 'unavailable'" class="idle">Processing status unavailable. Waiting for reconnect.</p>
+          <p v-else-if="!running.length" class="idle">Nothing is being decoded right now.</p>
           <div v-for="job in running" :key="job.id" class="activity-row">
             <span class="type">{{ job.type }}</span>
             <div class="activity-main">
@@ -157,7 +173,7 @@
       </section>
     </div>
 
-    <RecentJobsPanel :jobs="recentJobs" />
+    <RecentJobsPanel :jobs="recentJobs" :state="snapshotState" />
 
     <v-dialog v-model="confirmOpen" max-width="420">
       <div class="confirm-panel">
@@ -183,6 +199,7 @@ import { useNow } from '@vueuse/core'
 import { api, type AdminConfig, type AdminSnapshot, type Job } from '../api'
 import RecentJobsPanel from './admin/RecentJobsPanel.vue'
 import StatCard from './admin/StatCard.vue'
+import HazeText from './HazeText.vue'
 import { fmtBytes } from '../lib/format'
 import { fileBase, jobElapsed } from '../lib/jobs'
 import { percent, type StatProgressModel } from '../lib/progress'
@@ -190,10 +207,13 @@ import { percent, type StatProgressModel } from '../lib/progress'
 const now = useNow({ interval: 1000 })
 
 const snap = ref<AdminSnapshot | null>(null)
+const streamError = ref(false)
+const snapshotState = computed(() => snap.value ? undefined : streamError.value ? 'unavailable' : 'loading')
 const config = ref<AdminConfig | null>(null)
 const folders = ref<string[]>([])
 const savingConfig = ref(false)
 const configError = ref('')
+const configState = computed(() => config.value ? undefined : configError.value ? 'unavailable' : 'loading')
 const scanning = ref(false)
 const reindexing = ref(false)
 const reprobing = ref(false)
@@ -316,17 +336,21 @@ function connectStream() {
   stream.addEventListener('tick', (event) => {
     try {
       const raw = (event as MessageEvent).data
-      if (raw === lastRawSnap) return
+      if (raw === lastRawSnap) {
+        streamError.value = false
+        return
+      }
+      const next = JSON.parse(raw)
+      streamError.value = false
       lastRawSnap = raw
-      snap.value = JSON.parse(raw)
+      snap.value = next
     } catch {
       /* ignore malformed ticks */
     }
   })
 
   stream.onerror = () => {
-    // EventSource auto-reconnects, but if we wanted manual backoff we'd do it here.
-    // The browser's native EventSource reconnection is usually sufficient.
+    streamError.value = true
   }
 }
 
@@ -349,7 +373,7 @@ async function loadConfig() {
     config.value = await api.config()
     folders.value = config.value.folders ?? []
   } catch (err) {
-    configError.value = (err as Error).message
+    configError.value = (err as Error).message || 'Library configuration unavailable.'
   }
 }
 

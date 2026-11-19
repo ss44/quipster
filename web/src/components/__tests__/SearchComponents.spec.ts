@@ -173,7 +173,7 @@ describe('SearchResults', () => {
     expect(wrapper.emitted('set-mode')?.[0]).toEqual(['semantic'])
   })
 
-  it('renders a skeleton instead of stale results while loading', () => {
+  it('renders hazy text instead of stale results and counts while loading', () => {
     const wrapper = mount(SearchResults, {
       props: {
         query: 'hello',
@@ -185,7 +185,11 @@ describe('SearchResults', () => {
       global: { plugins: [vuetify] },
     })
 
-    expect(wrapper.findAll('.skeleton')).toHaveLength(6)
+    expect(wrapper.findAll('.pending-scene')).toHaveLength(6)
+    expect(wrapper.find('[aria-label="Loading match count"]').exists()).toBe(true)
+    expect(wrapper.find('.results-count').exists()).toBe(false)
+    expect(wrapper.find('.results-heroes').exists()).toBe(false)
+    expect(wrapper.find('.skeleton').exists()).toBe(false)
     expect(wrapper.find('.matches').exists()).toBe(false)
     expect(wrapper.find('.pager').exists()).toBe(false)
   })

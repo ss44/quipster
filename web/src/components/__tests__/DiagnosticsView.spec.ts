@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createVuetify } from 'vuetify'
 import { VBtn, VCheckbox, VDialog, VIcon, VSelect } from 'vuetify/components'
 import DiagnosticsView from '../DiagnosticsView.vue'
+import LogsDialog from '../diagnostics/LogsDialog.vue'
 import type {
   Benchmarks,
   DiskMetric,
@@ -163,6 +164,30 @@ function optimization(): MediaOptimizationStats {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: Error) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+function deferSnapshots() {
+  const requests = {
+    system: deferred<SystemInfo>(),
+    metrics: deferred<GaugeSnapshot>(),
+    bench: deferred<Benchmarks>(),
+    optimization: deferred<MediaOptimizationStats>(),
+  }
+  vi.mocked(api.diagnosticsSystem).mockReturnValueOnce(requests.system.promise)
+  vi.mocked(api.diagnosticsMetrics).mockReturnValueOnce(requests.metrics.promise)
+  vi.mocked(api.diagnosticsBenchmarks).mockReturnValueOnce(requests.bench.promise)
+  vi.mocked(api.diagnosticsMediaOptimization).mockReturnValueOnce(requests.optimization.promise)
+  return requests
+}
+
 class FakeEventSource {
   static instances: FakeEventSource[] = []
   onerror: (() => void) | null = null
@@ -219,6 +244,166 @@ async function mountView() {
 }
 
 describe('DiagnosticsView composition', () => {
+  it('settles each initial source independently without early empty states or spinners', async () => {
+    const requests = deferSnapshots()
+    await mountView()
+
+    for (const label of ['diagnostics status', 'sample time', 'hardware', 'CPU', 'storage', 'benchmarks', 'optimization findings', 'OS']) {
+      expect(wrapper!.find(`[aria-label="Loading ${label}"]`).exists()).toBe(true)
+    }
+    expect(wrapper!.find('.v-progress-circular').exists()).toBe(false)
+    expect(wrapper!.text()).not.toContain('Stream stale')
+    expect(wrapper!.text()).not.toContain('No completed jobs')
+    expect(wrapper!.text()).not.toContain('No probed media')
+    expect(wrapper!.text()).not.toContain('n/a')
+
+    requests.metrics.resolve(gauge())
+    await flushPromises()
+    expect(wrapper!.find('.gauges [aria-label="Loading CPU"]').exists()).toBe(false)
+    expect(wrapper!.find('.head-status').text()).toContain('Live')
+    expect(wrapper!.findAll('.gauge')[0].text()).toContain('10%')
+    expect(wrapper!.find('[aria-label="Loading OS"]').exists()).toBe(true)
+    expect(wrapper!.find('[aria-label="Loading benchmarks"]').exists()).toBe(true)
+
+    requests.system.resolve(system())
+    await flushPromises()
+    expect(wrapper!.text()).toContain('Ubuntu 24.04')
+    expect(wrapper!.find('[aria-label="Loading OS"]').exists()).toBe(false)
+    expect(wrapper!.find('[aria-label="Loading optimization findings"]').exists()).toBe(true)
+
+    requests.bench.resolve({ ...benchmarks(), jobs: [], throughputPerMin: 0 })
+    await flushPromises()
+    expect(wrapper!.text()).toContain('No completed jobs in this window.')
+    expect(wrapper!.find('[aria-label="Loading benchmarks"]').exists()).toBe(false)
+    expect(wrapper!.find('[aria-label="Loading optimization findings"]').exists()).toBe(true)
+
+    requests.optimization.resolve({ updatedAt: 0, scanned: 0, recommended: 0, codes: {} })
+    await flushPromises()
+    expect(wrapper!.text()).toContain('No probed media findings yet.')
+    expect(wrapper!.find('[role="status"]').exists()).toBe(false)
+  })
+
+  it('settles initial failures to unavailable and allows the metrics stream to recover', async () => {
+    const requests = deferSnapshots()
+    await mountView()
+
+    requests.bench.reject(new Error('Benchmarks failed'))
+    await flushPromises()
+    expect(wrapper!.text()).toContain('Performance unavailable.')
+    expect(wrapper!.find('[aria-label="Loading OS"]').exists()).toBe(true)
+
+    requests.system.reject(new Error('System failed'))
+    requests.metrics.reject(new Error('Metrics failed'))
+    requests.optimization.reject(new Error('Optimization failed'))
+    await flushPromises()
+    expect(wrapper!.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper!.text()).toContain('Metrics unavailable')
+    expect(wrapper!.text()).toContain('HARDWARE UNAVAILABLE')
+    expect(wrapper!.text()).toContain('Storage unavailable.')
+    expect(wrapper!.text()).toContain('Optimization checks unavailable.')
+    expect(wrapper!.find('.env-panel').text()).not.toContain('offline')
+    expect(wrapper!.find('.env-panel').text()).not.toContain('Host')
+    expect(wrapper!.text()).not.toContain('0 B cached')
+    expect(wrapper!.text()).not.toContain('0 of 0')
+    expect(wrapper!.text()).not.toContain('No completed jobs')
+
+    FakeEventSource.instances[0].emitTick(gauge())
+    await flushPromises()
+    expect(wrapper!.find('.head-status').text()).toContain('Live')
+    expect(wrapper!.findAll('.gauge')[0].text()).toContain('10%')
+    expect(wrapper!.text()).toContain('1.0 KB cached')
+  })
+
+  it('keeps successful sources when a different initial request fails', async () => {
+    vi.mocked(api.diagnosticsBenchmarks).mockRejectedValueOnce(new Error('Benchmarks failed'))
+    await mountView()
+    expect(wrapper!.text()).toContain('Ubuntu 24.04')
+    expect(wrapper!.text()).toContain('Video codec compatibility')
+    expect(wrapper!.text()).toContain('Performance unavailable.')
+    expect(wrapper!.find('[role="status"]').exists()).toBe(false)
+  })
+
+  it('preserves snapshots during refresh and after refresh failure', async () => {
+    await mountView()
+    const requests = deferSnapshots()
+    await wrapper!.find('.head-status button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper!.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper!.text()).toContain('Ubuntu 24.04')
+    expect(wrapper!.text()).toContain('Video codec compatibility')
+    expect(wrapper!.text()).toContain('2.50')
+    expect(wrapper!.findAll('.gauge')[0].text()).toContain('10%')
+
+    for (const request of Object.values(requests)) request.reject(new Error('Refresh failed'))
+    await flushPromises()
+    expect(wrapper!.text()).toContain('Refresh failed')
+    expect(wrapper!.text()).toContain('Ubuntu 24.04')
+    expect(wrapper!.text()).toContain('Video codec compatibility')
+    expect(wrapper!.text()).toContain('2.50')
+    expect(wrapper!.findAll('.gauge')[0].text()).toContain('10%')
+    expect(wrapper!.find('[role="status"]').exists()).toBe(false)
+  })
+
+  it('distinguishes pending logs from a loaded empty response and preserves it on refresh', async () => {
+    const first = deferred<{ lines: string[]; count: number }>()
+    vi.mocked(api.logs).mockReturnValueOnce(first.promise)
+    await mountView()
+    await wrapper!.findAll('button').find((button) => button.text().includes('Open logs'))!.trigger('click')
+    await flushPromises()
+
+    expect(document.querySelector('[aria-label="Loading logs"]')).not.toBeNull()
+    expect(document.querySelector('.log-sub')!.textContent).not.toContain('0 lines')
+    expect(document.querySelector('.log-lines')!.textContent).not.toContain('No log lines')
+    expect(document.querySelector('.log-panel .v-progress-circular')).toBeNull()
+
+    first.resolve({ lines: [], count: 0 })
+    await flushPromises()
+    expect(document.querySelector('[aria-label="Loading logs"]')).toBeNull()
+    expect(document.querySelector('.log-sub')!.textContent).toContain('0 lines')
+    expect(document.querySelector('.log-lines')!.textContent).toContain('No log lines captured yet.')
+
+    const refresh = deferred<{ lines: string[]; count: number }>()
+    vi.mocked(api.logs).mockReturnValueOnce(refresh.promise)
+    wrapper!.findComponent(LogsDialog).vm.$emit('refresh')
+    await flushPromises()
+    expect(document.querySelector('[aria-label="Loading logs"]')).toBeNull()
+    expect(document.querySelector('.log-lines')!.textContent).toContain('No log lines captured yet.')
+    refresh.resolve({ lines: ['New log entry'], count: 1 })
+    await flushPromises()
+    expect(document.querySelector('.log-lines')!.textContent).toContain('New log entry')
+  })
+
+  it('settles log failure without claiming emptiness and preserves recovered logs on refresh failure', async () => {
+    const first = deferred<{ lines: string[]; count: number }>()
+    vi.mocked(api.logs).mockReturnValueOnce(first.promise)
+    await mountView()
+    await wrapper!.findAll('button').find((button) => button.text().includes('Open logs'))!.trigger('click')
+    await flushPromises()
+    first.reject(new Error('Log request failed'))
+    await flushPromises()
+
+    expect(document.querySelector('[aria-label="Loading logs"]')).toBeNull()
+    expect(document.querySelector('.log-lines')!.textContent).toContain('Logs unavailable.')
+    expect(document.querySelector('.log-panel [role="alert"]')!.textContent).toContain('Log request failed')
+    expect(document.querySelector('.log-sub')!.textContent).not.toContain('0 lines')
+
+    wrapper!.findComponent(LogsDialog).vm.$emit('refresh')
+    await flushPromises()
+    expect(document.querySelector('.log-lines')!.textContent).toContain('line one')
+
+    const refresh = deferred<{ lines: string[]; count: number }>()
+    vi.mocked(api.logs).mockReturnValueOnce(refresh.promise)
+    wrapper!.findComponent(LogsDialog).vm.$emit('refresh')
+    await flushPromises()
+    expect(document.querySelector('[aria-label="Loading logs"]')).toBeNull()
+    expect(document.querySelector('.log-lines')!.textContent).toContain('line one')
+    refresh.reject(new Error('Refresh failed'))
+    await flushPromises()
+    expect(document.querySelector('.log-lines')!.textContent).toContain('line one')
+    expect(document.querySelector('.log-panel [role="alert"]')!.textContent).toContain('Refresh failed')
+  })
+
   it('renders the focused panels from the loaded diagnostics snapshots', async () => {
     await mountView()
 

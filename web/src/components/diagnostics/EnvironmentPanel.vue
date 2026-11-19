@@ -2,35 +2,34 @@
   <section class="panel env-panel">
     <header class="panel-header">
       <span>Environment</span>
-      <span class="panel-hint">ffmpeg {{ system?.ffmpeg?.version || 'unknown' }}</span>
+      <span class="panel-hint">
+        ffmpeg <HazeText v-if="pending" label="Loading ffmpeg version" text="version" />
+        <template v-else>{{ system?.ffmpeg?.version || 'unavailable' }}</template>
+      </span>
     </header>
     <div class="panel-body">
       <div class="env-grid">
-        <div class="env-item"><span class="env-label">OS</span><span>{{ system?.osName || '—' }}</span></div>
-        <div class="env-item"><span class="env-label">Kernel</span><span class="mono">{{ system?.kernel || '—' }}</span></div>
-        <div class="env-item"><span class="env-label">Runtime</span><span>{{ system?.container ? 'Docker' : 'Host' }} · {{ system?.goos }}/{{ system?.goarch }}</span></div>
-        <div class="env-item"><span class="env-label">CPU</span><span>{{ system?.cpuModel || '—' }} ({{ system?.cpuCores ?? '—' }} cores)</span></div>
-        <div class="env-item"><span class="env-label">Quipster</span><span>{{ system?.appVersion || 'dev' }} · {{ system?.goVersion || '—' }}</span></div>
-        <div class="env-item"><span class="env-label">Uptime</span><span>{{ fmtUptime(system?.appUptimeSec ?? 0) }}</span></div>
-        <div class="env-item"><span class="env-label">GPU</span><span>{{ gpu?.available ? gpu.name : gpu?.reason || 'not reported' }}</span></div>
-        <div class="env-item"><span class="env-label">Driver</span><span class="mono">{{ gpu?.driverVersion || '—' }}</span></div>
-        <div class="env-item"><span class="env-label">Search</span><span>{{ system?.meiliUp ? 'online' : 'offline' }}</span></div>
-        <div class="env-item"><span class="env-label">Database</span><span>{{ fmtBytes(system?.dbBytes ?? 0) }}</span></div>
-        <div class="env-item"><span class="env-label">ffprobe</span><span class="mono">{{ system?.ffprobe?.version || 'unavailable' }}</span></div>
-        <div class="env-item"><span class="env-label">Hardware accel</span><span class="mono">{{ (system?.hwaccels ?? []).join(', ') || 'none' }}</span></div>
+        <div v-for="item in items" :key="item.label" class="env-item">
+          <span class="env-label">{{ item.label }}</span>
+          <HazeText v-if="pending" :label="`Loading ${item.label}`" text="Environment details" />
+          <span v-else :class="{ mono: item.mono }">{{ system ? item.value : 'unavailable' }}</span>
+        </div>
       </div>
 
       <div class="codec-block">
         <p class="env-label">Codec capabilities</p>
         <div class="chips">
+          <HazeText v-if="pending" label="Loading codec capabilities" text="Available codecs" />
           <span v-for="codec in codecs" :key="codec" class="mini-chip mono">{{ codec }}</span>
-          <span v-if="!codecs.length" class="faint">No codec details reported.</span>
+          <span v-if="!pending && !codecs.length" class="faint">{{ system ? 'No codec details reported.' : 'Codec details unavailable.' }}</span>
         </div>
       </div>
 
       <div class="codec-block">
         <p class="env-label">Effective settings</p>
         <div class="chips">
+          <HazeText v-if="pending" label="Loading effective settings" text="Runtime settings" />
+          <span v-else-if="!Object.keys(system?.config ?? {}).length" class="faint">{{ system ? 'No settings reported.' : 'Settings unavailable.' }}</span>
           <span v-for="(value, key) in system?.config ?? {}" :key="key" class="mini-chip mono">
             {{ key }}={{ value }}
           </span>
@@ -45,13 +44,32 @@ import { computed } from 'vue'
 import type { GPUSummary, SystemInfo } from '../../api'
 import { codecCapabilities, fmtUptime } from '../../lib/diagnostics'
 import { fmtBytes } from '../../lib/format'
+import HazeText from '../HazeText.vue'
 
 const props = defineProps<{
   system: SystemInfo | null
   gpu: GPUSummary | null
+  pending?: boolean
 }>()
 
 const codecs = computed(() => codecCapabilities(props.system))
+const items = computed(() => {
+  const { system, gpu } = props
+  return [
+    { label: 'OS', value: system?.osName || '—' },
+    { label: 'Kernel', value: system?.kernel || '—', mono: true },
+    { label: 'Runtime', value: `${system?.container ? 'Docker' : 'Host'} · ${system?.goos}/${system?.goarch}` },
+    { label: 'CPU', value: `${system?.cpuModel || '—'} (${system?.cpuCores ?? '—'} cores)` },
+    { label: 'Quipster', value: `${system?.appVersion || 'dev'} · ${system?.goVersion || '—'}` },
+    { label: 'Uptime', value: fmtUptime(system?.appUptimeSec ?? 0) },
+    { label: 'GPU', value: gpu?.available ? gpu.name : gpu?.reason || 'not reported' },
+    { label: 'Driver', value: gpu?.driverVersion || '—', mono: true },
+    { label: 'Search', value: system?.meiliUp ? 'online' : 'offline' },
+    { label: 'Database', value: fmtBytes(system?.dbBytes ?? 0) },
+    { label: 'ffprobe', value: system?.ffprobe?.version || 'unavailable', mono: true },
+    { label: 'Hardware accel', value: (system?.hwaccels ?? []).join(', ') || 'none', mono: true },
+  ]
+})
 </script>
 
 <style scoped>

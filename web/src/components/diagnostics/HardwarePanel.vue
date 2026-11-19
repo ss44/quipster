@@ -2,10 +2,11 @@
   <section class="panel hw-panel">
     <header class="panel-header">
       <span>Hardware acceleration</span>
-      <span class="panel-hint">{{ driverHint }}</span>
+      <HazeText v-if="systemPending" class="panel-hint" label="Loading driver" text="driver version" />
+      <span v-else class="panel-hint">{{ driverHint }}</span>
     </header>
     <div class="panel-body hw-body">
-      <HardwareBadge :hardware="hardware" :gpu="gpu" />
+      <HardwareBadge :hardware="hardware" :gpu="gpu" :pending="pending" />
       <div class="hw-actions">
         <v-btn size="small" color="primary" variant="flat" :loading="exporting" @click="emit('export')">
           <v-icon icon="mdi-download" size="16" class="mr-1" /> Export bundle
@@ -29,6 +30,7 @@
 import { computed } from 'vue'
 import type { GPUSummary, HardwareStatus, SystemInfo } from '../../api'
 import HardwareBadge from './HardwareBadge.vue'
+import HazeText from '../HazeText.vue'
 
 const props = defineProps<{
   hardware: HardwareStatus | null
@@ -37,6 +39,8 @@ const props = defineProps<{
   exporting: boolean
   copying: boolean
   probing: boolean
+  pending?: boolean
+  systemPending?: boolean
 }>()
 
 const emit = defineEmits<{
