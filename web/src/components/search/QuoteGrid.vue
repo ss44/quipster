@@ -2,8 +2,14 @@
   <section class="quotes">
     <p class="quotes-label">From your library</p>
     <div class="quote-grid">
+      <template v-if="loading">
+        <div v-for="i in 4" :key="i" class="quote-card quote-pending">
+          <HazeText class="quote-text" label="Loading library quote" text="A memorable moment from your library" />
+          <HazeText class="quote-title" label="Loading quote title" text="Film and episode" />
+        </div>
+      </template>
       <button
-        v-for="quote in quotes"
+        v-for="quote in loading ? [] : quotes"
         :key="quote.chunkId"
         type="button"
         class="quote-card"
@@ -22,8 +28,9 @@
 <script setup lang="ts">
 import type { Quote } from '../../api'
 import { quoteTitle, timecode } from '../../lib/search'
+import HazeText from '../HazeText.vue'
 
-defineProps<{ quotes: Quote[] }>()
+defineProps<{ quotes: Quote[]; loading?: boolean }>()
 
 const emit = defineEmits<{ (event: 'open-quote', quote: Quote): void }>()
 </script>
@@ -42,7 +49,7 @@ const emit = defineEmits<{ (event: 'open-quote', quote: Quote): void }>()
 }
 .quote-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
   gap: 10px;
 }
 .quote-card {
@@ -60,6 +67,10 @@ const emit = defineEmits<{ (event: 'open-quote', quote: Quote): void }>()
 .quote-card:hover {
   border-color: var(--accent-line);
   background: var(--surface-2);
+}
+.quote-pending {
+  pointer-events: none;
+  min-height: 105px;
 }
 .quote-text {
   font-size: 14px;

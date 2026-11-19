@@ -5,10 +5,14 @@
       <span v-if="metric?.stale" class="gauge-stale">stale</span>
     </div>
     <p class="gauge-value">
-      {{ display }}
+      <HazeText v-if="pending" :label="`Loading ${label}`" text="00%" />
+      <template v-else>{{ display }}</template>
       <span v-if="unitLabel" class="gauge-unit">{{ unitLabel }}</span>
     </p>
-    <p class="gauge-sub">{{ subline }}</p>
+    <p class="gauge-sub">
+      <HazeText v-if="pending" :label="`Loading ${label} details`" text="Resource usage" />
+      <template v-else>{{ subline }}</template>
+    </p>
     <div v-if="pct !== null" class="gauge-bar">
       <div class="gauge-fill" :class="tone" :style="{ width: `${pct}%` }"></div>
     </div>
@@ -22,6 +26,7 @@
 import { computed } from 'vue'
 import type { Metric } from '../../api'
 import { fmtBytes } from '../../lib/format'
+import HazeText from '../HazeText.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -29,11 +34,10 @@ const props = withDefaults(
     metric: Metric | null | undefined
     samples?: number[]
     max?: number
+    pending?: boolean
   }>(),
   { samples: () => [], max: 0 }
 )
-
-const available = computed(() => props.metric?.available ?? false)
 
 const display = computed(() => {
   const m = props.metric
@@ -55,7 +59,7 @@ const unitLabel = computed(() => {
 
 const subline = computed(() => {
   const m = props.metric
-  if (!m) return 'waiting for sample'
+  if (!m) return 'not available'
   if (!m.available) return m.reason || 'not available'
   if (props.label === 'RAM' || props.label === 'VRAM') {
     return `${pctOfTotal.value.toFixed(0)}% used`

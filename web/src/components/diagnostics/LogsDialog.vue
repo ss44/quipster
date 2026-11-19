@@ -4,24 +4,34 @@
       <header class="log-head">
         <div>
           <h2 class="log-title">Recent logs</h2>
-          <p class="log-sub">{{ logs.length }} lines from the API process</p>
+          <p class="log-sub">
+            <HazeText v-if="pending" label="Loading log count" text="Recent log lines" />
+            <template v-else>{{ logs ? `${logs.length} lines from the API process` : 'Log count unavailable' }}</template>
+          </p>
         </div>
         <div class="log-actions">
-          <v-btn size="small" variant="text" :loading="loading" @click="emit('refresh')">Refresh</v-btn>
-          <v-btn size="small" variant="tonal" @click="emit('copy')">Copy</v-btn>
+          <v-btn size="small" variant="text" :disabled="loading" @click="emit('refresh')">Refresh</v-btn>
+          <v-btn size="small" variant="tonal" :disabled="!logs?.length" @click="emit('copy')">Copy</v-btn>
           <v-btn size="small" variant="text" @click="open = false">Close</v-btn>
         </div>
       </header>
-      <pre class="log-lines">{{ logs.join('\n') || 'No log lines captured yet.' }}</pre>
+      <p v-if="error" role="alert" class="log-error">{{ error }}</p>
+      <pre class="log-lines"><HazeText v-if="pending" label="Loading logs" text="Recent application log entries" /><template v-else>{{ logs ? logs.join('\n') || 'No log lines captured yet.' : 'Logs unavailable.' }}</template></pre>
     </div>
   </v-dialog>
 </template>
 
 <script setup lang="ts">
-defineProps<{
-  logs: string[]
+import { computed } from 'vue'
+import HazeText from '../HazeText.vue'
+
+const props = defineProps<{
+  logs: string[] | null
   loading: boolean
+  error?: string
 }>()
+
+const pending = computed(() => props.loading && props.logs === null)
 
 const emit = defineEmits<{
   (event: 'refresh'): void
@@ -73,5 +83,10 @@ const open = defineModel<boolean>('open', { required: true })
   white-space: pre-wrap;
   color: var(--muted);
   background: #0b0d10;
+}
+.log-error {
+  margin: 0;
+  padding: 10px 16px;
+  color: var(--danger);
 }
 </style>

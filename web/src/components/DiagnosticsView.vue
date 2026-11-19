@@ -7,11 +7,15 @@
         <p class="page-sub">Hardware, resources and performance — without digging through log files.</p>
       </div>
       <div class="head-status">
-        <span class="status-dot" :class="stale ? 'err' : 'ok'"></span>
-        <span class="status-text">{{ stale ? 'Stream stale' : 'Live' }}</span>
+        <HazeText v-if="metricsPending" label="Loading diagnostics status" text="Live status" />
+        <template v-else>
+          <span class="status-dot" :class="stale ? 'err' : 'ok'"></span>
+          <span class="status-text">{{ !gauge ? 'Metrics unavailable' : stale ? 'Stream stale' : 'Live' }}</span>
+        </template>
         <span class="divider-y"></span>
-        <span class="status-text">{{ lastUpdateLabel }}</span>
-        <v-btn size="small" variant="text" :loading="loading" @click="refreshAll">Refresh</v-btn>
+        <HazeText v-if="metricsPending" label="Loading sample time" text="00:00:00" />
+        <span v-else class="status-text">{{ lastUpdate ? lastUpdateLabel : 'No sample' }}</span>
+        <v-btn size="small" variant="text" :disabled="loading" @click="refreshAll">Refresh</v-btn>
       </div>
     </header>
 
@@ -22,6 +26,8 @@
       :hardware="hardware"
       :gpu="gpu"
       :system="system"
+      :pending="!hardware && (pending.system || metricsPending)"
+      :system-pending="pending.system"
       :exporting="exporting"
       :copying="copying"
       :probing="probing"
@@ -31,21 +37,22 @@
       @reprobe="reprobe"
     />
 
-    <MetricsPanel :gauge="gauge" :history="history" :cpu-max="cpuMax" />
+    <MetricsPanel :gauge="gauge" :history="history" :cpu-max="cpuMax" :pending="metricsPending" />
 
     <div class="two-col">
-      <CachePanel :gauge="gauge" />
-      <PerformancePanel v-model:window="windowSel" :bench="bench" @change="loadBench" />
+      <CachePanel :gauge="gauge" :pending="metricsPending" />
+      <PerformancePanel v-model:window="windowSel" :bench="bench" :pending="pending.bench" @change="loadBench" />
     </div>
 
-    <OptimizationPanel :optimization="optimization" />
-    <EnvironmentPanel :system="system" :gpu="gpu" />
+    <OptimizationPanel :optimization="optimization" :pending="pending.optimization" />
+    <EnvironmentPanel :system="system" :gpu="gpu" :pending="pending.system" />
     <HintsPanel v-if="hints.length" :hints="hints" />
 
     <LogsDialog
       v-model:open="logOpen"
       :logs="logs"
       :loading="logLoading"
+      :error="logError"
       @refresh="loadLogs"
       @copy="copyLogs"
     />
@@ -53,7 +60,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, type Ref } from 'vue'
 import {
   api,
   diagnosticsStreamURL,
@@ -80,12 +87,15 @@ import LogsDialog from './diagnostics/LogsDialog.vue'
 import MetricsPanel from './diagnostics/MetricsPanel.vue'
 import OptimizationPanel from './diagnostics/OptimizationPanel.vue'
 import PerformancePanel from './diagnostics/PerformancePanel.vue'
+import HazeText from './HazeText.vue'
 
 const system = ref<SystemInfo | null>(null)
 const gauge = ref<GaugeSnapshot | null>(null)
 const bench = ref<Benchmarks | null>(null)
 const optimization = ref<MediaOptimizationStats | null>(null)
 const loading = ref(true)
+const pending = reactive({ system: true, bench: true, optimization: true })
+const metricsPending = ref(true)
 const error = ref('')
 const stale = ref(true)
 const lastUpdate = ref(0)
@@ -96,7 +106,8 @@ const exporting = ref(false)
 const copying = ref(false)
 const logOpen = ref(false)
 const logLoading = ref(false)
-const logs = ref<string[]>([])
+const logs = ref<string[] | null>(null)
+const logError = ref('')
 const history = reactive<MetricHistory>(createMetricHistory())
 
 let stream: EventSource | null = null
@@ -115,6 +126,7 @@ function toast(text: string, color = 'success') {
 
 function applyGauge(snap: GaugeSnapshot) {
   gauge.value = snap
+  metricsPending.value = false
   stale.value = false
   lastUpdate.value = Date.now()
   for (const key of HISTORY_KEYS) appendHistorySample(history, key, snap[key])
@@ -150,24 +162,14 @@ function onVisibility() {
   }
 }
 
-async function bootstrap() {
-  loading.value = true
-  error.value = ''
+async function loadSnapshot<T>(key: keyof typeof pending, target: Ref<T | null>, request: () => Promise<T>) {
   try {
-    const [sys, benchmarks, mediaOptimization] = await Promise.all([
-      api.diagnosticsSystem(),
-      api.diagnosticsBenchmarks(windowSel.value),
-      api.diagnosticsMediaOptimization(),
-    ])
-    system.value = sys
-    bench.value = benchmarks
-    optimization.value = mediaOptimization
+    target.value = await request()
   } catch (err) {
     error.value = (err as Error).message
+  } finally {
+    pending[key] = false
   }
-  await refreshGauge()
-  connectStream()
-  loading.value = false
 }
 
 async function refreshGauge() {
@@ -175,33 +177,25 @@ async function refreshGauge() {
     applyGauge(await api.diagnosticsMetrics())
   } catch {
     /* the SSE stream may still recover */
+  } finally {
+    metricsPending.value = false
   }
 }
 
 async function refreshAll() {
   loading.value = true
-  try {
-    const [sys, benchmarks, mediaOptimization] = await Promise.all([
-      api.diagnosticsSystem(),
-      api.diagnosticsBenchmarks(windowSel.value),
-      api.diagnosticsMediaOptimization(),
-    ])
-    system.value = sys
-    bench.value = benchmarks
-    optimization.value = mediaOptimization
-  } catch (err) {
-    error.value = (err as Error).message
-  }
-  await refreshGauge()
+  error.value = ''
+  await Promise.all([
+    loadSnapshot('system', system, api.diagnosticsSystem),
+    loadBench(),
+    loadSnapshot('optimization', optimization, api.diagnosticsMediaOptimization),
+    refreshGauge(),
+  ])
   loading.value = false
 }
 
 async function loadBench() {
-  try {
-    bench.value = await api.diagnosticsBenchmarks(windowSel.value)
-  } catch (err) {
-    toast((err as Error).message, 'error')
-  }
+  await loadSnapshot('bench', bench, () => api.diagnosticsBenchmarks(windowSel.value))
 }
 
 async function reprobe() {
@@ -266,23 +260,25 @@ async function openLogs() {
 
 async function loadLogs() {
   logLoading.value = true
+  logError.value = ''
   try {
     const res = await api.logs(1000)
     logs.value = res.lines
   } catch (err) {
-    toast((err as Error).message, 'error')
+    logError.value = (err as Error).message
   } finally {
     logLoading.value = false
   }
 }
 
 async function copyLogs() {
-  await copyText(logs.value.join('\n'))
+  await copyText((logs.value ?? []).join('\n'))
   toast('Log lines copied')
 }
 
 onMounted(() => {
-  void bootstrap()
+  void refreshAll()
+  connectStream()
   document.addEventListener('visibilitychange', onVisibility)
 })
 

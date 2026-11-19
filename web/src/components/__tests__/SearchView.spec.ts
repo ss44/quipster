@@ -109,6 +109,46 @@ afterEach(() => {
 })
 
 describe('SearchView landing', () => {
+  it('shows haze until both empty requests settle, then shows the empty library message', async () => {
+    let resolveQuotes!: (value: { quotes: Quote[] }) => void
+    let resolveExamples!: (value: { examples: string[] }) => void
+    vi.mocked(api.quotes).mockReturnValue(new Promise(resolve => { resolveQuotes = resolve }))
+    vi.mocked(api.examples).mockReturnValue(new Promise(resolve => { resolveExamples = resolve }))
+
+    await mountView('/')
+    expect(wrapper!.findAll('.quote-pending')).toHaveLength(4)
+    expect(wrapper!.text()).not.toContain('No indexed dialogue yet')
+    expect(wrapper!.find('.quote-pending button').exists()).toBe(false)
+
+    resolveQuotes({ quotes: [] })
+    await flushPromises()
+    expect(wrapper!.find('.haze-text').exists()).toBe(true)
+    resolveExamples({ examples: [] })
+    await flushPromises()
+    expect(wrapper!.find('.haze-text').exists()).toBe(false)
+    expect(wrapper!.text()).toContain('No indexed dialogue yet')
+  })
+
+  it('shows quotes immediately even if examples are still pending', async () => {
+    let resolveExamples!: (value: { examples: string[] }) => void
+    vi.mocked(api.examples).mockReturnValue(new Promise(resolve => { resolveExamples = resolve }))
+    vi.mocked(api.quotes).mockResolvedValue({ quotes: [quote()] })
+    await mountView('/')
+    expect(wrapper!.find('.haze-text').exists()).toBe(false)
+    expect(wrapper!.text()).toContain('A memorable line')
+    resolveExamples({ examples: [] })
+    await flushPromises()
+  })
+
+  it('settles failed landing requests without claiming the library is empty', async () => {
+    vi.mocked(api.quotes).mockRejectedValue(new Error('offline'))
+    vi.mocked(api.examples).mockRejectedValue(new Error('offline'))
+    await mountView('/')
+    expect(wrapper!.find('.haze-text').exists()).toBe(false)
+    expect(wrapper!.text()).not.toContain('No indexed dialogue yet')
+    expect(wrapper!.find('[role="alert"]').text()).toContain('could not be loaded')
+  })
+
   it('renders library quotes and opens the selected clip', async () => {
     const selected = quote()
     vi.mocked(api.quotes).mockResolvedValue({ quotes: [selected] })
@@ -142,6 +182,8 @@ describe('SearchView landing', () => {
     await mountView('/')
 
     expect(api.examples).toHaveBeenCalledTimes(1)
+    expect(wrapper!.text()).toContain('what do you mean')
+    expect(wrapper!.find('.haze-text').exists()).toBe(false)
     resolveQuotes()
     await flushPromises()
     expect(wrapper!.text()).toContain('what do you mean')
@@ -161,6 +203,19 @@ describe('SearchView landing', () => {
 })
 
 describe('SearchView results', () => {
+  it('replaces first-load haze with the returned match count and cards', async () => {
+    let resolveSearch!: (value: SearchResponse) => void
+    vi.mocked(api.search).mockReturnValue(new Promise(resolve => { resolveSearch = resolve }))
+    await mountView('/search?q=hello')
+    expect(wrapper!.find('[aria-label="Loading match count"]').exists()).toBe(true)
+    expect(wrapper!.findAll('.pending-scene')).toHaveLength(6)
+    resolveSearch(response())
+    await flushPromises()
+    expect(wrapper!.find('.haze-text').exists()).toBe(false)
+    expect(wrapper!.find('.results-count').text()).toBe('1')
+    expect(wrapper!.findAll('.scene-card')).toHaveLength(1)
+  })
+
   it('loads and composes results for the active query', async () => {
     vi.mocked(api.search).mockResolvedValue(response())
 

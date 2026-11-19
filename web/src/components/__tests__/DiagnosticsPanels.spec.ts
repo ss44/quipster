@@ -7,6 +7,7 @@ import CachePanel from '../diagnostics/CachePanel.vue'
 import HardwarePanel from '../diagnostics/HardwarePanel.vue'
 import HintsPanel from '../diagnostics/HintsPanel.vue'
 import OptimizationPanel from '../diagnostics/OptimizationPanel.vue'
+import MetricGauge from '../diagnostics/MetricGauge.vue'
 import type { DiagnosticHint } from '../../lib/diagnostics'
 
 function metric(value: number, extra: Partial<Metric> = {}): Metric {
@@ -124,10 +125,22 @@ describe('CachePanel', () => {
     expect(wrapper.find('.bar .fill').attributes('style')).toContain('width: 75%')
   })
 
-  it('shows a waiting state before the first storage sample', () => {
-    const wrapper = mount(CachePanel, { props: { gauge: null } })
-    expect(wrapper.text()).toContain('Waiting for storage sample')
+  it('distinguishes pending storage, unavailable storage and an empty sample', async () => {
+    const wrapper = mount(CachePanel, { props: { gauge: null, pending: true } })
+    expect(wrapper.find('[aria-label="Loading storage"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('0 B cached')
+    expect(wrapper.text()).not.toContain('load n/a')
+
+    await wrapper.setProps({ pending: false })
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Storage unavailable.')
     expect(wrapper.text()).toContain('load n/a')
+
+    await wrapper.setProps({ gauge: gauge() })
+    expect(wrapper.text()).toContain('No storage details reported.')
+    expect(wrapper.text()).toContain('No cache entries.')
+    expect(wrapper.text()).toContain('0 B cached')
+    expect(wrapper.text()).not.toContain('Waiting')
   })
 })
 
@@ -155,9 +168,42 @@ describe('OptimizationPanel', () => {
     expect(wrapper.text()).not.toContain('unknown_code')
   })
 
-  it('explains when nothing has been probed yet', () => {
-    const wrapper = mount(OptimizationPanel, { props: { optimization: null } })
+  it('distinguishes pending, unavailable and empty findings', async () => {
+    const wrapper = mount(OptimizationPanel, { props: { optimization: null, pending: true } })
+    expect(wrapper.find('[aria-label="Loading optimization findings"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('0 of 0')
+    expect(wrapper.text()).not.toContain('No probed media')
+
+    await wrapper.setProps({ pending: false })
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Optimization checks unavailable.')
+    expect(wrapper.text()).not.toContain('0 of 0')
+
+    await wrapper.setProps({ optimization: { updatedAt: 0, scanned: 0, recommended: 0, codes: {} } })
     expect(wrapper.text()).toContain('No probed media findings yet.')
+    expect(wrapper.text()).toContain('0 of 0 probed files flagged')
+  })
+})
+
+describe('MetricGauge', () => {
+  it('uses haze only while pending, not for null or unavailable metrics after a snapshot', async () => {
+    const wrapper = mount(MetricGauge, { props: { label: 'CPU', metric: null, pending: true } })
+    expect(wrapper.find('[aria-label="Loading CPU"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('n/a')
+
+    await wrapper.setProps({ pending: false })
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('n/a')
+    expect(wrapper.text()).toContain('not available')
+    expect(wrapper.text()).not.toContain('waiting')
+
+    await wrapper.setProps({ metric: metric(0, { available: false, reason: 'Probe unavailable' }) })
+    expect(wrapper.text()).toContain('n/a')
+    expect(wrapper.text()).toContain('Probe unavailable')
+
+    await wrapper.setProps({ metric: metric(0, { unit: 'percent' }) })
+    expect(wrapper.text()).toContain('0%')
+    expect(wrapper.text()).not.toContain('n/a')
   })
 })
 

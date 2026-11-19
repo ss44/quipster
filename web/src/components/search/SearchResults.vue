@@ -2,6 +2,7 @@
   <SearchResultsHeader
     :query="query"
     :results="results"
+    :loading="loading"
     :active-mode="activeMode"
     @set-mode="emit('set-mode', $event)"
   />

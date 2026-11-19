@@ -1,11 +1,14 @@
 <template>
   <v-dialog v-model="open" max-width="1120" scrollable transition="dialog-bottom-transition">
-    <div v-if="detail" class="clip-panel">
+    <div class="clip-panel">
       <header class="clip-head">
         <div class="clip-head-main">
           <p class="eyebrow">Clip studio</p>
-          <h2 class="clip-title">{{ titleLine }}</h2>
-          <p class="clip-path mono">{{ detail.media.path }}</p>
+          <h2 class="clip-title">
+            <HazeText v-if="detailLoading" label="Loading clip title" text="Film and episode" />
+            <template v-else>{{ detail ? titleLine : 'Clip unavailable' }}</template>
+          </h2>
+          <p v-if="detail" class="clip-path mono">{{ detail.media.path }}</p>
         </div>
         <button type="button" class="close-btn" aria-label="Close" @click="open = false">
           <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
@@ -14,7 +17,23 @@
         </button>
       </header>
 
-      <div class="clip-body">
+      <div v-if="detailLoading" class="clip-body">
+        <div class="player-col">
+          <div class="player">
+            <div class="preview-overlay"><HazeText label="Loading clip" text="Preparing your scene" /></div>
+          </div>
+        </div>
+        <aside class="transcript">
+          <header class="transcript-head"><span class="panel-title">Transcript</span></header>
+          <div class="scroll">
+            <p v-for="i in 4" :key="i" class="line line-pending">
+              <HazeText label="Loading subtitle line" text="Dialogue from this moment" />
+            </p>
+          </div>
+        </aside>
+      </div>
+      <p v-else-if="!detail" class="error-msg clip-load-error" role="alert">{{ clipError }}</p>
+      <div v-else class="clip-body">
         <section class="player-col">
           <div class="player">
             <video
@@ -29,8 +48,7 @@
               @error="onPreviewError"
             />
             <div v-if="previewLoading" class="preview-overlay">
-              <span class="spinner"></span>
-              <span>Preparing preview…</span>
+              <HazeText label="Preparing preview" text="Preparing preview" />
             </div>
           </div>
 
@@ -159,9 +177,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, clipStreamURL, type ChunkDetail, type CueDTO, type Hit } from '../api'
+import HazeText from './HazeText.vue'
 
 const open = ref(false)
 const detail = ref<ChunkDetail | null>(null)
+const detailLoading = ref(false)
 const hit = ref<Hit | null>(null)
 const sel = ref<[number, number]>([0, 0])
 const accurate = ref(false)
@@ -233,6 +253,8 @@ async function onOpenClip(e: Event) {
   const next = (e as CustomEvent).detail as Hit
   hit.value = next
   open.value = true
+  detail.value = null
+  detailLoading.value = true
   extending.value = false
   exhaustedBefore.value = false
   exhaustedAfter.value = false
@@ -259,6 +281,8 @@ async function onOpenClip(e: Event) {
   } catch (err) {
     if (requestSession !== session || !open.value) return
     clipError.value = (err as Error).message
+  } finally {
+    if (requestSession === session) detailLoading.value = false
   }
 }
 
@@ -509,18 +533,11 @@ function pad(value: number): string {
   color: var(--muted);
   pointer-events: none;
 }
-.spinner {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.15);
-  border-top-color: var(--accent);
-  animation: spin 0.8s linear infinite;
+.clip-load-error {
+  margin: 20px;
 }
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+.line.line-pending {
+  grid-template-columns: 1fr;
 }
 .trim {
   margin-top: 16px;

@@ -95,7 +95,9 @@
             </tr>
           </tbody>
         </table>
-        <p v-if="!fleet.length && !pending.length" class="idle">
+        <p v-if="views === null && !loadError" class="idle"><HazeText label="Loading worker nodes" text="Worker status and current processing jobs" /></p>
+        <p v-if="loadError" class="idle error-text" role="alert">Unable to load worker nodes. Retrying automatically.</p>
+        <p v-if="views !== null && !fleet.length && !pending.length" class="idle">
           No nodes yet — start one with <code class="mono">quipster node --server {{ origin }}</code> and approve it here.
         </p>
       </div>
@@ -106,15 +108,17 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api, type NodeView } from '../api'
+import HazeText from './HazeText.vue'
 
-const views = ref<NodeView[]>([])
+const views = ref<NodeView[] | null>(null)
+const loadError = ref(false)
 const busy = ref<number | null>(null)
 const origin = window.location.origin
 let timer: ReturnType<typeof setInterval> | null = null
 
-const pending = computed(() => views.value.filter((v) => v.node.status === 'pending'))
+const pending = computed(() => (views.value ?? []).filter((v) => v.node.status === 'pending'))
 const fleet = computed(() =>
-  views.value
+  (views.value ?? [])
     .filter((v) => v.node.status !== 'pending')
     .sort((a, b) => Number(b.online) - Number(a.online) || a.node.name.localeCompare(b.node.name))
 )
@@ -122,8 +126,9 @@ const fleet = computed(() =>
 async function refresh() {
   try {
     views.value = (await api.nodes()).nodes
+    loadError.value = false
   } catch {
-    /* the panel keeps the last known state on transient errors */
+    loadError.value = true
   }
 }
 

@@ -2,11 +2,12 @@
 import { computed, ref } from 'vue'
 import { useNow } from '@vueuse/core'
 import type { Job } from '../../api'
+import HazeText from '../HazeText.vue'
 import { fileBase, jobClockTime, jobDuration, statusClass } from '../../lib/jobs'
 
 // Filters operate on the snapshot's recent window; chips carry live counts so
 // an empty result is expected before clicking rather than surprising.
-const props = defineProps<{ jobs: Job[] }>()
+const props = defineProps<{ jobs: Job[]; state?: 'loading' | 'unavailable' }>()
 
 const now = useNow({ interval: 1000 })
 const nowMs = computed(() => now.value.getTime())
@@ -79,9 +80,11 @@ const filteredJobs = computed(() =>
   <section class="panel jobs">
     <header class="panel-header">
       <span>Recent jobs</span>
-      <span class="panel-hint">{{ filteredJobs.length }} shown</span>
+      <span v-if="!state" class="panel-hint">{{ filteredJobs.length }} shown</span>
     </header>
-    <div class="jobs-filters">
+    <p v-if="state === 'loading'" class="idle"><HazeText label="Loading recent jobs" text="Recent processing jobs and outcomes" /></p>
+    <p v-else-if="state === 'unavailable'" class="idle">Recent jobs unavailable. Waiting for reconnect.</p>
+    <div v-if="!state" class="jobs-filters">
       <div class="filter-row" role="group" aria-label="Filter jobs by status">
         <span class="filter-label">Status</span>
         <button
@@ -114,7 +117,7 @@ const filteredJobs = computed(() =>
         </button>
       </div>
     </div>
-    <div class="table-wrap">
+    <div v-if="!state" class="table-wrap">
       <table class="jobs-table">
         <thead>
           <tr>

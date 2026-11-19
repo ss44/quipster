@@ -1,10 +1,9 @@
 <template>
   <div v-if="loading" class="grid">
-    <div v-for="i in 6" :key="i" class="scene-card skeleton">
-      <div class="skeleton-thumb"></div>
-      <div class="skeleton-line w-70"></div>
-      <div class="skeleton-line w-95"></div>
-      <div class="skeleton-line w-45"></div>
+    <div v-for="i in 6" :key="i" class="scene-card pending-scene">
+      <HazeText class="pending-title" label="Loading result title" text="Film and episode" />
+      <HazeText label="Loading matching dialogue" text="Finding the lines you remember from your library" />
+      <HazeText class="pending-time" label="Loading scene time" text="00:00 - 00:00" />
     </div>
   </div>
 
@@ -29,6 +28,7 @@
 import type { Hit, SearchMode, SearchResponse } from '../../api'
 import BrandLogo from '../BrandLogo.vue'
 import HitCard from './HitCard.vue'
+import HazeText from '../HazeText.vue'
 
 defineProps<{
   results: SearchResponse | null
@@ -42,39 +42,28 @@ const emit = defineEmits<{ (event: 'open-clip', hit: Hit): void }>()
 <style scoped>
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
   gap: 16px;
 }
-.skeleton {
+.pending-scene {
   pointer-events: none;
   display: flex;
   flex-direction: column;
+  justify-content: center;
+  gap: 22px;
+  min-height: 260px;
+  padding: 24px;
   background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
 }
-.skeleton-thumb {
-  aspect-ratio: 16/9;
-  background: var(--surface-2);
+.pending-title {
+  font-size: 18px;
 }
-.skeleton-line {
-  height: 10px;
-  margin: 14px 16px 0;
-  border-radius: 4px;
-  background: var(--surface-2);
-}
-.skeleton .skeleton-line:last-child {
-  margin-bottom: 16px;
-}
-.w-45 {
-  width: 45%;
-}
-.w-70 {
-  width: 70%;
-}
-.w-95 {
-  width: 95%;
+.pending-time {
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 .empty {
   padding: 56px 0;

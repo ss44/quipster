@@ -1,11 +1,11 @@
 <template>
   <section class="gauges">
-    <MetricGauge label="CPU" :metric="gauge?.cpu" :samples="history.cpu" :max="100" />
-    <MetricGauge label="Process CPU" :metric="gauge?.processCpu" :samples="history.processCpu" :max="cpuMax" />
-    <MetricGauge label="RAM" :metric="gauge?.ram" :samples="history.ram" :max="100" />
-    <MetricGauge label="VRAM" :metric="gauge?.vram" :samples="history.vram" :max="100" />
-    <MetricGauge label="GPU" :metric="gauge?.gpu" :samples="history.gpu" :max="100" />
-    <MetricGauge label="Swap" :metric="gauge?.swap" />
+    <MetricGauge label="CPU" :metric="gauge?.cpu" :samples="history.cpu" :max="100" :pending="pending" />
+    <MetricGauge label="Process CPU" :metric="gauge?.processCpu" :samples="history.processCpu" :max="cpuMax" :pending="pending" />
+    <MetricGauge label="RAM" :metric="gauge?.ram" :samples="history.ram" :max="100" :pending="pending" />
+    <MetricGauge label="VRAM" :metric="gauge?.vram" :samples="history.vram" :max="100" :pending="pending" />
+    <MetricGauge label="GPU" :metric="gauge?.gpu" :samples="history.gpu" :max="100" :pending="pending" />
+    <MetricGauge label="Swap" :metric="gauge?.swap" :pending="pending" />
   </section>
 </template>
 
@@ -18,6 +18,7 @@ defineProps<{
   gauge: GaugeSnapshot | null
   history: MetricHistory
   cpuMax: number
+  pending?: boolean
 }>()
 </script>
 
