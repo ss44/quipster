@@ -101,18 +101,33 @@ describe('ClipModal embedded subtitles editor', () => {
     const initialVideo = qs<HTMLVideoElement>('video')!
     const initialSrc = initialVideo.getAttribute('src')
 
-    // Panel starts collapsed with burn-in off and no live overlay.
+    // Panel starts collapsed with transcript expanded, burn-in off, and no live overlay.
+    expect(qs('#clip-transcript-body')).not.toBeNull()
     expect(qs('#subtitle-style-body')).toBeNull()
     expect(qs('.sub-overlay-text')).toBeNull()
 
-    // Enabling burn-in auto-expands the editor, switches Fast cut -> Precise,
-    // and displays the live subtitle overlay without reloading the preview clip.
+    // Clicking the Subtitles header opens the editor and collapses the transcript.
+    qs<HTMLButtonElement>('.sub-collapse-btn')!.click()
+    await flushPromises()
+    expect(qs('#subtitle-style-body')).not.toBeNull()
+    expect(qs('#clip-transcript-body')).toBeNull()
+
+    // Clicking the Transcript header re-expands the transcript and collapses Subtitles.
+    qs<HTMLButtonElement>('.transcript-toggle')!.click()
+    await flushPromises()
+    expect(qs('#clip-transcript-body')).not.toBeNull()
+    expect(qs('#subtitle-style-body')).toBeNull()
+
+    // Enabling burn-in auto-expands the editor, collapses the transcript,
+    // switches Fast cut -> Precise, and displays the live subtitle overlay
+    // without reloading the preview clip.
     const toggle = qs<HTMLInputElement>('input[aria-label="Embed subtitles"]')!
     toggle.checked = true
     toggle.dispatchEvent(new Event('change'))
     await flushPromises()
 
     expect(qs('#subtitle-style-body')).not.toBeNull()
+    expect(qs('#clip-transcript-body')).toBeNull()
     expect(qs('.sub-overlay-text')?.textContent).toBe('First subtitle line')
     expect(qs<HTMLVideoElement>('video')).toBe(initialVideo)
     expect(qs<HTMLVideoElement>('video')!.getAttribute('src')).toBe(initialSrc)
