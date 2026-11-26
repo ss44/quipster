@@ -12,7 +12,7 @@
 out=""
 for arg in "$@"; do
 	case "$arg" in
-		*.mp4|*.mkv) out="$arg";;
+		*.mp4|*.mkv|*.gif) out="$arg";;
 	esac
 done
 
@@ -37,7 +37,7 @@ fi
 
 for arg in "$@"; do
 	case "$arg" in
-		*.mp4|*.mkv) echo "mock data" > "$arg";;
+		*.mp4|*.mkv|*.gif) echo "mock data" > "$arg";;
 	esac
 done
 echo "out_time_us=1000000"

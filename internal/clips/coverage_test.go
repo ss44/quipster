@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -76,15 +77,22 @@ func TestEncodingSettings(t *testing.T) {
 	defaults := New(nil, Config{}).Config()
 	assert.Equal(t, "640:-2", defaults.PreviewRes)
 	assert.Equal(t, "1280:-2", defaults.AccurateRes)
+	assert.Equal(t, "480:-2", defaults.GifRes)
+	assert.Equal(t, 12, defaults.GifFPS)
+	assert.Equal(t, 10.0, defaults.MaxGifSec)
 	for _, value := range []string{"bad", "640:0", "641:480", "-2:-2", "640:480:evil", "999999:480", "640:NaN"} {
 		t.Run(value, func(t *testing.T) {
-			cfg := New(nil, Config{PreviewRes: value, AccurateRes: value, CPUPreset: "invalid"}).Config()
+			cfg := New(nil, Config{PreviewRes: value, AccurateRes: value, GifRes: value, GifFPS: 99, CPUPreset: "invalid"}).Config()
 			assert.Equal(t, defaults, cfg)
 		})
 	}
-	cfg := New(nil, Config{PreviewRes: "480:-2", AccurateRes: "854:480", CPUPreset: "superfast"}).Config()
+	assert.Equal(t, 12, normalizeGifFPS(-1, 12))
+	cfg := New(nil, Config{PreviewRes: "480:-2", AccurateRes: "854:480", GifRes: "360:-2", GifFPS: 15, MaxGifSec: 8, CPUPreset: "superfast"}).Config()
 	assert.Equal(t, "480:-2", cfg.PreviewRes)
 	assert.Equal(t, "854:480", cfg.AccurateRes)
+	assert.Equal(t, "360:-2", cfg.GifRes)
+	assert.Equal(t, 15, cfg.GifFPS)
+	assert.Equal(t, 8.0, cfg.MaxGifSec)
 	assert.Equal(t, "superfast", cfg.CPUPreset)
 	assert.Equal(t, "-2:480", normalizeResolution("-2:480", "640:-2"))
 }
@@ -126,12 +134,15 @@ func TestEncodingArguments(t *testing.T) {
 
 func TestProfileCacheKeys(t *testing.T) {
 	s := New(nil, Config{})
-	other := New(nil, Config{PreviewRes: "480:-2", AccurateRes: "854:480", CPUPreset: "superfast"})
-	for _, mode := range []string{"preview", "accurate"} {
+	other := New(nil, Config{PreviewRes: "480:-2", AccurateRes: "854:480", GifRes: "360:-2", GifFPS: 15, CPUPreset: "superfast"})
+	for _, mode := range []string{"preview", "accurate", "gif"} {
 		r := Request{MediaID: 1, Start: 2, End: 4, Mode: mode}
 		assert.NotEqual(t, s.CacheKey(r), other.CacheKey(r))
 		assert.Equal(t, s.CacheKey(r), New(nil, Config{}).CacheKey(r))
 	}
+	// GIF cache key is independent of x264 CPUPreset.
+	gifReq := Request{MediaID: 1, Start: 2, End: 4, Mode: "gif"}
+	assert.Equal(t, s.CacheKey(gifReq), New(nil, Config{CPUPreset: "superfast"}).CacheKey(gifReq))
 	r := Request{MediaID: 1, Start: 2, End: 4, Mode: "fast"}
 	assert.Equal(t, s.CacheKey(r), other.CacheKey(r))
 	assert.Equal(t, CacheKey(1, 2, 4, "fast", 0), s.CacheKey(r))
@@ -359,6 +370,45 @@ func TestProduceCPUTranscodeFailure(t *testing.T) {
 	_, _, err = s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "accurate cut failed")
+
+	_, _, err = s.Produce(context.Background(), Request{MediaID: id, Start: 10, End: 15, Mode: "gif", PadMs: 250})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gif cut failed")
+}
+
+// TestGifProgressAndRegisterRendered covers RunWithProgress in gif mode,
+// RegisterRendered accepting gif containers, and MaxClipSec capping MaxGifSec.
+func TestGifProgressAndRegisterRendered(t *testing.T) {
+	mockCreateOutput(t)
+	s, st := newTestService(t)
+	forceHWOff(s)
+	id := seedMedia(t, st, "/fake/source", 0)
+
+	var reports []float64
+	path, ext, err := s.RunWithProgress(context.Background(),
+		Request{MediaID: id, Start: 10, End: 15, Mode: "gif", PadMs: 250},
+		func(p float64) { reports = append(reports, p) })
+	require.NoError(t, err)
+	assert.Equal(t, "gif", ext)
+	require.FileExists(t, path)
+	assert.GreaterOrEqual(t, len(reports), 2)
+
+	// RegisterRendered accepts gif and rejects unknown containers.
+	err = s.RegisterRendered("nodegifkey", "gif", strings.NewReader("GIF89a"))
+	require.NoError(t, err)
+	entry, cerr := s.Cached("nodegifkey")
+	require.NoError(t, cerr)
+	require.NotNil(t, entry)
+	assert.Equal(t, ".gif", filepath.Ext(entry.Path))
+
+	err = s.RegisterRendered("badkey", "webm", strings.NewReader("bad"))
+	require.Error(t, err)
+
+	// When MaxClipSec is smaller than MaxGifSec, Validate enforces MaxClipSec.
+	tight := New(st, Config{CacheDir: t.TempDir(), MaxClipSec: 4, MaxGifSec: 10})
+	_, _, err = tight.Validate(Request{MediaID: id, Start: 10, End: 16, Mode: "gif", PadMs: 0})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gif clip span")
 }
 
 // TestProduceHWPreviewSuccess covers the vaapi success path of cutPreview and

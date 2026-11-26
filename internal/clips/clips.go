@@ -35,8 +35,11 @@ type Config struct {
 	CacheDir     string
 	PreviewRes   string // width:height; one dimension may be -2 to preserve aspect ratio
 	AccurateRes  string
+	GifRes       string // animated GIF resolution; defaults to 480:-2 for social-app file sizes
 	CPUPreset    string // optional x264 override; preview defaults to ultrafast, accurate to veryfast
 	MaxClipSec   float64
+	MaxGifSec    float64 // hard duration cap for GIF exports (defaults to 10s)
+	GifFPS       int     // animated GIF framerate (1..30, defaults to 12)
 	DefaultPadMs int
 	LongCutSec   float64           // accurate cuts longer than this run as async jobs
 	Hw           *hardware.Monitor // detected hw backend; nil = cpu only
@@ -61,6 +64,9 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.MaxClipSec <= 0 {
 		cfg.MaxClipSec = 120
 	}
+	if cfg.MaxGifSec <= 0 {
+		cfg.MaxGifSec = 10
+	}
 	if cfg.DefaultPadMs <= 0 {
 		cfg.DefaultPadMs = 250
 	}
@@ -69,12 +75,28 @@ func normalizeConfig(cfg Config) Config {
 	}
 	cfg.PreviewRes = normalizeResolution(cfg.PreviewRes, "640:-2")
 	cfg.AccurateRes = normalizeResolution(cfg.AccurateRes, "1280:-2")
+	cfg.GifRes = normalizeResolution(cfg.GifRes, "480:-2")
+	cfg.GifFPS = normalizeGifFPS(cfg.GifFPS, 12)
 	if cfg.CPUPreset != "" && !slices.Contains([]string{"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"}, cfg.CPUPreset) {
 		log.Printf("[clips] invalid CPU preset %q; using mode defaults", cfg.CPUPreset)
 		cfg.CPUPreset = ""
 	}
-	log.Printf("[clips] settings preview=%s accurate=%s cpu_preset=%q (blank uses mode defaults); fast mode copies original streams", cfg.PreviewRes, cfg.AccurateRes, cfg.CPUPreset)
+	log.Printf("[clips] settings preview=%s accurate=%s gif=%s@%dfps max_gif=%.0fs cpu_preset=%q (blank uses mode defaults); fast mode copies original streams",
+		cfg.PreviewRes, cfg.AccurateRes, cfg.GifRes, cfg.GifFPS, cfg.MaxGifSec, cfg.CPUPreset)
 	return cfg
+}
+
+// normalizeGifFPS clamps GIF framerates to a safe 1..30 fps window so an
+// accidental misconfiguration cannot explode output file sizes or CPU load.
+func normalizeGifFPS(value, fallback int) int {
+	if value == 0 {
+		return fallback
+	}
+	if value >= 1 && value <= 30 {
+		return value
+	}
+	log.Printf("[clips] invalid GIF fps %d; using %d", value, fallback)
+	return fallback
 }
 
 // normalizeResolution accepts only even dimensions, not arbitrary filter expressions.
@@ -112,9 +134,9 @@ func (s *Service) CacheKey(r Request) string {
 
 // Request describes one clip render: the media, the [Start, End] window in
 // seconds, symmetric padding in milliseconds and the cut mode
-// (fast | preview | accurate).
+// (fast | preview | accurate | gif).
 type Request struct {
-	Mode    string // fast | preview | accurate
+	Mode    string // fast | preview | accurate | gif
 	MediaID int64
 	Start   float64
 	End     float64
@@ -128,17 +150,24 @@ var ErrMediaArchived = errors.New("media is archived")
 // Validate checks clip parameters against SQLite and caps.
 func (s *Service) Validate(r Request) (*store.MediaFile, float64, error) {
 	switch r.Mode {
-	case "fast", "accurate", "preview":
+	case "fast", "accurate", "preview", "gif":
 	default:
-		return nil, 0, fmt.Errorf("mode must be fast, preview or accurate")
+		return nil, 0, fmt.Errorf("mode must be fast, preview, accurate or gif")
 	}
 	if r.End <= r.Start {
 		return nil, 0, fmt.Errorf("start must be before end")
 	}
 	pad := float64(r.PadMs) / 1000
 	span := (r.End - r.Start) + 2*pad
-	if span > s.renderer.cfg.MaxClipSec+0.001 {
-		return nil, 0, fmt.Errorf("clip span %.1fs exceeds max %.0fs", span, s.renderer.cfg.MaxClipSec)
+	maxSec := s.renderer.cfg.MaxClipSec
+	if r.Mode == "gif" && s.renderer.cfg.MaxGifSec < maxSec {
+		maxSec = s.renderer.cfg.MaxGifSec
+	}
+	if span > maxSec+0.001 {
+		if r.Mode == "gif" {
+			return nil, 0, fmt.Errorf("gif clip span %.1fs exceeds max %.0fs", span, maxSec)
+		}
+		return nil, 0, fmt.Errorf("clip span %.1fs exceeds max %.0fs", span, maxSec)
 	}
 	m, err := s.st.GetMedia(r.MediaID)
 	if err != nil {
@@ -291,6 +320,71 @@ func (s *Renderer) cutAccurate(ctx context.Context, src string, start, dur float
 	return out, nil
 }
 
+// cutGif renders a social-friendly looping animated GIF without audio,
+// preferring hardware-accelerated decoding when available and falling back to
+// CPU decoding on failure.
+func (s *Renderer) cutGif(ctx context.Context, src string, start, dur float64, outBase string, report func(float64)) (string, error) {
+	out := outBase + ".gif"
+	if err := s.runGif(ctx, src, out, start, dur, report); err != nil {
+		removePartial(out)
+		return "", fmt.Errorf("gif cut failed: %w", err)
+	}
+	return out, nil
+}
+
+// gifFilter builds the single-pass palettegen/paletteuse filtergraph for
+// social-friendly animated GIFs: Lanczos scaling, motion-focused palette
+// generation, Bayer dithering (avoiding temporal flicker), and rectangle
+// inter-frame differencing for compact file sizes.
+func gifFilter(res string, fps int) string {
+	return fmt.Sprintf(
+		"fps=%d,scale=%s:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle",
+		fps, res,
+	)
+}
+
+// gifArgs builds the ffmpeg invocation for an animated GIF cut. Hardware
+// acceleration applies to decoding only when hwDecode is non-empty; palette
+// generation and GIF encoding always run on the CPU.
+func gifArgs(hwDecode []string, res string, fps int, src string, start, dur float64, out string, progress bool) []string {
+	var prefix []string
+	if progress {
+		prefix = []string{"-progress", "pipe:1", "-nostats"}
+	}
+	return slices.Concat(
+		[]string{"-v", "error", "-y"},
+		prefix,
+		hwDecode,
+		[]string{"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"},
+		[]string{"-an", "-dn", "-sn", "-map_chapters", "-1"},
+		[]string{"-vf", gifFilter(res, fps), "-loop", "0", out},
+	)
+}
+
+// runGif executes the GIF render, preferring hardware decode into system
+// memory when available and retrying on software decode when hardware decode
+// fails.
+func (s *Renderer) runGif(ctx context.Context, src, out string, start, dur float64, report func(float64)) error {
+	hwCaps := s.cfg.Hw.Capabilities()
+	progress := report != nil
+	run := func(args []string) error { return runFFmpeg(ctx, args) }
+	if progress {
+		run = func(args []string) error { return runFFmpegProgress(ctx, args, dur, report) }
+	}
+	if hwDecode := hwCaps.DecodeArgs(); len(hwDecode) > 0 {
+		if err := run(gifArgs(hwDecode, s.cfg.GifRes, s.cfg.GifFPS, src, start, dur, out, progress)); err != nil {
+			log.Printf("[clips] %s gif decode failed (%v), falling back to cpu", hwCaps.Backend, err)
+			s.cfg.Hw.RecordFallback(err.Error(), time.Now().UnixMilli())
+			removePartial(out)
+		} else {
+			s.cfg.Hw.RecordHW()
+			return nil
+		}
+	}
+	s.cfg.Hw.RecordCPU()
+	return run(gifArgs(nil, s.cfg.GifRes, s.cfg.GifFPS, src, start, dur, out, progress))
+}
+
 // audioMapArgs maps the media's chosen English audio stream. Optional '?' keeps
 // ffmpeg from failing if a stale probe points past the track list.
 func audioMapArgs(ordinal int) []string {
@@ -436,7 +530,7 @@ func runFFmpeg(ctx context.Context, args []string) error {
 
 // RunWithProgress renders a clip while reporting 0..1 progress (for async jobs).
 func (s *Service) RunWithProgress(ctx context.Context, r Request, report func(float64)) (string, string, error) {
-	if r.Mode != "accurate" {
+	if r.Mode != "accurate" && r.Mode != "gif" {
 		return s.Produce(ctx, r)
 	}
 	return s.produce(ctx, r, report)

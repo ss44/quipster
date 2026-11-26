@@ -47,6 +47,7 @@ type config struct {
 	apiToken       string
 	previewRes     string
 	accurateRes    string
+	gifRes         string
 	cpuPreset      string
 	subWorkers     int
 	indexWorkers   int
@@ -54,6 +55,8 @@ type config struct {
 	scanIntvl      time.Duration
 	padMs          int
 	maxClipSec     float64
+	maxGifSec      float64
+	gifFPS         int
 	cacheMaxGB     float64
 	longCutSec     float64
 	probeTimeout   time.Duration
@@ -110,6 +113,7 @@ func loadConfig() config {
 		apiToken:       os.Getenv("API_TOKEN"),
 		padMs:          envInt("CLIP_PAD_MS", 250),
 		maxClipSec:     envFloat("MAX_CLIP_SEC", 120),
+		maxGifSec:      envFloat("MAX_GIF_SEC", 10),
 		cacheMaxGB:     envFloat("CACHE_MAX_GB", 10),
 		longCutSec:     envFloat("LONG_CUT_SEC", 20),
 		probeTimeout:   parseDuration(envStr("PROBE_TIMEOUT", "")),
@@ -119,6 +123,8 @@ func loadConfig() config {
 		archiveGrace:   parseDuration(envStr("ARCHIVE_GRACE", "48h")),
 		previewRes:     envStr("CLIP_PREVIEW_RES", ""),
 		accurateRes:    envStr("CLIP_ACCURATE_RES", ""),
+		gifRes:         envStr("CLIP_GIF_RES", ""),
+		gifFPS:         envInt("CLIP_GIF_FPS", 12),
 		cpuPreset:      envStr("CLIP_CPU_PRESET", ""),
 		mcpEnabled:     envBool("MCP_ENABLED", false),
 		mcpStdio:       strings.EqualFold(strings.TrimSpace(os.Getenv("MCP_TRANSPORT")), "stdio"),
@@ -230,10 +236,13 @@ func assembleApp(parent context.Context, cfg config, st *store.Store, ix *indexe
 	clipSvc := clips.New(st, clips.Config{
 		CacheDir:     cfg.cacheDir,
 		MaxClipSec:   cfg.maxClipSec,
+		MaxGifSec:    cfg.maxGifSec,
 		DefaultPadMs: cfg.padMs,
 		LongCutSec:   cfg.longCutSec,
 		PreviewRes:   cfg.previewRes,
 		AccurateRes:  cfg.accurateRes,
+		GifRes:       cfg.gifRes,
+		GifFPS:       cfg.gifFPS,
 		CPUPreset:    cfg.cpuPreset,
 		Hw:           hw,
 	})
@@ -505,8 +514,11 @@ func newNodeService(cfg config, st *store.Store, pipe *probe.Pipeline, clipSvc *
 		Clips: nodes.ClipSettings{
 			PreviewRes:   ccfg.PreviewRes,
 			AccurateRes:  ccfg.AccurateRes,
+			GifRes:       ccfg.GifRes,
 			CPUPreset:    ccfg.CPUPreset,
 			MaxClipSec:   ccfg.MaxClipSec,
+			MaxGifSec:    ccfg.MaxGifSec,
+			GifFPS:       ccfg.GifFPS,
 			DefaultPadMs: ccfg.DefaultPadMs,
 		},
 		Version:           version,

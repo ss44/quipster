@@ -563,7 +563,7 @@ type createClipIn struct {
 	MediaID  int64   `json:"mediaId"`
 	Start    float64 `json:"start"`
 	End      float64 `json:"end"`
-	Mode     string  `json:"mode,omitempty" jsonschema:"fast (default, stream copy), preview, or accurate"`
+	Mode     string  `json:"mode,omitempty" jsonschema:"fast (default, stream copy), preview, accurate, or gif (animated GIF, max 10s)"`
 	Download bool    `json:"download,omitempty" jsonschema:"return an attachment download URL"`
 }
 

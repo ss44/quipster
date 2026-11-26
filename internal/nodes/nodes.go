@@ -60,8 +60,11 @@ const (
 type ClipSettings struct {
 	PreviewRes   string  `json:"previewRes"`
 	AccurateRes  string  `json:"accurateRes"`
+	GifRes       string  `json:"gifRes,omitempty"`
 	CPUPreset    string  `json:"cpuPreset,omitempty"`
 	MaxClipSec   float64 `json:"maxClipSec"`
+	MaxGifSec    float64 `json:"maxGifSec,omitempty"`
+	GifFPS       int     `json:"gifFps,omitempty"`
 	DefaultPadMs int     `json:"defaultPadMs"`
 }
 

@@ -471,8 +471,9 @@ func ffmpegCodecs(ctx context.Context, flag string) []string {
 func safeConfig() map[string]string {
 	keys := []string{
 		"ROLE", "ADDR", "HWACCEL", "CLIP_PREVIEW_RES", "CLIP_ACCURATE_RES",
-		"CLIP_CPU_PRESET", "SUBTITLE_WORKERS", "INDEX_WORKERS", "CLIP_WORKERS",
-		"CACHE_MAX_GB", "MAX_CLIP_SEC", "PROBE_TIMEOUT", "SCAN_INTERVAL",
+		"CLIP_GIF_RES", "CLIP_GIF_FPS", "CLIP_CPU_PRESET",
+		"SUBTITLE_WORKERS", "INDEX_WORKERS", "CLIP_WORKERS",
+		"CACHE_MAX_GB", "MAX_CLIP_SEC", "MAX_GIF_SEC", "PROBE_TIMEOUT", "SCAN_INTERVAL",
 	}
 	out := make(map[string]string, len(keys))
 	for _, k := range keys {

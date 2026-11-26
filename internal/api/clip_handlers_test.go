@@ -101,3 +101,44 @@ func TestClipStreamAsyncAccurate(t *testing.T) {
 		t.Errorf("jobId = %v", body["jobId"])
 	}
 }
+
+func TestClipStreamGif(t *testing.T) {
+	st, deps := newEnv(t)
+	id := seedMedia(t, st)
+	h := Router(deps)
+
+	// GIF clips longer than MaxGifSec (10s default) are rejected with 400.
+	rr := do(t, h, http.MethodGet,
+		fmt.Sprintf("/api/clips/stream?mediaId=%d&start=0&end=11&mode=gif&padMs=0", id), nil, nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("long gif status = %d, want 400, body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "gif clip span") {
+		t.Errorf("long gif body = %q", rr.Body.String())
+	}
+
+	// Cached GIF is served with image/gif Content-Type and .gif attachment name.
+	req := clips.Request{MediaID: id, Start: 1, End: 4, Mode: "gif", PadMs: 250}
+	key := deps.Clips.CacheKey(req)
+	path := filepath.Join(t.TempDir(), "clip.gif")
+	if err := os.WriteFile(path, []byte("GIF89a-mock"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertCacheEntry(key, path, "clip", 11); err != nil {
+		t.Fatal(err)
+	}
+	rr = do(t, h, http.MethodGet,
+		fmt.Sprintf("/api/clips/stream?mediaId=%d&start=1&end=4&mode=gif&padMs=250&download=1", id), nil, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("gif status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != "image/gif" {
+		t.Errorf("content type = %q, want image/gif", got)
+	}
+	if cd := rr.Header().Get("Content-Disposition"); !strings.Contains(cd, ".gif\"") {
+		t.Errorf("content disposition = %q, want .gif filename", cd)
+	}
+	if rr.Body.String() != "GIF89a-mock" {
+		t.Errorf("body = %q", rr.Body.String())
+	}
+}

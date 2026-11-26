@@ -1,7 +1,7 @@
 #!/bin/sh
 for arg in "$@"; do
     case "$arg" in
-        *.mp4|*.mkv)
+        *.mp4|*.mkv|*.gif)
             echo "mock data" > "$arg"
             ;;
     esac

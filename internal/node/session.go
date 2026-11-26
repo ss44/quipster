@@ -477,8 +477,11 @@ func (s *session) runClip(ctx context.Context, w *nodes.Work, report func(float6
 		CacheDir:     s.cfg.CacheDir,
 		PreviewRes:   w.Clips.PreviewRes,
 		AccurateRes:  w.Clips.AccurateRes,
+		GifRes:       w.Clips.GifRes,
 		CPUPreset:    w.Clips.CPUPreset,
 		MaxClipSec:   w.Clips.MaxClipSec,
+		MaxGifSec:    w.Clips.MaxGifSec,
+		GifFPS:       w.Clips.GifFPS,
 		DefaultPadMs: w.Clips.DefaultPadMs,
 		Hw:           s.hw,
 	})

@@ -72,12 +72,21 @@ export interface Suggestion {
   textMarked: string
 }
 
+export interface ClipLimits {
+  maxClipSec: number
+  maxGifSec: number
+  defaultPadMs: number
+  gifRes: string
+  gifFps: number
+}
+
 export interface ChunkDetail {
   chunk: { id: number; mediaFileId: number; startCueIdx: number; endCueIdx: number; text: string }
   media: MediaFile
   cues: CueDTO[]
   contextBefore: CueDTO[]
   contextAfter: CueDTO[]
+  clipLimits?: ClipLimits
 }
 
 export interface MediaFile {
@@ -403,13 +412,20 @@ export const api = {
 
 export const diagnosticsStreamURL = '/api/admin/diagnostics/stream'
 
-export function clipStreamURL(hit: Hit, start: number, end: number, mode: string, download: boolean): string {
+export function clipStreamURL(
+  hit: Hit,
+  start: number,
+  end: number,
+  mode: string,
+  download: boolean,
+  padMs = 250,
+): string {
   const p = new URLSearchParams({
     mediaId: String(hit.mediaId),
     start: start.toFixed(3),
     end: end.toFixed(3),
     mode,
-    padMs: '250',
+    padMs: String(padMs),
   })
   if (download) p.set('download', '1')
   return `/api/clips/stream?${p.toString()}`

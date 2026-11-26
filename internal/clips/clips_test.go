@@ -58,6 +58,15 @@ func TestNew(t *testing.T) {
 	if c.LongCutSec != 20 {
 		t.Errorf("expected 20, got %f", c.LongCutSec)
 	}
+	if c.MaxGifSec != 10 {
+		t.Errorf("expected MaxGifSec 10, got %f", c.MaxGifSec)
+	}
+	if c.GifRes != "480:-2" {
+		t.Errorf("expected GifRes 480:-2, got %q", c.GifRes)
+	}
+	if c.GifFPS != 12 {
+		t.Errorf("expected GifFPS 12, got %d", c.GifFPS)
+	}
 }
 
 func TestValidate(t *testing.T) {
@@ -75,6 +84,9 @@ func TestValidate(t *testing.T) {
 		{"valid fast", Request{MediaID: id, Start: 10, End: 20, Mode: "fast", PadMs: 0}, false},
 		{"valid preview", Request{MediaID: id, Start: 10, End: 20, Mode: "preview", PadMs: 0}, false},
 		{"valid accurate", Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250}, false},
+		{"valid gif", Request{MediaID: id, Start: 10, End: 19.5, Mode: "gif", PadMs: 250}, false},
+		{"gif exceeds max duration", Request{MediaID: id, Start: 10, End: 20.5, Mode: "gif", PadMs: 0}, true},
+		{"gif exceeds max with pad", Request{MediaID: id, Start: 10, End: 19.6, Mode: "gif", PadMs: 250}, true},
 		{"invalid mode", Request{MediaID: id, Start: 10, End: 20, Mode: "unknown", PadMs: 0}, true},
 		{"start >= end", Request{MediaID: id, Start: 20, End: 10, Mode: "fast", PadMs: 0}, true},
 		{"exceeds max duration", Request{MediaID: id, Start: 10, End: 50, Mode: "fast", PadMs: 0}, true},
@@ -201,12 +213,14 @@ func TestProduce(t *testing.T) {
 	id := seedMedia(t, st, "/fake/movie.mp4", 0)
 
 	tests := []struct {
-		name string
-		req  Request
+		name    string
+		wantExt string
+		req     Request
 	}{
-		{"fast mode", Request{MediaID: id, Start: 10, End: 20, Mode: "fast", PadMs: 250}},
-		{"preview mode", Request{MediaID: id, Start: 10, End: 20, Mode: "preview", PadMs: 250}},
-		{"accurate mode", Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250}},
+		{"fast mode", "mp4", Request{MediaID: id, Start: 10, End: 20, Mode: "fast", PadMs: 250}},
+		{"preview mode", "mp4", Request{MediaID: id, Start: 10, End: 20, Mode: "preview", PadMs: 250}},
+		{"accurate mode", "mp4", Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250}},
+		{"gif mode", "gif", Request{MediaID: id, Start: 10, End: 15, Mode: "gif", PadMs: 250}},
 	}
 
 	for _, tc := range tests {
@@ -215,8 +229,8 @@ func TestProduce(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Produce() error = %v", err)
 			}
-			if ext != "mp4" && ext != "mkv" {
-				t.Errorf("expected mp4 or mkv, got %v", ext)
+			if ext != tc.wantExt && (tc.wantExt != "mp4" || ext != "mkv") {
+				t.Errorf("expected %s, got %v", tc.wantExt, ext)
 			}
 			if _, err := os.Stat(path); err != nil {
 				t.Errorf("expected file to exist at %v, got err %v", path, err)
@@ -434,4 +448,71 @@ func TestRunTranscodeCPUBackend(t *testing.T) {
 	if !has(a, "-vf", "scale=640:-2") || !has(a, "-c:v", "libx264") {
 		t.Errorf("missing cpu encoder args: %v", a)
 	}
+}
+
+func runGifTest(t *testing.T, hw hardware.Capabilities, failTimes int) (string, [][]string) {
+	t.Helper()
+	t.Setenv("FFMPEG_BIN", writeMockFFmpeg(t))
+	t.Setenv("MOCK_COUNT", filepath.Join(t.TempDir(), "count"))
+	argsDir := t.TempDir()
+	t.Setenv("MOCK_ARGS_DIR", argsDir)
+	t.Setenv("MOCK_FAIL_TIMES", fmt.Sprint(failTimes))
+
+	s := NewRenderer(Config{Hw: hardware.MonitorFor(hw), GifRes: "480:-2", GifFPS: 12})
+	out := filepath.Join(t.TempDir(), "out.gif")
+	if err := s.runGif(context.Background(), "in.mp4", out, 5, 4, nil); err != nil {
+		t.Fatalf("runGif: %v", err)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("output not created: %v", err)
+	}
+	var calls [][]string
+	for n := 1; ; n++ {
+		b, err := os.ReadFile(filepath.Join(argsDir, fmt.Sprintf("call-%d.txt", n))) //nolint:gosec // G304: paths come from t.TempDir() fixtures
+		if err != nil {
+			break
+		}
+		calls = append(calls, strings.Fields(string(b)))
+	}
+	if len(calls) == 0 {
+		t.Fatal("mock recorded no calls")
+	}
+	return out, calls
+}
+
+func TestRunGifPipelines(t *testing.T) {
+	t.Run("hardware decode", func(t *testing.T) {
+		_, calls := runGifTest(t, hardware.Capabilities{Backend: hardware.BackendVaapi, Device: "/dev/dri/renderD128"}, 0)
+		if len(calls) != 1 {
+			t.Fatalf("got %d calls, want 1", len(calls))
+		}
+		a := calls[0]
+		if !has(a, "-hwaccel", "vaapi") || !has(a, "-an", "") || !has(a, "-loop", "0") {
+			t.Errorf("unexpected hw gif args: %v", a)
+		}
+		if !has(a, "-vf", gifFilter("480:-2", 12)) {
+			t.Errorf("missing palette gif filter: %v", a)
+		}
+	})
+	t.Run("hardware decode fallback to cpu", func(t *testing.T) {
+		_, calls := runGifTest(t, hardware.Capabilities{Backend: hardware.BackendVaapi}, 1)
+		if len(calls) != 2 {
+			t.Fatalf("got %d calls, want 2", len(calls))
+		}
+		if has(calls[1], "-hwaccel", "") {
+			t.Errorf("cpu fallback must omit hwaccel: %v", calls[1])
+		}
+		if !has(calls[1], "-vf", gifFilter("480:-2", 12)) {
+			t.Errorf("missing palette gif filter on fallback: %v", calls[1])
+		}
+	})
+	t.Run("cpu only", func(t *testing.T) {
+		_, calls := runGifTest(t, hardware.Capabilities{}, 0)
+		if len(calls) != 1 {
+			t.Fatalf("got %d calls, want 1", len(calls))
+		}
+		if has(calls[0], "-hwaccel", "") {
+			t.Errorf("cpu gif must omit hwaccel: %v", calls[0])
+		}
+	})
 }

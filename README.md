@@ -85,9 +85,10 @@ See **[SCREENSHOTS.md](SCREENSHOTS.md)** for the full gallery. Click any image f
 - **Subtitle dialogue search** — sidecar `.srt`/`.vtt` (English-tagged or untagged) preferred, else
   the first English embedded text track is extracted. Files with no English track are still
   findable by title.
-- **Three clip modes** — `fast` (lossless stream-copy from the nearest keyframe), `preview`
-  (low-bitrate H.264 transcode that always plays in the browser), and `accurate`
-  (frame-exact 720p re-encode with GPU/CPU fallback). Long accurate cuts run as async jobs.
+- **Four clip modes** — `fast` (lossless stream-copy from the nearest keyframe), `preview`
+  (low-bitrate H.264 transcode that always plays in the browser), `accurate`
+  (frame-exact 720p re-encode with GPU/CPU fallback), and `gif` (looping social-friendly animated
+  GIF, 480px wide at 12 fps, up to 10s). Long accurate cuts run as async jobs.
 - **English audio selection** — the English audio track is probed and every clip mode maps that
   exact stream, so multilingual releases always yield English clips.
 - **Multi-folder libraries** — index specific subfolders (e.g. `movies` and `tv`) under your media
@@ -417,8 +418,11 @@ Set `NODE_SERVER_URL` to the main app's URL and mount the library the same way t
 | `NODE_MAX_CONCURRENT_JOBS` | `1` | server-side cap on concurrent jobs leased to one worker node |
 | `CLIP_PAD_MS` | `250` | head+tail padding |
 | `MAX_CLIP_SEC` | `120` | hard clip cap |
+| `MAX_GIF_SEC` | `10` | hard animated GIF duration cap |
 | `CLIP_PREVIEW_RES` | `640:-2` | preview width:height; even dimensions, with `-2` in one dimension to preserve aspect ratio |
 | `CLIP_ACCURATE_RES` | `1280:-2` | optional precise transcode resolution; does not affect stream-copy downloads |
+| `CLIP_GIF_RES` | `480:-2` | animated GIF width:height (480px wide by default for social-app file sizes) |
+| `CLIP_GIF_FPS` | `12` | animated GIF framerate (1–30) |
 | `CLIP_CPU_PRESET` | mode-specific | x264 preset override; blank keeps preview `ultrafast`, precise `veryfast`; ignored for VAAPI |
 | `CACHE_MAX_GB` | `10` | LRU cache cap (clips/thumbs/subs) |
 | `LONG_CUT_SEC` | `20` | accurate cuts longer than this run as async jobs with progress |
@@ -475,8 +479,8 @@ switch. These settings do not change the no-auth local default.
 - `GET /api/media`, `GET /api/media/{id}`
 - `GET /api/thumb/{mediaId}?t=&w=` — JPEG, 5s-bucketed cache
 - `GET /api/chunks/{mediaId}:{startCueIdx}-{endCueIdx}` — chunk + cues for the clip modal
-- `GET /api/clips/stream?mediaId=&start=&end=&padMs=&mode=fast|preview|accurate[&download=1]`
-  - Range-capable; long accurate cuts return `202 {jobId}` and progress via SSE/admin jobs
+- `GET /api/clips/stream?mediaId=&start=&end=&padMs=&mode=fast|preview|accurate|gif[&download=1]`
+  - Range-capable; long accurate cuts return `202 {jobId}` and progress via SSE/admin jobs; `gif` returns `image/gif` (capped at `MAX_GIF_SEC`, default 10s)
 - Admin (`X-API-Token` when configured):
   - `GET/PUT /api/admin/config` — read/update the persisted library folders (`{"folders":["movies","tv"]}`)
   - `POST /api/admin/scan[?root=subdir]` — scans the configured folders, or one ad-hoc folder
