@@ -643,3 +643,44 @@ func TestRegisterErrorIsSentinel(t *testing.T) {
 	_, err := svc.Register("n", "", "")
 	require.True(t, errors.Is(err, ErrUnauthorized))
 }
+
+func TestClaimAndApplySubtitledClipWork(t *testing.T) {
+	svc, st := newTestService(t)
+	svc.Clips = clips.New(st, clips.Config{
+		CacheDir: t.TempDir(), PreviewRes: "640:-2", AccurateRes: "1280:-2",
+		MaxClipSec: 120, DefaultPadMs: 250,
+	})
+	node, _ := approvedNode(t, svc, "gpu-1", "fp-sub")
+	id := addMedia(t, st, "/srv/media/movie.mkv")
+	trackID, err := st.ReplaceTrack(id, &store.SubtitleTrack{Source: "sidecar", Lang: "en"})
+	require.NoError(t, err)
+	require.NoError(t, st.ReplaceCues(id, trackID, []store.Cue{
+		{Idx: 0, StartSec: 10, EndSec: 12, Text: "Cue one"},
+		{Idx: 1, StartSec: 12.5, EndSec: 15, Text: "Cue two"},
+	}))
+
+	style := clips.DefaultSubtitleStyle()
+	style.Font = "montserrat"
+	style.Uppercase = true
+	req := clips.Request{MediaID: id, Start: 10, End: 15, PadMs: 250, Mode: "accurate", Subtitles: &style}
+	jobID, err := st.EnqueueJob("clip", clips.AsyncJobPayload(req), 1)
+	require.NoError(t, err)
+
+	w, err := svc.Claim(context.Background(), node.ID, []string{"clip"})
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	require.NotNil(t, w.Clip)
+	require.NotNil(t, w.Clip.Subtitles)
+	assert.Equal(t, "montserrat", w.Clip.Subtitles.Font)
+	assert.True(t, w.Clip.Subtitles.Uppercase)
+	require.Len(t, w.Clip.Cues, 2)
+	assert.Equal(t, "Cue one", w.Clip.Cues[0].Text)
+
+	accepted, err := svc.ApplyClipResult(node.ID, jobID, "mp4", strings.NewReader("SUBBED-MP4"))
+	require.NoError(t, err)
+	assert.True(t, accepted)
+
+	entry, err := svc.Clips.Cached(svc.Clips.CacheKey(req))
+	require.NoError(t, err)
+	require.NotNil(t, entry)
+}

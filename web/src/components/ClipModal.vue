@@ -35,9 +35,10 @@
       <p v-else-if="!detail" class="error-msg clip-load-error" role="alert">{{ clipError }}</p>
       <div v-else class="clip-body">
         <section class="player-col">
-          <div class="player">
+          <div ref="playerRef" class="player">
             <video
               v-if="previewURL"
+              ref="videoRef"
               :key="previewURL"
               :src="previewURL"
               :poster="posterURL"
@@ -45,7 +46,21 @@
               autoplay
               preload="auto"
               @loadeddata="onPreviewLoaded"
+              @loadedmetadata="onVideoMetrics"
+              @timeupdate="onVideoTimeUpdate"
+              @seeked="onVideoTimeUpdate"
               @error="onPreviewError"
+            />
+            <SubtitleOverlay
+              v-if="cues.length > 0"
+              :style-config="subtitleStyle"
+              :cues="selectedCues"
+              :clip-start="clipStartSec"
+              :current-time="videoCurrentTime"
+              :video-width="videoWidth"
+              :video-height="videoHeight"
+              :container-width="playerWidth"
+              :container-height="playerHeight"
             />
             <div v-if="previewLoading" class="preview-overlay">
               <HazeText label="Preparing preview" text="Preparing preview" />
@@ -109,7 +124,7 @@
                 class="mode-toggle"
                 @update:model-value="setMode"
               >
-                <v-btn value="fast" size="small">
+                <v-btn value="fast" size="small" :disabled="subtitleStyle.enabled">
                   <span class="mode-btn">Fast cut</span>
                 </v-btn>
                 <v-btn value="accurate" size="small">
@@ -134,6 +149,12 @@
             <template v-if="outputMode === 'gif'">
               GIF exports a looping, audio-free animation ({{ gifResLabel }}, {{ gifFps }} fps, max
               {{ formatLimitSec(maxGifSec) }}) sized for sharing on social apps.
+              <template v-if="subtitleStyle.enabled">
+                Burned-in subtitles will be rendered directly into the GIF.
+              </template>
+            </template>
+            <template v-else-if="subtitleStyle.enabled">
+              Burned-in subtitles require re-encoding (Precise or GIF), so Fast cut is unavailable while subtitles are enabled.
             </template>
             <template v-else>
               Fast copies the original stream from the previous keyframe. Precise re-encodes for exact
@@ -166,25 +187,32 @@
           </div>
         </section>
 
-        <aside class="transcript">
-          <header class="transcript-head">
-            <span class="panel-title">Transcript</span>
-            <span class="mono muted">{{ selectedCount }}/{{ cues.length }}</span>
-          </header>
-          <div class="scroll">
-            <button
-              v-for="(c, i) in cues"
-              :key="c.idx"
-              type="button"
-              class="line"
-              :class="{ active: inRange(i), dim: !inRange(i) }"
-              @click="expandTo(i)"
-            >
-              <span class="line-time">{{ fmt(c.start) }}</span>
-              <span class="line-text">{{ c.text }}</span>
-            </button>
-          </div>
-        </aside>
+        <div class="side-col">
+          <aside class="transcript">
+            <header class="transcript-head">
+              <span class="panel-title">Transcript</span>
+              <span class="mono muted">{{ selectedCount }}/{{ cues.length }}</span>
+            </header>
+            <div class="scroll">
+              <button
+                v-for="(c, i) in cues"
+                :key="c.idx"
+                type="button"
+                class="line"
+                :class="{ active: inRange(i), dim: !inRange(i) }"
+                @click="expandTo(i)"
+              >
+                <span class="line-time">{{ fmt(c.start) }}</span>
+                <span class="line-text">{{ c.text }}</span>
+              </button>
+            </div>
+          </aside>
+
+          <SubtitleStylePanel
+            v-if="cues.length > 0"
+            v-model="subtitleStyle"
+          />
+        </div>
       </div>
     </div>
   </v-dialog>
@@ -193,7 +221,15 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, clipStreamURL, type ChunkDetail, type CueDTO, type Hit } from '../api'
+import {
+  ensureFontFacesLoaded,
+  loadSubtitleStyle,
+  saveSubtitleStyle,
+  type SubtitleStyle,
+} from '../lib/subtitles'
 import HazeText from './HazeText.vue'
+import SubtitleOverlay from './clip/SubtitleOverlay.vue'
+import SubtitleStylePanel from './clip/SubtitleStylePanel.vue'
 
 type OutputMode = 'fast' | 'accurate' | 'gif'
 
@@ -202,7 +238,8 @@ const detail = ref<ChunkDetail | null>(null)
 const detailLoading = ref(false)
 const hit = ref<Hit | null>(null)
 const sel = ref<[number, number]>([0, 0])
-const outputMode = ref<OutputMode>('fast')
+const subtitleStyle = ref<SubtitleStyle>(loadSubtitleStyle())
+const outputMode = ref<OutputMode>(subtitleStyle.value.enabled ? 'accurate' : 'fast')
 const downloadPending = ref(false)
 const clipError = ref('')
 const jobProgress = ref<number | null>(null)
@@ -211,6 +248,14 @@ const previewURL = ref('')
 const previewLoading = ref(false)
 const previewFailed = ref(false)
 const posterURL = ref('')
+const playerRef = ref<HTMLElement | null>(null)
+const videoRef = ref<HTMLVideoElement | null>(null)
+const videoCurrentTime = ref(0)
+const videoWidth = ref(0)
+const videoHeight = ref(0)
+const playerWidth = ref(0)
+const playerHeight = ref(0)
+let playerObserver: ResizeObserver | null = null
 
 // MediaError codes from the HTMLMediaElement spec. Only MEDIA_ERR_ABORTED is
 // recoverable: it is reported when a media load is cancelled, which happens
@@ -232,8 +277,10 @@ const canExtendAfter = computed(() => cues.value.length > 0 && (
 ))
 const selStart = computed(() => cues.value[Math.min(sel.value[0], cues.value.length - 1)]?.start ?? 0)
 const selEnd = computed(() => cues.value[Math.min(sel.value[1], cues.value.length - 1)]?.end ?? 0)
+const selectedCues = computed(() => cues.value.length ? cues.value.slice(sel.value[0], sel.value[1] + 1) : [])
 const selectedCount = computed(() => cues.value.length ? Math.max(0, sel.value[1] - sel.value[0] + 1) : 0)
 const defaultPadMs = computed(() => detail.value?.clipLimits?.defaultPadMs ?? 250)
+const clipStartSec = computed(() => Math.max(0, selStart.value - defaultPadMs.value / 1000))
 const maxGifSec = computed(() => detail.value?.clipLimits?.maxGifSec ?? 10)
 const gifFps = computed(() => detail.value?.clipLimits?.gifFps ?? 12)
 const gifResLabel = computed(() => formatGifRes(detail.value?.clipLimits?.gifRes ?? '480:-2'))
@@ -254,15 +301,41 @@ const titleLine = computed(() => {
   return parts.join(' ')
 })
 
-onMounted(() => window.addEventListener('open-clip', onOpenClip as EventListener))
+onMounted(() => {
+  ensureFontFacesLoaded()
+  window.addEventListener('open-clip', onOpenClip as EventListener)
+})
 onUnmounted(() => {
   session++
+  playerObserver?.disconnect()
+  playerObserver = null
   window.removeEventListener('open-clip', onOpenClip as EventListener)
 })
 watch(open, value => { if (!value) session++ }, { flush: 'sync' })
 watch(sel, () => { selectionVersion++ }, { deep: true, flush: 'sync' })
+watch(subtitleStyle, (next) => {
+  saveSubtitleStyle(next)
+  if (next.enabled && outputMode.value === 'fast') {
+    outputMode.value = 'accurate'
+  }
+}, { deep: true })
+watch(playerRef, (el) => {
+  playerObserver?.disconnect()
+  playerObserver = null
+  if (!el) return
+  const sync = () => {
+    playerWidth.value = el.clientWidth
+    playerHeight.value = el.clientHeight
+  }
+  sync()
+  if (typeof ResizeObserver !== 'undefined') {
+    playerObserver = new ResizeObserver(sync)
+    playerObserver.observe(el)
+  }
+})
 
 function setMode(value: unknown) {
+  if (value === 'fast' && subtitleStyle.value.enabled) return
   if (value === 'fast' || value === 'accurate' || value === 'gif') {
     outputMode.value = value
   }
@@ -289,10 +362,18 @@ async function onOpenClip(e: Event) {
   clipError.value = ''
   previewFailed.value = false
   jobProgress.value = null
+  videoCurrentTime.value = 0
+  videoWidth.value = 0
+  videoHeight.value = 0
+  if (subtitleStyle.value.enabled && outputMode.value === 'fast') {
+    outputMode.value = 'accurate'
+  }
   try {
     const result = await api.chunk(next.chunkId)
     if (requestSession !== session || !open.value) return
     detail.value = result
+    videoWidth.value = result.media.width || 0
+    videoHeight.value = result.media.height || 0
     const scene = detail.value.cues
     cues.value = scene.length ? [...new Map([
       ...detail.value.contextBefore, ...scene, ...detail.value.contextAfter,
@@ -313,11 +394,26 @@ async function onOpenClip(e: Event) {
 function updatePreview() {
   if (!hit.value || cues.value.length === 0) return
   previewLoading.value = true
+  videoCurrentTime.value = 0
   posterURL.value = `/api/thumb/${hit.value.mediaId}?t=${selStart.value}&w=640`
   previewURL.value = clipStreamURL(hit.value, selStart.value, selEnd.value, 'preview', false, defaultPadMs.value)
 }
 
-function onPreviewLoaded() {
+function onVideoMetrics(e: Event) {
+  const el = e.target as HTMLVideoElement
+  if (el.videoWidth > 0 && el.videoHeight > 0) {
+    videoWidth.value = el.videoWidth
+    videoHeight.value = el.videoHeight
+  }
+}
+
+function onVideoTimeUpdate(e: Event) {
+  const el = e.target as HTMLVideoElement
+  videoCurrentTime.value = Number.isFinite(el.currentTime) ? el.currentTime : 0
+}
+
+function onPreviewLoaded(e: Event) {
+  onVideoMetrics(e)
   previewLoading.value = false
   // A successful load clears or prevents the warning: an earlier failure (for
   // example an aborted request while the trim range was adjusted) must not
@@ -392,7 +488,15 @@ async function download() {
   downloadPending.value = true
   clipError.value = ''
   const selectedMode = outputMode.value
-  const url = clipStreamURL(hit.value, selStart.value, selEnd.value, selectedMode, true, defaultPadMs.value)
+  const url = clipStreamURL(
+    hit.value,
+    selStart.value,
+    selEnd.value,
+    selectedMode,
+    true,
+    defaultPadMs.value,
+    subtitleStyle.value,
+  )
   try {
     const res = await fetch(url)
     if (res.status === 202) {
@@ -453,7 +557,15 @@ async function copyLink() {
   if (!hit.value || !cues.value.length || gifTooLong.value) return
   const url =
     window.location.origin +
-    clipStreamURL(hit.value, selStart.value, selEnd.value, outputMode.value, false, defaultPadMs.value)
+    clipStreamURL(
+      hit.value,
+      selStart.value,
+      selEnd.value,
+      outputMode.value,
+      false,
+      defaultPadMs.value,
+      subtitleStyle.value,
+    )
   try {
     await navigator.clipboard.writeText(url)
     window.dispatchEvent(
@@ -741,9 +853,17 @@ function pad(value: number): string {
   color: var(--muted);
   margin-bottom: 4px;
 }
+.side-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  min-width: 0;
+}
 .transcript {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   min-height: 0;
   border: 1px solid var(--border);
   border-radius: 12px;

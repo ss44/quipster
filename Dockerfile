@@ -24,7 +24,7 @@ FROM debian:bookworm-slim
 # ffmpeg (Debian builds: vaapi, qsv, nvdec; encoders vaapi/qsv only — nvenc
 # needs the NVIDIA host driver mounted at runtime), plus VAAPI/DRM userland.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg ca-certificates \
+    ffmpeg fontconfig ca-certificates \
     libva-drm2 libva2 libdrm2 libva-x11-2 \
     i965-va-driver intel-media-va-driver mesa-va-drivers \
     && rm -rf /var/lib/apt/lists/*

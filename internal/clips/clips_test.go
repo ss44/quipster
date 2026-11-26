@@ -76,6 +76,7 @@ func TestValidate(t *testing.T) {
 
 	id := seedMedia(t, st, "/fake/movie.mp4", 0)
 
+	//nolint:govet // table field grouping favors readability
 	tests := []struct {
 		name    string
 		req     Request
@@ -212,6 +213,7 @@ func TestProduce(t *testing.T) {
 
 	id := seedMedia(t, st, "/fake/movie.mp4", 0)
 
+	//nolint:govet // table field grouping favors readability
 	tests := []struct {
 		name    string
 		wantExt string
@@ -258,6 +260,7 @@ func TestProduceCPU(t *testing.T) {
 
 	id := seedMedia(t, st, "/fake/movie.mp4", 0)
 
+	//nolint:govet // table field grouping favors readability
 	tests := []struct {
 		name string
 		req  Request

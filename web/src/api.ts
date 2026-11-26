@@ -1,3 +1,5 @@
+import { subtitleQueryParams, type SubtitleStyle } from './lib/subtitles'
+
 export interface CueDTO {
   idx: number
   start: number
@@ -419,6 +421,7 @@ export function clipStreamURL(
   mode: string,
   download: boolean,
   padMs = 250,
+  subtitles?: SubtitleStyle | null,
 ): string {
   const p = new URLSearchParams({
     mediaId: String(hit.mediaId),
@@ -427,6 +430,11 @@ export function clipStreamURL(
     mode,
     padMs: String(padMs),
   })
+  if (mode !== 'preview' && subtitles?.enabled) {
+    for (const [k, v] of Object.entries(subtitleQueryParams(subtitles))) {
+      p.set(k, v)
+    }
+  }
   if (download) p.set('download', '1')
   return `/api/clips/stream?${p.toString()}`
 }

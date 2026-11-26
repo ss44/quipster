@@ -127,6 +127,34 @@ func (c Capabilities) Pipeline(res string) Pipeline {
 	return p
 }
 
+// PipelineWithCPUFilter builds a transcode plan that runs a CPU video filter
+// (such as libass subtitle burn-in) after scaling. When cpuFilter is empty it
+// behaves identically to Pipeline. Backends that normally keep frames on the
+// GPU decode into system memory instead, run scale+cpuFilter on CPU, and
+// upload back to the hardware encoder where required.
+func (c Capabilities) PipelineWithCPUFilter(res, cpuFilter string) Pipeline {
+	if cpuFilter == "" {
+		return c.Pipeline(res)
+	}
+	baseFilter := "scale=" + res + "," + cpuFilter
+	p := Pipeline{Filter: baseFilter, Encoder: "libx264"}
+	spec, ok := specs[c.Backend]
+	if !ok {
+		return p
+	}
+	p.Encoder = spec.encoder
+	p.IsHW = true
+	p.Input = c.DecodeArgs()
+	switch c.Backend {
+	case BackendVaapi:
+		p.Input = append([]string{"-vaapi_device", c.renderNode()}, p.Input...)
+		p.Filter = baseFilter + ",format=nv12,hwupload"
+	case BackendNvenc:
+		p.Filter = baseFilter + ",format=yuv420p"
+	}
+	return p
+}
+
 // renderNode returns the DRM render node to use for vaapi pipelines: the
 // detected device, or ffmpeg's default first render node when detection ran
 // without one (forced backend, device not reported).

@@ -12,7 +12,8 @@ func NewRenderer(cfg Config) *Renderer {
 	return &Renderer{cfg: normalizeConfig(cfg)}
 }
 
-// CacheKey returns the stable render identity, including its encoding profile.
+// CacheKey returns the stable render identity, including its encoding profile
+// and optional burned-in subtitle style.
 func (s *Renderer) CacheKey(r Request) string {
 	mode := r.Mode
 	switch mode {
@@ -22,6 +23,9 @@ func (s *Renderer) CacheKey(r Request) string {
 		mode += "|" + s.cfg.AccurateRes + "|" + s.cfg.CPUPreset
 	case "gif":
 		mode += fmt.Sprintf("|%s|%d", s.cfg.GifRes, s.cfg.GifFPS)
+	}
+	if tok := r.Subtitles.CacheToken(); tok != "" {
+		mode += "|" + tok
 	}
 	return CacheKey(r.MediaID, r.Start, r.End, mode, r.PadMs)
 }
