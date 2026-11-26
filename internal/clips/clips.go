@@ -660,7 +660,8 @@ func AsyncJobPayload(r Request) string {
 }
 
 // ParseAsyncJobPayload decodes a clip job's JSON payload back into a Request,
-// applying the default mode ("accurate") and default padding when omitted.
+// applying the default mode ("accurate") and default padding only when padMs
+// is omitted or negative so explicit padMs=0 requests keep exact bounds.
 func ParseAsyncJobPayload(payload string, defaultPadMs int) (Request, error) {
 	var p struct {
 		Subtitles *SubtitleStyle `json:"subtitles,omitempty"`

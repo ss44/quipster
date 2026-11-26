@@ -54,7 +54,7 @@
             <SubtitleOverlay
               v-if="cues.length > 0"
               :style-config="subtitleStyle"
-              :cues="selectedCues"
+              :cues="activeCues"
               :clip-start="clipStartSec"
               :current-time="videoCurrentTime"
               :video-width="videoWidth"
@@ -85,11 +85,11 @@
                 </button>
               </div>
               <span class="trim-meta">
-                <span class="mono">{{ fmt(selStart) }} – {{ fmt(selEnd) }}</span>
+                <span class="mono">{{ trimRangeLabel }}</span>
                 <span class="sep">·</span>
                 <span class="mono">{{ clipSpanSec.toFixed(1) }}s</span>
                 <span class="sep">·</span>
-                {{ selectedCount }} {{ selectedCount === 1 ? 'line' : 'lines' }}
+                {{ activeCueCount }} {{ activeCueCount === 1 ? 'line' : 'lines' }}
               </span>
             </div>
             <v-range-slider
@@ -106,9 +106,21 @@
               @end="updatePreview"
             />
             <div class="trim-hint">
-              <span>Drag to include more or fewer subtitle lines.</span>
+              <span>Drag to include subtitle lines, or fine-tune start &amp; end below.</span>
               <button type="button" class="link-btn" :disabled="cues.length === 0" @click="selectAll">Select all</button>
             </div>
+            <ClipTimingControls
+              :start="activeBounds.start"
+              :end="activeBounds.end"
+              :duration-sec="mediaDurationSec"
+              :max-clip-sec="maxClipSec"
+              :playhead-sec="playheadSec"
+              :is-custom="isCustomRange"
+              :disabled="cues.length === 0"
+              @adjust-start="onAdjustStart"
+              @adjust-end="onAdjustEnd"
+              @reset="resetCustomBounds"
+            />
           </div>
 
           <div class="actions">
@@ -136,10 +148,10 @@
               </v-btn-toggle>
             </div>
             <div class="buttons">
-              <button type="button" class="btn-secondary" :disabled="submittingExport || cues.length === 0 || gifTooLong" @click="copyLink">
+              <button type="button" class="btn-secondary" :disabled="submittingExport || cues.length === 0 || exportBlocked" @click="copyLink">
                 Copy link
               </button>
-              <button type="button" class="btn-primary" :disabled="downloading || cues.length === 0 || gifTooLong" @click="download">
+              <button type="button" class="btn-primary" :disabled="downloading || cues.length === 0 || exportBlocked" @click="download">
                 {{ downloadButtonLabel }}
               </button>
             </div>
@@ -162,9 +174,13 @@
             </template>
           </p>
 
-          <p v-if="gifTooLong" class="limit-msg" role="status">
+          <p v-if="clipTooLong" class="limit-msg" role="status">
+            Clips cannot exceed {{ formatLimitSec(maxClipSec) }} (selected clip is
+            {{ clipSpanSec.toFixed(1) }}s{{ isCustomRange ? '' : ' including padding' }}). Trim the range before exporting.
+          </p>
+          <p v-else-if="gifTooLong" class="limit-msg" role="status">
             GIF exports cannot exceed {{ formatLimitSec(maxGifSec) }} (selected clip is
-            {{ clipSpanSec.toFixed(1) }}s including padding). Trim the range or switch to Fast cut / Precise.
+            {{ clipSpanSec.toFixed(1) }}s{{ isCustomRange ? '' : ' including padding' }}). Trim the range or switch to Fast cut / Precise.
           </p>
 
           <p v-if="clipError" class="error-msg">{{ clipError }}</p>
@@ -212,7 +228,7 @@
                   </svg>
                   <span class="panel-title">Transcript</span>
                 </span>
-                <span class="mono muted">{{ selectedCount }}/{{ cues.length }}</span>
+                <span class="mono muted">{{ activeCueCount }}/{{ cues.length }}</span>
               </button>
             </header>
             <div v-if="sideTab === 'transcript'" id="clip-transcript-body" class="scroll">
@@ -247,12 +263,22 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, clipQueryParams, clipStreamURL, type ChunkDetail, type CueDTO, type Hit } from '../api'
 import { useClipExports } from '../lib/clipDownloads'
 import {
+  formatTimestamp,
+  overlappingCues,
+  roundMs,
+  setClipEnd,
+  setClipStart,
+  transcriptClipBounds,
+  type ClipBounds,
+} from '../lib/clipBounds'
+import {
   ensureFontFacesLoaded,
   loadSubtitleStyle,
   saveSubtitleStyle,
   type SubtitleStyle,
 } from '../lib/subtitles'
 import HazeText from './HazeText.vue'
+import ClipTimingControls from './clip/ClipTimingControls.vue'
 import SubtitleOverlay from './clip/SubtitleOverlay.vue'
 import SubtitleStylePanel from './clip/SubtitleStylePanel.vue'
 
@@ -266,6 +292,7 @@ const detail = ref<ChunkDetail | null>(null)
 const detailLoading = ref(false)
 const hit = ref<Hit | null>(null)
 const sel = ref<[number, number]>([0, 0])
+const customBounds = ref<ClipBounds | null>(null)
 const sideTab = ref<SideTab>('transcript')
 const subtitleStyle = ref<SubtitleStyle>(loadSubtitleStyle())
 const outputMode = ref<OutputMode>(subtitleStyle.value.enabled ? 'accurate' : 'fast')
@@ -283,6 +310,8 @@ const videoHeight = ref(0)
 const playerWidth = ref(0)
 const playerHeight = ref(0)
 let playerObserver: ResizeObserver | null = null
+let previewDebounceTimer: ReturnType<typeof setTimeout> | null = null
+const PREVIEW_DEBOUNCE_MS = 250
 
 // MediaError codes from the HTMLMediaElement spec. Only MEDIA_ERR_ABORTED is
 // recoverable: it is reported when a media load is cancelled, which happens
@@ -305,27 +334,65 @@ const canExtendAfter = computed(() => cues.value.length > 0 && (
 const selStart = computed(() => cues.value[Math.min(sel.value[0], cues.value.length - 1)]?.start ?? 0)
 const selEnd = computed(() => cues.value[Math.min(sel.value[1], cues.value.length - 1)]?.end ?? 0)
 const selectedCues = computed(() => cues.value.length ? cues.value.slice(sel.value[0], sel.value[1] + 1) : [])
-const selectedCount = computed(() => cues.value.length ? Math.max(0, sel.value[1] - sel.value[0] + 1) : 0)
 const defaultPadMs = computed(() => detail.value?.clipLimits?.defaultPadMs ?? 250)
-const clipStartSec = computed(() => Math.max(0, selStart.value - defaultPadMs.value / 1000))
+const mediaDurationSec = computed(() => detail.value?.media.durationSec ?? 0)
+const maxClipSec = computed(() => detail.value?.clipLimits?.maxClipSec ?? 120)
+const transcriptBounds = computed<ClipBounds>(() =>
+  cues.value.length
+    ? transcriptClipBounds(selStart.value, selEnd.value, defaultPadMs.value, mediaDurationSec.value)
+    : { start: 0, end: 0 },
+)
+const activeBounds = computed<ClipBounds>(() => customBounds.value ?? transcriptBounds.value)
+const isCustomRange = computed(() => customBounds.value !== null)
+const requestStart = computed(() => (customBounds.value ? customBounds.value.start : selStart.value))
+const requestEnd = computed(() => (customBounds.value ? customBounds.value.end : selEnd.value))
+const requestPadMs = computed(() => (customBounds.value ? 0 : defaultPadMs.value))
+const activeCues = computed(() => {
+  if (!cues.value.length) return []
+  if (customBounds.value) {
+    return overlappingCues(cues.value, customBounds.value.start, customBounds.value.end)
+  }
+  return selectedCues.value
+})
+const activeCueIdxSet = computed(() => new Set(activeCues.value.map((cue) => cue.idx)))
+const activeCueCount = computed(() => activeCues.value.length)
+const clipStartSec = computed(() =>
+  customBounds.value ? customBounds.value.start : Math.max(0, selStart.value - defaultPadMs.value / 1000),
+)
 const maxGifSec = computed(() => detail.value?.clipLimits?.maxGifSec ?? 10)
 const gifFps = computed(() => detail.value?.clipLimits?.gifFps ?? 12)
 const gifResLabel = computed(() => formatGifRes(detail.value?.clipLimits?.gifRes ?? '480:-2'))
 const clipSpanSec = computed(() => {
   if (!cues.value.length) return 0
+  if (customBounds.value) {
+    return Math.max(0, roundMs(customBounds.value.end - customBounds.value.start))
+  }
   return Math.max(0, selEnd.value - selStart.value) + (2 * defaultPadMs.value) / 1000
 })
+const clipTooLong = computed(() =>
+  cues.value.length > 0 && clipSpanSec.value > maxClipSec.value + 0.001,
+)
 const gifTooLong = computed(() =>
   outputMode.value === 'gif' && cues.value.length > 0 && clipSpanSec.value > maxGifSec.value + 0.001,
 )
+const exportBlocked = computed(() => clipTooLong.value || gifTooLong.value)
+const trimRangeLabel = computed(() =>
+  customBounds.value
+    ? `${formatTimestamp(customBounds.value.start)} – ${formatTimestamp(customBounds.value.end)}`
+    : `${fmt(selStart.value)} – ${fmt(selEnd.value)}`,
+)
+const playheadSec = computed<number | null>(() => {
+  if (!previewURL.value || previewLoading.value || previewFailed.value) return null
+  return roundMs(clipStartSec.value + videoCurrentTime.value)
+})
 const currentExportQuery = computed(() => {
   if (!hit.value || !cues.value.length) return ''
   return clipQueryParams(
     hit.value,
-    selStart.value,
-    selEnd.value,
+    requestStart.value,
+    requestEnd.value,
     outputMode.value,
-    defaultPadMs.value,
+    requestPadMs.value,
     subtitleStyle.value,
   ).toString()
 })
@@ -364,12 +431,21 @@ onMounted(() => {
 })
 onUnmounted(() => {
   session++
+  clearPreviewDebounce()
   playerObserver?.disconnect()
   playerObserver = null
   window.removeEventListener('open-clip', onOpenClip as EventListener)
 })
-watch(open, value => { if (!value) session++ }, { flush: 'sync' })
-watch(sel, () => { selectionVersion++ }, { deep: true, flush: 'sync' })
+watch(open, value => {
+  if (!value) {
+    session++
+    clearPreviewDebounce()
+  }
+}, { flush: 'sync' })
+watch(sel, () => {
+  selectionVersion++
+  customBounds.value = null
+}, { deep: true, flush: 'sync' })
 watch(subtitleStyle, (next) => {
   saveSubtitleStyle(next)
   if (next.enabled && outputMode.value === 'fast') {
@@ -407,11 +483,31 @@ function setMode(value: unknown) {
 }
 
 function inRange(index: number): boolean {
+  if (customBounds.value) {
+    const cue = cues.value[index]
+    return cue !== undefined && activeCueIdxSet.value.has(cue.idx)
+  }
   return index >= sel.value[0] && index <= sel.value[1]
+}
+
+function clearPreviewDebounce() {
+  if (previewDebounceTimer !== null) {
+    clearTimeout(previewDebounceTimer)
+    previewDebounceTimer = null
+  }
+}
+
+function schedulePreviewUpdate() {
+  clearPreviewDebounce()
+  previewDebounceTimer = setTimeout(() => {
+    previewDebounceTimer = null
+    updatePreview()
+  }, PREVIEW_DEBOUNCE_MS)
 }
 
 async function onOpenClip(e: Event) {
   const requestSession = ++session
+  clearPreviewDebounce()
   const next = (e as CustomEvent).detail as Hit
   hit.value = next
   open.value = true
@@ -420,6 +516,7 @@ async function onOpenClip(e: Event) {
   extending.value = false
   exhaustedBefore.value = false
   exhaustedAfter.value = false
+  customBounds.value = null
   cues.value = []
   previewURL.value = ''
   posterURL.value = ''
@@ -447,6 +544,7 @@ async function onOpenClip(e: Event) {
       cues.value.findIndex(cue => cue.idx === scene[0].idx),
       cues.value.findIndex(cue => cue.idx === scene[scene.length - 1].idx),
     ] : [0, 0]
+    customBounds.value = null
     updatePreview()
   } catch (err) {
     if (requestSession !== session || !open.value) return
@@ -457,11 +555,58 @@ async function onOpenClip(e: Event) {
 }
 
 function updatePreview() {
-  if (!hit.value || cues.value.length === 0) return
+  clearPreviewDebounce()
+  if (!hit.value || cues.value.length === 0 || clipTooLong.value) return
   previewLoading.value = true
   videoCurrentTime.value = 0
-  posterURL.value = `/api/thumb/${hit.value.mediaId}?t=${selStart.value}&w=640`
-  previewURL.value = clipStreamURL(hit.value, selStart.value, selEnd.value, 'preview', false, defaultPadMs.value)
+  posterURL.value = `/api/thumb/${hit.value.mediaId}?t=${requestStart.value}&w=640`
+  previewURL.value = clipStreamURL(
+    hit.value,
+    requestStart.value,
+    requestEnd.value,
+    'preview',
+    false,
+    requestPadMs.value,
+  )
+}
+
+function onAdjustStart(targetStart: number, immediate: boolean) {
+  if (!cues.value.length) return
+  const base = customBounds.value ?? transcriptBounds.value
+  const next = setClipStart(base, targetStart, {
+    durationSec: mediaDurationSec.value,
+    maxClipSec: maxClipSec.value,
+  })
+  if (customBounds.value && next.start === customBounds.value.start && next.end === customBounds.value.end) {
+    return
+  }
+  customBounds.value = next
+  selectionVersion++
+  if (immediate) updatePreview()
+  else schedulePreviewUpdate()
+}
+
+function onAdjustEnd(targetEnd: number, immediate: boolean) {
+  if (!cues.value.length) return
+  const base = customBounds.value ?? transcriptBounds.value
+  const next = setClipEnd(base, targetEnd, {
+    durationSec: mediaDurationSec.value,
+    maxClipSec: maxClipSec.value,
+  })
+  if (customBounds.value && next.start === customBounds.value.start && next.end === customBounds.value.end) {
+    return
+  }
+  customBounds.value = next
+  selectionVersion++
+  if (immediate) updatePreview()
+  else schedulePreviewUpdate()
+}
+
+function resetCustomBounds() {
+  if (!customBounds.value) return
+  customBounds.value = null
+  selectionVersion++
+  updatePreview()
 }
 
 function onVideoMetrics(e: Event) {
@@ -536,11 +681,13 @@ async function extendLine(direction: -1 | 1) {
 }
 
 function selectAll() {
+  customBounds.value = null
   sel.value = [0, Math.max(cues.value.length - 1, 0)]
   updatePreview()
 }
 
 function expandTo(index: number) {
+  customBounds.value = null
   const [a, b] = sel.value
   if (index < a) sel.value = [index, b]
   else if (index > b) sel.value = [a, index]
@@ -549,20 +696,20 @@ function expandTo(index: number) {
 }
 
 async function download() {
-  if (!hit.value || !cues.value.length || gifTooLong.value || downloading.value) return
+  if (!hit.value || !cues.value.length || exportBlocked.value || downloading.value) return
   submittingExport.value = true
   clipError.value = ''
   const selectedMode = outputMode.value
-  const quote = selectedCues.value.map((c) => c.text).join(' ').trim()
+  const quote = activeCues.value.map((c) => c.text).join(' ').trim()
   try {
     await startClipExport({
       hit: hit.value,
       title: titleLine.value || hit.value.showTitle || hit.value.mediaTitle || 'Clip',
       quote,
-      start: selStart.value,
-      end: selEnd.value,
+      start: requestStart.value,
+      end: requestEnd.value,
       mode: selectedMode,
-      padMs: defaultPadMs.value,
+      padMs: requestPadMs.value,
       subtitles: subtitleStyle.value,
     })
   } catch (err) {
@@ -573,16 +720,16 @@ async function download() {
 }
 
 async function copyLink() {
-  if (!hit.value || !cues.value.length || gifTooLong.value) return
+  if (!hit.value || !cues.value.length || exportBlocked.value) return
   const url =
     window.location.origin +
     clipStreamURL(
       hit.value,
-      selStart.value,
-      selEnd.value,
+      requestStart.value,
+      requestEnd.value,
       outputMode.value,
       false,
-      defaultPadMs.value,
+      requestPadMs.value,
       subtitleStyle.value,
     )
   try {

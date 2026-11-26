@@ -532,13 +532,18 @@ func TestParseAsyncJobPayload(t *testing.T) {
 		t.Fatalf("unexpected decoded request: %+v", got)
 	}
 
-	// Omitted mode and padMs fall back to defaults.
-	got, err = ParseAsyncJobPayload(`{"mediaId":3,"start":2,"end":4}`, 250)
-	if err != nil {
-		t.Fatalf("ParseAsyncJobPayload defaults: %v", err)
-	}
-	if got.Mode != "accurate" || got.PadMs != 250 {
-		t.Fatalf("unexpected defaults: %+v", got)
+	// Omitted or negative padMs falls back to defaults; empty mode defaults to accurate.
+	for _, payload := range []string{
+		`{"mediaId":3,"start":2,"end":4}`,
+		`{"mediaId":3,"start":2,"end":4,"padMs":-10}`,
+	} {
+		got, err = ParseAsyncJobPayload(payload, 250)
+		if err != nil {
+			t.Fatalf("ParseAsyncJobPayload(%s): %v", payload, err)
+		}
+		if got.Mode != "accurate" || got.PadMs != 250 {
+			t.Fatalf("payload %s => %+v, want mode=accurate padMs=250", payload, got)
+		}
 	}
 
 	if _, err := ParseAsyncJobPayload("{bad", 250); err == nil {

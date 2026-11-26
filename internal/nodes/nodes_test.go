@@ -193,7 +193,7 @@ func TestClaimClipWork(t *testing.T) {
 	id := addMedia(t, st, "/srv/media/library/movie.mkv")
 	require.NoError(t, st.UpdateMediaProbe(id, 120, 1920, 1080, "h264", "aac", "mkv", 0, 3, "en"))
 
-	jobID, err := st.EnqueueJob("clip", `{"mediaId":`+itoa(id)+`,"start":5,"end":25,"padMs":0}`, 1)
+	jobID, err := st.EnqueueJob("clip", `{"mediaId":`+itoa(id)+`,"start":5,"end":25}`, 1)
 	require.NoError(t, err)
 
 	w, err := svc.Claim(context.Background(), node.ID, []string{"clip"})
@@ -202,10 +202,23 @@ func TestClaimClipWork(t *testing.T) {
 	require.NotNil(t, w.Clip)
 	assert.Equal(t, jobID, w.JobID)
 	assert.Equal(t, "accurate", w.Clip.Mode, "blank mode defaults to accurate")
-	assert.Equal(t, 250, w.Clip.PadMs, "padMs<=0 falls back to the configured default")
+	assert.Equal(t, 250, w.Clip.PadMs, "omitted padMs falls back to the configured default")
 	assert.Equal(t, 3, w.Clip.AudioOrdinal)
 	assert.InDelta(t, 5, w.Clip.Start, 0.001)
 	assert.InDelta(t, 25, w.Clip.End, 0.001)
+
+	// Explicit padMs=0 (used for custom exact clip bounds) must be preserved so
+	// the worker renders under the same cache key the HTTP handler derived.
+	_, err = svc.Complete(node.ID, jobID, "done", "")
+	require.NoError(t, err)
+	exactJobID, err := st.EnqueueJob("clip", `{"mediaId":`+itoa(id)+`,"start":5.25,"end":25.5,"padMs":0,"mode":"accurate"}`, 1)
+	require.NoError(t, err)
+	w2, err := svc.Claim(context.Background(), node.ID, []string{"clip"})
+	require.NoError(t, err)
+	require.NotNil(t, w2)
+	require.NotNil(t, w2.Clip)
+	assert.Equal(t, exactJobID, w2.JobID)
+	assert.Equal(t, 0, w2.Clip.PadMs, "explicit padMs=0 must not be replaced by default padding")
 }
 
 func TestClaimMissingMediaFailsJob(t *testing.T) {
