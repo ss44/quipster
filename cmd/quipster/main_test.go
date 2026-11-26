@@ -90,8 +90,8 @@ func clearConfigEnv(t *testing.T) {
 	for _, key := range []string{
 		"ADDR", "ROLE", "DATA_DIR", "MEDIA_DIR", "CACHE_DIR", "MEILI_URL",
 		"MEILI_MASTER_KEY", "SCAN_INTERVAL", "SUBTITLE_WORKERS", "INDEX_WORKERS",
-		"CLIP_WORKERS", "API_TOKEN", "CLIP_PAD_MS", "MAX_CLIP_SEC", "CACHE_MAX_GB",
-		"LONG_CUT_SEC", "CLIP_PREVIEW_RES", "CLIP_ACCURATE_RES", "CLIP_CPU_PRESET",
+		"CLIP_WORKERS", "API_TOKEN", "CLIP_PAD_MS", "MAX_CLIP_SEC", "MAX_GIF_SEC", "CACHE_MAX_GB",
+		"LONG_CUT_SEC", "CLIP_PREVIEW_RES", "CLIP_ACCURATE_RES", "CLIP_GIF_RES", "CLIP_GIF_FPS", "CLIP_CPU_PRESET",
 		"SCAN_TIMEOUT", "EXTRACT_TIMEOUT", "PROBE_TIMEOUT",
 		"MCP_ENABLED", "MCP_TRANSPORT", "MCP_TOKENS", "MCP_RATE_LIMIT", "MCP_ALLOW_ADMIN",
 	} {
@@ -116,6 +116,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 		apiToken:       "",
 		padMs:          250,
 		maxClipSec:     120,
+		maxGifSec:      10,
+		gifFPS:         12,
 		cacheMaxGB:     10,
 		longCutSec:     20,
 		scanTimeout:    2 * time.Hour,
@@ -154,9 +156,13 @@ func TestMCPEnvironment(t *testing.T) {
 func TestClipTuningEnvironment(t *testing.T) {
 	t.Setenv("CLIP_PREVIEW_RES", "480:-2")
 	t.Setenv("CLIP_ACCURATE_RES", "854:480")
+	t.Setenv("CLIP_GIF_RES", "360:-2")
+	t.Setenv("CLIP_GIF_FPS", "15")
+	t.Setenv("MAX_GIF_SEC", "8")
 	t.Setenv("CLIP_CPU_PRESET", "superfast")
 	cfg := loadConfig()
-	if cfg.previewRes != "480:-2" || cfg.accurateRes != "854:480" || cfg.cpuPreset != "superfast" {
+	if cfg.previewRes != "480:-2" || cfg.accurateRes != "854:480" || cfg.gifRes != "360:-2" ||
+		cfg.gifFPS != 15 || cfg.maxGifSec != 8 || cfg.cpuPreset != "superfast" {
 		t.Fatalf("clip tuning not loaded: %+v", cfg)
 	}
 }
@@ -177,6 +183,8 @@ func TestLoadConfigOverrides(t *testing.T) {
 		"API_TOKEN":        "token",
 		"CLIP_PAD_MS":      "100",
 		"MAX_CLIP_SEC":     "300",
+		"MAX_GIF_SEC":      "8",
+		"CLIP_GIF_FPS":     "15",
 		"CACHE_MAX_GB":     "2.5",
 		"LONG_CUT_SEC":     "30",
 		"ARCHIVE_ENABLED":  "0",
@@ -200,6 +208,8 @@ func TestLoadConfigOverrides(t *testing.T) {
 		apiToken:       "token",
 		padMs:          100,
 		maxClipSec:     300,
+		maxGifSec:      8,
+		gifFPS:         15,
 		cacheMaxGB:     2.5,
 		longCutSec:     30,
 		scanTimeout:    2 * time.Hour,
@@ -258,8 +268,11 @@ func TestNewNodeServiceWiring(t *testing.T) {
 		CacheDir:     dir,
 		PreviewRes:   "640:-2",
 		AccurateRes:  "1280:-2",
+		GifRes:       "480:-2",
+		GifFPS:       12,
 		CPUPreset:    "veryfast",
 		MaxClipSec:   90,
+		MaxGifSec:    10,
 		DefaultPadMs: 250,
 	})
 	pipe := &probe.Pipeline{St: st, SubsCacheDir: filepath.Join(dir, "subs")}
@@ -271,10 +284,10 @@ func TestNewNodeServiceWiring(t *testing.T) {
 	if got.MediaRoot != "/srv/media" {
 		t.Errorf("MediaRoot = %q, want the scanner's exact string", got.MediaRoot)
 	}
-	if got.Clips.PreviewRes != "640:-2" || got.Clips.AccurateRes != "1280:-2" || got.Clips.CPUPreset != "veryfast" {
+	if got.Clips.PreviewRes != "640:-2" || got.Clips.AccurateRes != "1280:-2" || got.Clips.GifRes != "480:-2" || got.Clips.CPUPreset != "veryfast" {
 		t.Errorf("clip settings not mirrored: %+v", got.Clips)
 	}
-	if got.Clips.MaxClipSec != 90 || got.Clips.DefaultPadMs != 250 {
+	if got.Clips.MaxClipSec != 90 || got.Clips.MaxGifSec != 10 || got.Clips.GifFPS != 12 || got.Clips.DefaultPadMs != 250 {
 		t.Errorf("clip settings not mirrored: %+v", got.Clips)
 	}
 	if got.Version != version {

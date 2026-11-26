@@ -216,11 +216,22 @@ func (d Deps) handleChunk(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{
+	resp := map[string]any{
 		"chunk":         ch,
 		"media":         m,
 		"cues":          search.CueDTOs(span),
 		"contextBefore": search.CueDTOs(before),
 		"contextAfter":  search.CueDTOs(after),
-	})
+	}
+	if d.Clips != nil {
+		cfg := d.Clips.Config()
+		resp["clipLimits"] = map[string]any{
+			"maxClipSec":   cfg.MaxClipSec,
+			"maxGifSec":    min(cfg.MaxGifSec, cfg.MaxClipSec),
+			"defaultPadMs": cfg.DefaultPadMs,
+			"gifRes":       cfg.GifRes,
+			"gifFps":       cfg.GifFPS,
+		}
+	}
+	writeJSON(w, resp)
 }

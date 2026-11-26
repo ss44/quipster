@@ -139,6 +139,9 @@ func TestChunk(t *testing.T) {
 	if cues, ok := body["cues"].([]any); !ok || len(cues) != 2 {
 		t.Errorf("cues = %v", body["cues"])
 	}
+	if limits, ok := body["clipLimits"].(map[string]any); !ok || limits["maxGifSec"] != float64(10) || limits["gifRes"] != "480:-2" || limits["gifFps"] != float64(12) {
+		t.Errorf("clipLimits = %v", body["clipLimits"])
+	}
 
 	for _, target := range []string{
 		"/api/chunks/garbage",

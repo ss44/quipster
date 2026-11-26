@@ -110,8 +110,11 @@ func (d Deps) serveClip(w http.ResponseWriter, r *http.Request, path string, m *
 	}()
 	ext := strings.TrimPrefix(filepath.Ext(path), ".")
 	ct := "video/mp4"
-	if ext == "mkv" {
+	switch ext {
+	case "mkv":
 		ct = "video/x-matroska"
+	case "gif":
+		ct = "image/gif"
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Accept-Ranges", "bytes")

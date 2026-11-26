@@ -218,3 +218,86 @@ describe('ClipModal preview warning (issue #32)', () => {
     expect(qs('.close-btn')).not.toBeNull()
   })
 })
+
+describe('ClipModal GIF export', () => {
+  let wrapper: VueWrapper
+
+  beforeEach(async () => {
+    vi.spyOn(api, 'chunk').mockResolvedValue({
+      ...detail,
+      clipLimits: { maxClipSec: 120, maxGifSec: 10, defaultPadMs: 250, gifRes: '480:-2', gifFps: 12 },
+    })
+    const vuetify = createVuetify({
+      components: { VDialog, VRangeSlider, VBtn, VBtnToggle, VProgressLinear },
+    })
+    wrapper = mount(ClipModal, {
+      attachTo: document.body,
+      global: { plugins: [vuetify] },
+    })
+    window.dispatchEvent(new CustomEvent('open-clip', { detail: hit }))
+    await flushPromises()
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  function selectOutput(value: 'fast' | 'accurate' | 'gif') {
+    const toggle = wrapper.findComponent(VBtnToggle)
+    toggle.vm.$emit('update:modelValue', value)
+  }
+
+  it('blocks GIF export over 10s without reloading preview, then enables once trimmed within limit', async () => {
+    const initialVideo = qs<HTMLVideoElement>('video')!
+    const initialSrc = initialVideo.getAttribute('src')
+
+    // Initial selection spans 10s..35s (25.5s including padding), exceeding 10s.
+    selectOutput('gif')
+    await wrapper.vm.$nextTick()
+
+    expect(qs<HTMLVideoElement>('video')).toBe(initialVideo)
+    expect(qs<HTMLVideoElement>('video')!.getAttribute('src')).toBe(initialSrc)
+    expect(qs('.limit-msg')?.textContent).toContain('cannot exceed 10s')
+    expect(qs('.hint')?.textContent).toContain('480px wide')
+    expect(qs<HTMLButtonElement>('.btn-primary')!.disabled).toBe(true)
+    expect(qs<HTMLButtonElement>('.btn-secondary')!.disabled).toBe(true)
+    expect(qs<HTMLButtonElement>('.btn-primary')!.textContent?.trim()).toBe('Download GIF')
+
+    // Trimming to a single 5s line (5.5s with padding) satisfies the 10s GIF limit.
+    transcriptLines()[0].click()
+    await flushPromises()
+
+    expect(qs('.limit-msg')).toBeNull()
+    expect(qs<HTMLButtonElement>('.btn-primary')!.disabled).toBe(false)
+    expect(qs<HTMLButtonElement>('.btn-secondary')!.disabled).toBe(false)
+
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-disposition': 'attachment; filename="Sample Movie [10000-15000].gif"' }),
+      blob: async () => new Blob(['GIF89a'], { type: 'image/gif' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const createObjectURL = vi.fn(() => 'blob:gif-preview')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL, revokeObjectURL }))
+
+    qs<HTMLButtonElement>('.btn-secondary')!.click()
+    qs<HTMLButtonElement>('.btn-primary')!.click()
+    await flushPromises()
+
+    const copied = new URL(writeText.mock.calls[0][0]).searchParams
+    expect(copied.get('mode')).toBe('gif')
+    expect(copied.get('download')).toBeNull()
+
+    const downloaded = new URL(fetchMock.mock.calls[0][0], 'http://localhost').searchParams
+    expect(downloaded.get('mode')).toBe('gif')
+    expect(downloaded.get('download')).toBe('1')
+    expect(downloaded.get('padMs')).toBe('250')
+  })
+})

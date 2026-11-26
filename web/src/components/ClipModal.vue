@@ -72,6 +72,8 @@
               <span class="trim-meta">
                 <span class="mono">{{ fmt(selStart) }} – {{ fmt(selEnd) }}</span>
                 <span class="sep">·</span>
+                <span class="mono">{{ clipSpanSec.toFixed(1) }}s</span>
+                <span class="sep">·</span>
                 {{ selectedCount }} {{ selectedCount === 1 ? 'line' : 'lines' }}
               </span>
             </div>
@@ -98,7 +100,7 @@
             <div class="mode">
               <span class="field-label">Output</span>
               <v-btn-toggle
-                :model-value="mode"
+                :model-value="outputMode"
                 mandatory
                 density="compact"
                 divided
@@ -113,21 +115,35 @@
                 <v-btn value="accurate" size="small">
                   <span class="mode-btn">Precise</span>
                 </v-btn>
+                <v-btn value="gif" size="small">
+                  <span class="mode-btn">GIF</span>
+                </v-btn>
               </v-btn-toggle>
             </div>
             <div class="buttons">
-              <button type="button" class="btn-secondary" :disabled="downloading || cues.length === 0" @click="copyLink">
+              <button type="button" class="btn-secondary" :disabled="downloading || cues.length === 0 || gifTooLong" @click="copyLink">
                 Copy link
               </button>
-              <button type="button" class="btn-primary" :disabled="downloading || cues.length === 0" @click="download">
-                {{ downloading ? 'Working…' : 'Download' }}
+              <button type="button" class="btn-primary" :disabled="downloading || cues.length === 0 || gifTooLong" @click="download">
+                {{ downloading ? 'Working…' : outputMode === 'gif' ? 'Download GIF' : 'Download' }}
               </button>
             </div>
           </div>
 
           <p class="hint">
-            Fast copies the original stream from the previous keyframe. Precise re-encodes for exact
-            timing. Preview is always a lightweight transcode.
+            <template v-if="outputMode === 'gif'">
+              GIF exports a looping, audio-free animation ({{ gifResLabel }}, {{ gifFps }} fps, max
+              {{ formatLimitSec(maxGifSec) }}) sized for sharing on social apps.
+            </template>
+            <template v-else>
+              Fast copies the original stream from the previous keyframe. Precise re-encodes for exact
+              timing. Preview is always a lightweight transcode.
+            </template>
+          </p>
+
+          <p v-if="gifTooLong" class="limit-msg" role="status">
+            GIF exports cannot exceed {{ formatLimitSec(maxGifSec) }} (selected clip is
+            {{ clipSpanSec.toFixed(1) }}s including padding). Trim the range or switch to Fast cut / Precise.
           </p>
 
           <p v-if="clipError" class="error-msg">{{ clipError }}</p>
@@ -179,12 +195,14 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, clipStreamURL, type ChunkDetail, type CueDTO, type Hit } from '../api'
 import HazeText from './HazeText.vue'
 
+type OutputMode = 'fast' | 'accurate' | 'gif'
+
 const open = ref(false)
 const detail = ref<ChunkDetail | null>(null)
 const detailLoading = ref(false)
 const hit = ref<Hit | null>(null)
 const sel = ref<[number, number]>([0, 0])
-const accurate = ref(false)
+const outputMode = ref<OutputMode>('fast')
 const downloadPending = ref(false)
 const clipError = ref('')
 const jobProgress = ref<number | null>(null)
@@ -215,14 +233,18 @@ const canExtendAfter = computed(() => cues.value.length > 0 && (
 const selStart = computed(() => cues.value[Math.min(sel.value[0], cues.value.length - 1)]?.start ?? 0)
 const selEnd = computed(() => cues.value[Math.min(sel.value[1], cues.value.length - 1)]?.end ?? 0)
 const selectedCount = computed(() => cues.value.length ? Math.max(0, sel.value[1] - sel.value[0] + 1) : 0)
-const downloading = computed(() => downloadPending.value)
-const mode = computed({
-  get: () => (accurate.value ? 'accurate' : 'fast'),
-  set: (value: string) => {
-    accurate.value = value === 'accurate'
-    updatePreview()
-  },
+const defaultPadMs = computed(() => detail.value?.clipLimits?.defaultPadMs ?? 250)
+const maxGifSec = computed(() => detail.value?.clipLimits?.maxGifSec ?? 10)
+const gifFps = computed(() => detail.value?.clipLimits?.gifFps ?? 12)
+const gifResLabel = computed(() => formatGifRes(detail.value?.clipLimits?.gifRes ?? '480:-2'))
+const clipSpanSec = computed(() => {
+  if (!cues.value.length) return 0
+  return Math.max(0, selEnd.value - selStart.value) + (2 * defaultPadMs.value) / 1000
 })
+const gifTooLong = computed(() =>
+  outputMode.value === 'gif' && cues.value.length > 0 && clipSpanSec.value > maxGifSec.value + 0.001,
+)
+const downloading = computed(() => downloadPending.value)
 const titleLine = computed(() => {
   if (!detail.value) return ''
   const media = detail.value.media
@@ -241,7 +263,9 @@ watch(open, value => { if (!value) session++ }, { flush: 'sync' })
 watch(sel, () => { selectionVersion++ }, { deep: true, flush: 'sync' })
 
 function setMode(value: unknown) {
-  mode.value = String(value)
+  if (value === 'fast' || value === 'accurate' || value === 'gif') {
+    outputMode.value = value
+  }
 }
 
 function inRange(index: number): boolean {
@@ -290,7 +314,7 @@ function updatePreview() {
   if (!hit.value || cues.value.length === 0) return
   previewLoading.value = true
   posterURL.value = `/api/thumb/${hit.value.mediaId}?t=${selStart.value}&w=640`
-  previewURL.value = clipStreamURL(hit.value, selStart.value, selEnd.value, 'preview', false)
+  previewURL.value = clipStreamURL(hit.value, selStart.value, selEnd.value, 'preview', false, defaultPadMs.value)
 }
 
 function onPreviewLoaded() {
@@ -364,10 +388,11 @@ function expandTo(index: number) {
 }
 
 async function download() {
-  if (!hit.value || !cues.value.length) return
+  if (!hit.value || !cues.value.length || gifTooLong.value) return
   downloadPending.value = true
   clipError.value = ''
-  const url = clipStreamURL(hit.value, selStart.value, selEnd.value, accurate.value ? 'accurate' : 'fast', true)
+  const selectedMode = outputMode.value
+  const url = clipStreamURL(hit.value, selStart.value, selEnd.value, selectedMode, true, defaultPadMs.value)
   try {
     const res = await fetch(url)
     if (res.status === 202) {
@@ -378,7 +403,8 @@ async function download() {
       window.location.href = url
     } else if (res.ok) {
       const blob = await res.blob()
-      triggerBlobDownload(blob, filenameFromDisposition(res.headers.get('content-disposition')))
+      const fallbackExt = selectedMode === 'gif' ? 'gif' : 'mp4'
+      triggerBlobDownload(blob, filenameFromDisposition(res.headers.get('content-disposition'), fallbackExt))
     } else {
       const body = await res.json().catch(() => ({}))
       clipError.value = body.error || `clip failed: ${res.statusText}`
@@ -408,10 +434,10 @@ async function pollJob(jobId: number) {
   throw new Error('render timed out')
 }
 
-function filenameFromDisposition(value: string | null): string {
-  if (!value) return 'clip.mp4'
+function filenameFromDisposition(value: string | null, fallbackExt = 'mp4'): string {
+  if (!value) return `clip.${fallbackExt}`
   const match = value.match(/filename="?([^";]+)"?/)
-  return match ? match[1] : 'clip.mp4'
+  return match ? match[1] : `clip.${fallbackExt}`
 }
 
 function triggerBlobDownload(blob: Blob, name: string) {
@@ -424,10 +450,10 @@ function triggerBlobDownload(blob: Blob, name: string) {
 }
 
 async function copyLink() {
-  if (!hit.value || !cues.value.length) return
+  if (!hit.value || !cues.value.length || gifTooLong.value) return
   const url =
     window.location.origin +
-    clipStreamURL(hit.value, selStart.value, selEnd.value, accurate.value ? 'accurate' : 'fast', false)
+    clipStreamURL(hit.value, selStart.value, selEnd.value, outputMode.value, false, defaultPadMs.value)
   try {
     await navigator.clipboard.writeText(url)
     window.dispatchEvent(
@@ -436,6 +462,18 @@ async function copyLink() {
   } catch {
     window.prompt('Copy this link', url)
   }
+}
+
+function formatGifRes(res: string): string {
+  const [w, h] = res.split(':')
+  if (h === '-2' && w) return `${w}px wide`
+  if (w === '-2' && h) return `${h}p`
+  if (w && h) return `${w}×${h}`
+  return '480px wide'
+}
+
+function formatLimitSec(sec: number): string {
+  return Number.isInteger(sec) ? `${sec}s` : `${sec.toFixed(1)}s`
 }
 
 function fmt(seconds: number): string {
@@ -662,14 +700,27 @@ function pad(value: number): string {
   color: var(--text);
   font-size: 13px;
 }
-.btn-secondary:hover {
+.btn-secondary:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.05);
+}
+.btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .hint {
   margin: 12px 0 0;
   font-size: 11.5px;
   line-height: 1.5;
   color: var(--faint);
+}
+.limit-msg {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: #fde68a;
 }
 .error-msg {
   margin: 10px 0 0;

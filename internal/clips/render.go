@@ -29,22 +29,32 @@ func (s *Renderer) cut(ctx context.Context, key, src string, audioOrdinal int, r
 
 	var path string
 	var err error
-	if r.Mode == "fast" {
+	switch r.Mode {
+	case "fast":
 		dur := (r.End + pad) - start
 		if dur > s.cfg.MaxClipSec {
 			dur = s.cfg.MaxClipSec
 		}
 		path, err = s.cutFast(ctx, src, start, dur, audioOrdinal, outBase)
-	} else {
+	case "preview":
 		dur := r.End - r.Start + 2*pad
 		if dur > s.cfg.MaxClipSec {
 			dur = s.cfg.MaxClipSec
 		}
-		if r.Mode == "preview" {
-			path, err = s.cutPreview(ctx, src, start, dur, audioOrdinal, outBase)
-		} else {
-			path, err = s.cutAccurate(ctx, src, start, dur, audioOrdinal, outBase, report)
+		path, err = s.cutPreview(ctx, src, start, dur, audioOrdinal, outBase)
+	case "gif":
+		dur := r.End - r.Start + 2*pad
+		maxSec := min(s.cfg.MaxGifSec, s.cfg.MaxClipSec)
+		if dur > maxSec {
+			dur = maxSec
 		}
+		path, err = s.cutGif(ctx, src, start, dur, outBase, report)
+	default:
+		dur := r.End - r.Start + 2*pad
+		if dur > s.cfg.MaxClipSec {
+			dur = s.cfg.MaxClipSec
+		}
+		path, err = s.cutAccurate(ctx, src, start, dur, audioOrdinal, outBase, report)
 	}
 	if err != nil {
 		return "", "", err
@@ -70,10 +80,10 @@ func (s *Renderer) RenderLocal(ctx context.Context, src string, audioOrdinal int
 // RegisterRendered stores an externally rendered clip (from a worker node)
 // into the cache directory under the given cache key and records the cache
 // entry, exactly as a local render would have. The extension selects the
-// container; only mp4 and mkv are accepted because those are the outputs the
-// render paths produce.
+// container; only mp4, mkv, and gif are accepted because those are the outputs
+// the render paths produce.
 func (s *Service) RegisterRendered(key, ext string, r io.Reader) error {
-	if ext != "mp4" && ext != "mkv" {
+	if ext != "mp4" && ext != "mkv" && ext != "gif" {
 		return fmt.Errorf("unsupported clip container %q", ext)
 	}
 	outDir := filepath.Join(s.renderer.cfg.CacheDir, "clips")
