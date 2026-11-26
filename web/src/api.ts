@@ -313,6 +313,33 @@ export interface Benchmarks {
 }
 
 
+export type ClipExportMode = 'fast' | 'accurate' | 'gif'
+
+export interface ClipJobCreateResponse {
+  status: 'ready' | 'queued'
+  jobId?: number
+  cacheKey: string
+  cached: boolean
+  filename: string
+  downloadUrl: string
+}
+
+export interface ClipJobStatusResponse {
+  jobId: number
+  status: 'queued' | 'running' | 'done' | 'error'
+  progress: number
+  error: string
+  cacheKey: string
+  cached: boolean
+  filename?: string
+}
+
+export interface ClipCacheStatusResponse {
+  cacheKey: string
+  cached: boolean
+  sizeBytes?: number
+}
+
 async function getJSON<T>(url: string): Promise<T> {
   const res = await fetch(url)
   if (!res.ok) {
@@ -410,19 +437,38 @@ export const api = {
     }
     return res.json() as Promise<{ deleted: boolean }>
   },
+  createClipJob: async (query: string): Promise<ClipJobCreateResponse> => {
+    const res = await fetch(`/api/clips/jobs?${query}`, { method: 'POST' })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `clip failed: ${res.statusText}`)
+    }
+    return res.json() as Promise<ClipJobCreateResponse>
+  },
+  clipJobStatus: async (jobId: number): Promise<ClipJobStatusResponse | null> => {
+    const res = await fetch(`/api/clips/jobs/${jobId}`)
+    if (res.status === 404) return null
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `clip status failed: ${res.statusText}`)
+    }
+    return res.json() as Promise<ClipJobStatusResponse>
+  },
+  clipCacheStatus: async (cacheKey: string): Promise<ClipCacheStatusResponse> => {
+    return getJSON<ClipCacheStatusResponse>(`/api/clips/cache/${encodeURIComponent(cacheKey)}`)
+  },
 }
 
 export const diagnosticsStreamURL = '/api/admin/diagnostics/stream'
 
-export function clipStreamURL(
-  hit: Hit,
+export function clipQueryParams(
+  hit: Pick<Hit, 'mediaId'>,
   start: number,
   end: number,
   mode: string,
-  download: boolean,
   padMs = 250,
   subtitles?: SubtitleStyle | null,
-): string {
+): URLSearchParams {
   const p = new URLSearchParams({
     mediaId: String(hit.mediaId),
     start: start.toFixed(3),
@@ -435,6 +481,19 @@ export function clipStreamURL(
       p.set(k, v)
     }
   }
+  return p
+}
+
+export function clipStreamURL(
+  hit: Hit,
+  start: number,
+  end: number,
+  mode: string,
+  download: boolean,
+  padMs = 250,
+  subtitles?: SubtitleStyle | null,
+): string {
+  const p = clipQueryParams(hit, start, end, mode, padMs, subtitles)
   if (download) p.set('download', '1')
   return `/api/clips/stream?${p.toString()}`
 }
