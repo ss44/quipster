@@ -214,13 +214,13 @@ func TestProduce(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		req     Request
 		wantExt string
+		req     Request
 	}{
-		{"fast mode", Request{MediaID: id, Start: 10, End: 20, Mode: "fast", PadMs: 250}, "mp4"},
-		{"preview mode", Request{MediaID: id, Start: 10, End: 20, Mode: "preview", PadMs: 250}, "mp4"},
-		{"accurate mode", Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250}, "mp4"},
-		{"gif mode", Request{MediaID: id, Start: 10, End: 15, Mode: "gif", PadMs: 250}, "gif"},
+		{"fast mode", "mp4", Request{MediaID: id, Start: 10, End: 20, Mode: "fast", PadMs: 250}},
+		{"preview mode", "mp4", Request{MediaID: id, Start: 10, End: 20, Mode: "preview", PadMs: 250}},
+		{"accurate mode", "mp4", Request{MediaID: id, Start: 10, End: 20, Mode: "accurate", PadMs: 250}},
+		{"gif mode", "gif", Request{MediaID: id, Start: 10, End: 15, Mode: "gif", PadMs: 250}},
 	}
 
 	for _, tc := range tests {
@@ -229,7 +229,7 @@ func TestProduce(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Produce() error = %v", err)
 			}
-			if ext != tc.wantExt && !(tc.wantExt == "mp4" && ext == "mkv") {
+			if ext != tc.wantExt && (tc.wantExt != "mp4" || ext != "mkv") {
 				t.Errorf("expected %s, got %v", tc.wantExt, ext)
 			}
 			if _, err := os.Stat(path); err != nil {

@@ -380,8 +380,16 @@ func TestCreateClipTool(t *testing.T) {
 	if !strings.Contains(out.URL, "download=1") || !strings.Contains(out.URL, "/api/clips/stream") {
 		t.Errorf("clip url = %q", out.URL)
 	}
+}
 
-	// A cached GIF clip is served cleanly with mode=gif.
+func TestCreateClipToolGif(t *testing.T) {
+	fx := newFixture(t)
+	cs := connect(t, fx.srv, "tok", "read+clip")
+
+	if msg := callToolErr(t, cs, "create_clip", map[string]any{"mediaId": fx.id, "start": 0, "end": 11, "mode": "gif"}); msg == "" {
+		t.Error("gif clip > 10s unexpectedly succeeded")
+	}
+
 	gifReq := clips.Request{MediaID: fx.id, Start: 1, End: 5, Mode: "gif", PadMs: 250}
 	gifKey := fx.deps().Clips.CacheKey(gifReq)
 	gifPath := filepath.Join(t.TempDir(), "clip.gif")
@@ -391,7 +399,7 @@ func TestCreateClipTool(t *testing.T) {
 	if err := fx.st.UpsertCacheEntry(gifKey, gifPath, "clip", 6); err != nil {
 		t.Fatal(err)
 	}
-	out = structured[createClipOut](t, callTool(t, cs, "create_clip",
+	out := structured[createClipOut](t, callTool(t, cs, "create_clip",
 		map[string]any{"mediaId": fx.id, "start": 1, "end": 5, "mode": "gif", "padMs": 250, "download": true}))
 	if out.Status != "ready" || out.CacheKey != gifKey || !strings.Contains(out.URL, "mode=gif") {
 		t.Errorf("cached gif result = %+v", out)
