@@ -4,6 +4,7 @@ import { createVuetify } from 'vuetify'
 import { VBtn, VBtnToggle, VDialog, VProgressLinear, VRangeSlider } from 'vuetify/components'
 import ClipModal from './ClipModal.vue'
 import { api, type ChunkDetail, type Hit } from '../api'
+import { resetClipExportsForTest, setClipDownloadTrigger } from '../lib/clipDownloads'
 
 // MediaError codes from the HTMLMediaElement spec, mirroring the component.
 const MEDIA_ERR_ABORTED = 1
@@ -241,6 +242,7 @@ describe('ClipModal GIF export', () => {
   afterEach(() => {
     wrapper?.unmount()
     document.body.innerHTML = ''
+    resetClipExportsForTest()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
@@ -276,16 +278,20 @@ describe('ClipModal GIF export', () => {
 
     const writeText = vi.fn().mockResolvedValue(undefined)
     vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const downloadTrigger = vi.fn()
+    setClipDownloadTrigger(downloadTrigger)
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      headers: new Headers({ 'content-disposition': 'attachment; filename="Sample Movie [10000-15000].gif"' }),
-      blob: async () => new Blob(['GIF89a'], { type: 'image/gif' }),
+      json: async () => ({
+        status: 'ready',
+        cacheKey: '11111111111111111111111111111111',
+        cached: true,
+        filename: 'Sample Movie [10000-15000].gif',
+        downloadUrl: '/api/clips/stream?mediaId=7&start=10.000&end=15.000&mode=gif&padMs=250&download=1',
+      }),
     })
     vi.stubGlobal('fetch', fetchMock)
-    const createObjectURL = vi.fn(() => 'blob:gif-preview')
-    const revokeObjectURL = vi.fn()
-    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL, revokeObjectURL }))
 
     qs<HTMLButtonElement>('.btn-secondary')!.click()
     qs<HTMLButtonElement>('.btn-primary')!.click()
@@ -295,9 +301,15 @@ describe('ClipModal GIF export', () => {
     expect(copied.get('mode')).toBe('gif')
     expect(copied.get('download')).toBeNull()
 
-    const downloaded = new URL(fetchMock.mock.calls[0][0], 'http://localhost').searchParams
-    expect(downloaded.get('mode')).toBe('gif')
-    expect(downloaded.get('download')).toBe('1')
-    expect(downloaded.get('padMs')).toBe('250')
+    const [jobUrl, jobInit] = fetchMock.mock.calls[0]
+    expect(jobInit?.method).toBe('POST')
+    const submitted = new URL(jobUrl, 'http://localhost')
+    expect(submitted.pathname).toBe('/api/clips/jobs')
+    expect(submitted.searchParams.get('mode')).toBe('gif')
+    expect(submitted.searchParams.get('padMs')).toBe('250')
+    expect(downloadTrigger).toHaveBeenCalledWith(
+      '/api/clips/stream?mediaId=7&start=10.000&end=15.000&mode=gif&padMs=250&download=1',
+      'Sample Movie [10000-15000].gif',
+    )
   })
 })

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+
 	"quipster/internal/clips"
 	"quipster/internal/store"
 )
@@ -184,6 +186,169 @@ func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.serveClip(w, r, path, m, req)
+}
+
+// handleClipJobCreate schedules a clip render as a background job (or returns
+// immediately when the rendered file is already cached). Decoupling clip
+// rendering from the HTTP request lets renders finish even if the user closes
+// the preview modal or navigates away.
+func (d Deps) handleClipJobCreate(w http.ResponseWriter, r *http.Request) {
+	req, err := parseClipStreamRequest(r.URL.Query(), d.Clips.Config().DefaultPadMs)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	m, _, verr := d.Clips.Validate(req)
+	if verr != nil {
+		if errors.Is(verr, clips.ErrMediaArchived) {
+			writeErr(w, http.StatusNotFound, "media not found")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, verr.Error())
+		return
+	}
+	key := d.Clips.CacheKey(req)
+	downloadURL := clipDownloadURL(r.URL.Query())
+
+	if e, cerr := d.Clips.Cached(key); cerr != nil {
+		writeErr(w, http.StatusInternalServerError, cerr.Error())
+		return
+	} else if e != nil {
+		d.Clips.Touch(key)
+		ext := clipFileExt(e.Path, req.Mode)
+		writeJSON(w, map[string]any{
+			"status":      "ready",
+			"cacheKey":    key,
+			"cached":      true,
+			"filename":    clipName(m, req) + "." + ext,
+			"downloadUrl": downloadURL,
+		})
+		return
+	}
+
+	jobID, _, qerr := d.St.EnqueueUniqueJob("clip", clips.AsyncJobPayload(req), 1)
+	if qerr != nil {
+		writeErr(w, http.StatusInternalServerError, qerr.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]any{
+		"status":      "queued",
+		"jobId":       jobID,
+		"cacheKey":    key,
+		"cached":      false,
+		"filename":    clipName(m, req) + "." + expectedClipExt(req.Mode),
+		"downloadUrl": downloadURL,
+	})
+}
+
+// handleClipJobStatus reports progress and cache readiness for a single clip
+// job without exposing admin queue details or non-clip jobs.
+func (d Deps) handleClipJobStatus(w http.ResponseWriter, r *http.Request) {
+	jobID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || jobID <= 0 {
+		writeErr(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	job, err := d.St.GetJob(jobID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if job == nil || job.Type != "clip" {
+		writeErr(w, http.StatusNotFound, "clip job not found")
+		return
+	}
+	cacheKey, cached, filename := d.clipJobCacheInfo(job.Payload)
+	resp := map[string]any{
+		"jobId":    job.ID,
+		"status":   job.Status,
+		"progress": job.Progress,
+		"error":    job.Error,
+		"cacheKey": cacheKey,
+		"cached":   cached,
+	}
+	if filename != "" {
+		resp["filename"] = filename
+	}
+	writeJSON(w, resp)
+}
+
+// handleClipCacheStatus checks whether a previously rendered clip is still
+// present in the server cache so returning clients can distinguish instant
+// downloads from LRU-evicted exports.
+func (d Deps) handleClipCacheStatus(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	if !isHexCacheKey(key) {
+		writeErr(w, http.StatusBadRequest, "invalid cache key")
+		return
+	}
+	e, err := d.Clips.Cached(key)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resp := map[string]any{
+		"cacheKey": key,
+		"cached":   e != nil,
+	}
+	if e != nil {
+		resp["sizeBytes"] = e.Bytes
+	}
+	writeJSON(w, resp)
+}
+
+func (d Deps) clipJobCacheInfo(payload string) (string, bool, string) {
+	req, err := clips.ParseAsyncJobPayload(payload, d.Clips.Config().DefaultPadMs)
+	if err != nil {
+		return "", false, ""
+	}
+	key := d.Clips.CacheKey(req)
+	e, cerr := d.Clips.Cached(key)
+	if cerr != nil || e == nil {
+		return key, false, ""
+	}
+	var filename string
+	if m, merr := d.St.GetMedia(req.MediaID); merr == nil && m != nil {
+		filename = clipName(m, req) + "." + clipFileExt(e.Path, req.Mode)
+	}
+	return key, true, filename
+}
+
+func clipDownloadURL(q url.Values) string {
+	cloned := make(url.Values, len(q)+1)
+	for k, vals := range q {
+		cloned[k] = append([]string(nil), vals...)
+	}
+	cloned.Set("download", "1")
+	return "/api/clips/stream?" + cloned.Encode()
+}
+
+func expectedClipExt(mode string) string {
+	if mode == "gif" {
+		return "gif"
+	}
+	return "mp4"
+}
+
+func clipFileExt(path, mode string) string {
+	if ext := strings.TrimPrefix(filepath.Ext(path), "."); ext != "" {
+		return ext
+	}
+	return expectedClipExt(mode)
+}
+
+func isHexCacheKey(key string) bool {
+	if len(key) < 16 || len(key) > 64 {
+		return false
+	}
+	for _, rn := range key {
+		if (rn < '0' || rn > '9') && (rn < 'a' || rn > 'f') && (rn < 'A' || rn > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func (d Deps) serveClip(w http.ResponseWriter, r *http.Request, path string, m *store.MediaFile, req clips.Request) {

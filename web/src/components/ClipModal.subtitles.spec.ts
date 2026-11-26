@@ -4,6 +4,7 @@ import { createVuetify } from 'vuetify'
 import { VBtn, VBtnToggle, VDialog, VProgressLinear, VRangeSlider } from 'vuetify/components'
 import ClipModal from './ClipModal.vue'
 import { api, type ChunkDetail, type Hit } from '../api'
+import { resetClipExportsForTest, setClipDownloadTrigger } from '../lib/clipDownloads'
 
 const hit: Hit = {
   chunkId: '7_0-1',
@@ -93,6 +94,7 @@ describe('ClipModal embedded subtitles editor', () => {
   afterEach(() => {
     wrapper?.unmount()
     document.body.innerHTML = ''
+    resetClipExportsForTest()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
@@ -159,14 +161,21 @@ describe('ClipModal embedded subtitles editor', () => {
     // Download and Copy link include subtitle parameters and use accurate mode.
     const writeText = vi.fn().mockResolvedValue(undefined)
     vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const downloadTrigger = vi.fn()
+    setClipDownloadTrigger(downloadTrigger)
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      status: 200,
-      headers: new Headers({ 'content-disposition': 'attachment; filename="Sample Movie [10000-16000].mp4"' }),
-      blob: async () => new Blob(['MP4'], { type: 'video/mp4' }),
+      status: 202,
+      json: async () => ({
+        status: 'queued',
+        jobId: 77,
+        cacheKey: '22222222222222222222222222222222',
+        cached: false,
+        filename: 'Sample Movie [10000-16000].mp4',
+        downloadUrl: '/api/clips/stream?mediaId=7&start=10.000&end=16.000&mode=accurate&subs=1&download=1',
+      }),
     })
     vi.stubGlobal('fetch', fetchMock)
-    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:mp4'), revokeObjectURL: vi.fn() }))
 
     qs<HTMLButtonElement>('.btn-secondary')!.click()
     qs<HTMLButtonElement>('.btn-primary')!.click()
@@ -179,10 +188,13 @@ describe('ClipModal embedded subtitles editor', () => {
     expect(copied.get('subSize')).toBe('56')
     expect(copied.get('subUpper')).toBe('1')
 
-    const downloaded = new URL(fetchMock.mock.calls[0][0], 'http://localhost').searchParams
-    expect(downloaded.get('mode')).toBe('accurate')
-    expect(downloaded.get('subs')).toBe('1')
-    expect(downloaded.get('download')).toBe('1')
+    const [jobUrl, jobInit] = fetchMock.mock.calls[0]
+    expect(jobInit?.method).toBe('POST')
+    const submitted = new URL(jobUrl, 'http://localhost')
+    expect(submitted.pathname).toBe('/api/clips/jobs')
+    expect(submitted.searchParams.get('mode')).toBe('accurate')
+    expect(submitted.searchParams.get('subs')).toBe('1')
+    expect(qs('.progress-note')?.textContent).toContain('Rendering in background')
 
     // Preferences persist in localStorage.
     const saved = JSON.parse(window.localStorage.getItem('quipster.subtitleStyle.v1') || '{}')

@@ -136,11 +136,11 @@
               </v-btn-toggle>
             </div>
             <div class="buttons">
-              <button type="button" class="btn-secondary" :disabled="downloading || cues.length === 0 || gifTooLong" @click="copyLink">
+              <button type="button" class="btn-secondary" :disabled="submittingExport || cues.length === 0 || gifTooLong" @click="copyLink">
                 Copy link
               </button>
               <button type="button" class="btn-primary" :disabled="downloading || cues.length === 0 || gifTooLong" @click="download">
-                {{ downloading ? 'Working…' : outputMode === 'gif' ? 'Download GIF' : 'Download' }}
+                {{ downloadButtonLabel }}
               </button>
             </div>
           </div>
@@ -172,18 +172,19 @@
             Preview could not be played in this browser. Try downloading instead.
           </p>
 
-          <div v-if="jobProgress !== null" class="progress">
+          <div v-if="activeClipExport" class="progress">
             <div class="progress-labels">
-              <span>{{ jobLabel || 'Rendering clip…' }}</span>
-              <span>{{ Math.round((jobProgress || 0) * 100) }}%</span>
+              <span>{{ activeExportLabel }}</span>
+              <span>{{ Math.round((activeClipExport.progress || 0) * 100) }}%</span>
             </div>
             <v-progress-linear
-              :model-value="Math.round((jobProgress || 0) * 100)"
+              :model-value="Math.round((activeClipExport.progress || 0) * 100)"
               color="primary"
               height="4"
               rounded
-              :indeterminate="jobProgress === 0"
+              :indeterminate="activeClipExport.status === 'queued' || activeClipExport.progress <= 0.02"
             />
+            <p class="progress-note">Rendering in background — safe to close this preview or browse away.</p>
           </div>
         </section>
 
@@ -243,7 +244,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { api, clipStreamURL, type ChunkDetail, type CueDTO, type Hit } from '../api'
+import { api, clipQueryParams, clipStreamURL, type ChunkDetail, type CueDTO, type Hit } from '../api'
+import { useClipExports } from '../lib/clipDownloads'
 import {
   ensureFontFacesLoaded,
   loadSubtitleStyle,
@@ -257,6 +259,8 @@ import SubtitleStylePanel from './clip/SubtitleStylePanel.vue'
 type OutputMode = 'fast' | 'accurate' | 'gif'
 type SideTab = 'transcript' | 'subtitles'
 
+const { startClipExport, findExportByQuery } = useClipExports()
+
 const open = ref(false)
 const detail = ref<ChunkDetail | null>(null)
 const detailLoading = ref(false)
@@ -265,10 +269,8 @@ const sel = ref<[number, number]>([0, 0])
 const sideTab = ref<SideTab>('transcript')
 const subtitleStyle = ref<SubtitleStyle>(loadSubtitleStyle())
 const outputMode = ref<OutputMode>(subtitleStyle.value.enabled ? 'accurate' : 'fast')
-const downloadPending = ref(false)
+const submittingExport = ref(false)
 const clipError = ref('')
-const jobProgress = ref<number | null>(null)
-const jobLabel = ref('')
 const previewURL = ref('')
 const previewLoading = ref(false)
 const previewFailed = ref(false)
@@ -316,7 +318,37 @@ const clipSpanSec = computed(() => {
 const gifTooLong = computed(() =>
   outputMode.value === 'gif' && cues.value.length > 0 && clipSpanSec.value > maxGifSec.value + 0.001,
 )
-const downloading = computed(() => downloadPending.value)
+const currentExportQuery = computed(() => {
+  if (!hit.value || !cues.value.length) return ''
+  return clipQueryParams(
+    hit.value,
+    selStart.value,
+    selEnd.value,
+    outputMode.value,
+    defaultPadMs.value,
+    subtitleStyle.value,
+  ).toString()
+})
+const currentClipExport = computed(() =>
+  currentExportQuery.value ? findExportByQuery(currentExportQuery.value) : undefined,
+)
+const activeClipExport = computed(() => {
+  const item = currentClipExport.value
+  return item && (item.status === 'queued' || item.status === 'running') ? item : null
+})
+const activeExportLabel = computed(() => {
+  if (!activeClipExport.value) return ''
+  if (activeClipExport.value.status === 'queued') return 'Queued for background render…'
+  if (activeClipExport.value.mode === 'gif') return 'Rendering GIF…'
+  if (activeClipExport.value.mode === 'fast') return 'Preparing clip…'
+  return 'Rendering precise clip…'
+})
+const downloading = computed(() => submittingExport.value || activeClipExport.value !== null)
+const downloadButtonLabel = computed(() => {
+  if (submittingExport.value) return 'Starting…'
+  if (activeClipExport.value) return 'Rendering…'
+  return outputMode.value === 'gif' ? 'Download GIF' : 'Download'
+})
 const titleLine = computed(() => {
   if (!detail.value) return ''
   const media = detail.value.media
@@ -394,7 +426,6 @@ async function onOpenClip(e: Event) {
   previewLoading.value = false
   clipError.value = ''
   previewFailed.value = false
-  jobProgress.value = null
   sideTab.value = 'transcript'
   videoCurrentTime.value = 0
   videoWidth.value = 0
@@ -518,73 +549,27 @@ function expandTo(index: number) {
 }
 
 async function download() {
-  if (!hit.value || !cues.value.length || gifTooLong.value) return
-  downloadPending.value = true
+  if (!hit.value || !cues.value.length || gifTooLong.value || downloading.value) return
+  submittingExport.value = true
   clipError.value = ''
   const selectedMode = outputMode.value
-  const url = clipStreamURL(
-    hit.value,
-    selStart.value,
-    selEnd.value,
-    selectedMode,
-    true,
-    defaultPadMs.value,
-    subtitleStyle.value,
-  )
+  const quote = selectedCues.value.map((c) => c.text).join(' ').trim()
   try {
-    const res = await fetch(url)
-    if (res.status === 202) {
-      const body = await res.json()
-      jobProgress.value = 0
-      jobLabel.value = 'Rendering accurate clip…'
-      await pollJob(body.jobId)
-      window.location.href = url
-    } else if (res.ok) {
-      const blob = await res.blob()
-      const fallbackExt = selectedMode === 'gif' ? 'gif' : 'mp4'
-      triggerBlobDownload(blob, filenameFromDisposition(res.headers.get('content-disposition'), fallbackExt))
-    } else {
-      const body = await res.json().catch(() => ({}))
-      clipError.value = body.error || `clip failed: ${res.statusText}`
-    }
+    await startClipExport({
+      hit: hit.value,
+      title: titleLine.value || hit.value.showTitle || hit.value.mediaTitle || 'Clip',
+      quote,
+      start: selStart.value,
+      end: selEnd.value,
+      mode: selectedMode,
+      padMs: defaultPadMs.value,
+      subtitles: subtitleStyle.value,
+    })
   } catch (err) {
     clipError.value = (err as Error).message
   } finally {
-    downloadPending.value = false
-    jobProgress.value = null
-    jobLabel.value = ''
+    submittingExport.value = false
   }
-}
-
-async function pollJob(jobId: number) {
-  for (let n = 0; n < 900; n++) {
-    await new Promise((resolve) => setTimeout(resolve, 1000))
-    const { jobs } = await api.jobs()
-    const job = jobs?.find((item) => item.id === jobId)
-    if (!job) continue
-    jobProgress.value = job.progress || 0.02
-    if (job.status === 'done') {
-      jobProgress.value = 1
-      return
-    }
-    if (job.status === 'error') throw new Error(job.error || 'render failed')
-  }
-  throw new Error('render timed out')
-}
-
-function filenameFromDisposition(value: string | null, fallbackExt = 'mp4'): string {
-  if (!value) return `clip.${fallbackExt}`
-  const match = value.match(/filename="?([^";]+)"?/)
-  return match ? match[1] : `clip.${fallbackExt}`
-}
-
-function triggerBlobDownload(blob: Blob, name: string) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 30000)
 }
 
 async function copyLink() {
@@ -886,6 +871,11 @@ function pad(value: number): string {
   font-size: 11.5px;
   color: var(--muted);
   margin-bottom: 4px;
+}
+.progress-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--faint);
 }
 .side-col {
   display: flex;

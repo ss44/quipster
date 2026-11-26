@@ -108,6 +108,9 @@ func Router(d Deps) http.Handler {
 	r.Get("/api/chunks/{id}", d.handleChunk)
 	r.Get("/api/quotes", d.handleQuotes)
 	r.Get("/api/clips/stream", d.handleClipStream)
+	r.Post("/api/clips/jobs", d.handleClipJobCreate)
+	r.Get("/api/clips/jobs/{id}", d.handleClipJobStatus)
+	r.Get("/api/clips/cache/{key}", d.handleClipCacheStatus)
 	r.Get("/api/fonts", d.handleFontsList)
 	r.Get("/api/fonts/{file}", d.handleFontFile)
 

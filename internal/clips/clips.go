@@ -659,40 +659,52 @@ func AsyncJobPayload(r Request) string {
 	return string(b)
 }
 
+// ParseAsyncJobPayload decodes a clip job's JSON payload back into a Request,
+// applying the default mode ("accurate") and default padding when omitted.
+func ParseAsyncJobPayload(payload string, defaultPadMs int) (Request, error) {
+	var p struct {
+		Subtitles *SubtitleStyle `json:"subtitles,omitempty"`
+		PadMs     *int           `json:"padMs,omitempty"`
+		Mode      string         `json:"mode"`
+		MediaID   int64          `json:"mediaId"`
+		Start     float64        `json:"start"`
+		End       float64        `json:"end"`
+	}
+	if err := json.Unmarshal([]byte(payload), &p); err != nil {
+		return Request{}, fmt.Errorf("bad payload: %w", err)
+	}
+	r := Request{
+		MediaID: p.MediaID, Start: p.Start, End: p.End,
+		Mode: p.Mode, Subtitles: p.Subtitles,
+	}
+	if r.Mode == "" {
+		r.Mode = "accurate"
+	}
+	if p.PadMs == nil || *p.PadMs < 0 {
+		r.PadMs = defaultPadMs
+	} else {
+		r.PadMs = *p.PadMs
+	}
+	return r, nil
+}
+
 // JobHandler renders clips enqueued as async jobs, reporting progress.
 func (s *Service) JobHandler() func(ctx context.Context, j *store.Job, progress func(float64)) error {
 	return func(ctx context.Context, j *store.Job, progress func(float64)) error {
-		var payload struct {
-			Subtitles *SubtitleStyle `json:"subtitles,omitempty"`
-			Mode      string         `json:"mode"`
-			MediaID   int64          `json:"mediaId"`
-			Start     float64        `json:"start"`
-			End       float64        `json:"end"`
-			PadMs     int            `json:"padMs"`
-		}
-		if err := json.Unmarshal([]byte(j.Payload), &payload); err != nil {
-			return fmt.Errorf("bad payload: %w", err)
-		}
-		r := Request{
-			MediaID: payload.MediaID, Start: payload.Start, End: payload.End,
-			PadMs: payload.PadMs, Mode: payload.Mode, Subtitles: payload.Subtitles,
-		}
-		if r.Mode == "" {
-			r.Mode = "accurate"
-		}
-		if r.PadMs <= 0 {
-			r.PadMs = s.renderer.cfg.DefaultPadMs
+		r, err := ParseAsyncJobPayload(j.Payload, s.renderer.cfg.DefaultPadMs)
+		if err != nil {
+			return err
 		}
 		// Media archived between request and render: finish quietly instead of
 		// burning retries on a render that must not happen. If the media is
 		// restored later, the client simply re-requests the clip. Unknown
 		// media still falls through to the normal validation error.
-		if m, err := s.st.GetMedia(payload.MediaID); err != nil {
-			return err
+		if m, merr := s.st.GetMedia(r.MediaID); merr != nil {
+			return merr
 		} else if m != nil && m.Archived {
 			return nil
 		}
-		_, _, err := s.RunWithProgress(ctx, r, progress)
+		_, _, err = s.RunWithProgress(ctx, r, progress)
 		return err
 	}
 }

@@ -104,13 +104,16 @@ describe('ClipModal subtitle-line extension', () => {
     document.body.querySelector<HTMLButtonElement>('.btn-primary')!.click()
     await flushPromises()
     const copy = new URL(writeText.mock.calls[0][0]).searchParams
-    const download = new URL(fetchMock.mock.calls[0][0], 'http://localhost').searchParams
+    const [jobUrl, jobInit] = fetchMock.mock.calls[0]
+    const downloadUrl = new URL(jobUrl, 'http://localhost')
+    const download = downloadUrl.searchParams
     for (const params of [copy, download]) {
       expect(params.get('start')).toBe('10.000')
       expect(params.get('end')).toBe('45.000')
       expect(params.get('mode')).toBe('fast')
     }
-    expect(download.get('download')).toBe('1')
+    expect(jobInit?.method).toBe('POST')
+    expect(downloadUrl.pathname).toBe('/api/clips/jobs')
     expect(document.body.querySelector('video')!.getAttribute('src')).toBe(initialSrc)
     slider.vm.$emit('end', [0, 3])
     await flushPromises()

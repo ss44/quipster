@@ -11,6 +11,7 @@
         </div>
 
         <nav class="d-flex align-center" style="gap: 4px">
+          <ClipExportsTray />
           <RouterLink to="/admin/library" class="nav-link d-none d-sm-inline-flex align-center">
             <v-icon icon="mdi-tune-variant" size="15" class="mr-1" />
             Library
@@ -46,6 +47,7 @@ import { onMounted, onUnmounted, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import SearchBar from './components/SearchBar.vue'
 import ClipModal from './components/ClipModal.vue'
+import ClipExportsTray from './components/clip/ClipExportsTray.vue'
 import BrandLogo from './components/BrandLogo.vue'
 
 const router = useRouter()

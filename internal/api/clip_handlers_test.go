@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"quipster/internal/clips"
 )
 
@@ -235,5 +238,125 @@ func TestClipStreamSubtitles(t *testing.T) {
 		fmt.Sprintf("/api/clips/stream?mediaId=%d&start=0&end=10&mode=accurate&subs=1&subFont=oswald&subUpper=1", id), nil, nil)
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("long subtitled clip status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func stringField(t *testing.T, m map[string]any, key string) string {
+	t.Helper()
+	val, ok := m[key].(string)
+	if !ok {
+		t.Fatalf("%s = %T (%v), want string", key, m[key], m[key])
+	}
+	return val
+}
+
+func int64Field(t *testing.T, m map[string]any, key string) int64 {
+	t.Helper()
+	val, ok := m[key].(float64)
+	if !ok || val <= 0 {
+		t.Fatalf("%s = %T (%v), want positive number", key, m[key], m[key])
+	}
+	return int64(val)
+}
+
+func TestClipJobsLifecycle(t *testing.T) {
+	st, deps := newEnv(t)
+	id := seedMedia(t, st)
+	// Ensure public clip job endpoints stay accessible even when admin API token is set.
+	deps.APIToken = "secret-admin-token"
+	h := Router(deps)
+
+	target := fmt.Sprintf("/api/clips/jobs?mediaId=%d&start=1&end=4&mode=gif&padMs=250", id)
+	rr := do(t, h, http.MethodPost, target, nil, nil)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+	body := decodeMap(t, rr)
+	jobID := int64Field(t, body, "jobId")
+	cacheKey := stringField(t, body, "cacheKey")
+	assert.True(t, isHexCacheKey(cacheKey))
+	assert.Equal(t, "queued", body["status"])
+	assert.Equal(t, false, body["cached"])
+	assert.True(t, strings.HasSuffix(stringField(t, body, "filename"), ".gif"))
+	assert.Contains(t, stringField(t, body, "downloadUrl"), "download=1")
+	assert.Contains(t, stringField(t, body, "downloadUrl"), "mode=gif")
+
+	// Duplicate submission deduplicates onto the same in-flight job.
+	rr2 := do(t, h, http.MethodPost, target, nil, nil)
+	require.Equal(t, http.StatusAccepted, rr2.Code)
+	assert.Equal(t, jobID, int64Field(t, decodeMap(t, rr2), "jobId"))
+
+	// Public status endpoint reports queued before render completes.
+	rr = do(t, h, http.MethodGet, fmt.Sprintf("/api/clips/jobs/%d", jobID), nil, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "queued", decodeMap(t, rr)["status"])
+
+	// Simulate completion + cached file on disk.
+	path := filepath.Join(t.TempDir(), "out.gif")
+	require.NoError(t, os.WriteFile(path, []byte("GIF89a-ready"), 0o600))
+	require.NoError(t, st.UpsertCacheEntry(cacheKey, path, "clip", 12))
+	require.NoError(t, st.FinishJob(jobID, "done", ""))
+
+	rr = do(t, h, http.MethodGet, fmt.Sprintf("/api/clips/jobs/%d", jobID), nil, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	doneBody := decodeMap(t, rr)
+	assert.Equal(t, "done", doneBody["status"])
+	assert.Equal(t, true, doneBody["cached"])
+	assert.Contains(t, stringField(t, doneBody, "filename"), "Show S01E01")
+	assert.True(t, strings.HasSuffix(stringField(t, doneBody, "filename"), ".gif"))
+
+	// Re-submitting the same clip now returns 200 ready immediately from cache.
+	rr = do(t, h, http.MethodPost, target, nil, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	readyBody := decodeMap(t, rr)
+	assert.Equal(t, "ready", readyBody["status"])
+	assert.Equal(t, true, readyBody["cached"])
+
+	// Cache status endpoint reports hit for cached key and miss for unknown key.
+	rr = do(t, h, http.MethodGet, "/api/clips/cache/"+cacheKey, nil, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	cacheBody := decodeMap(t, rr)
+	assert.Equal(t, true, cacheBody["cached"])
+	assert.Equal(t, float64(12), cacheBody["sizeBytes"])
+
+	rr = do(t, h, http.MethodGet, "/api/clips/cache/0123456789abcdef0123456789abcdef", nil, nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, false, decodeMap(t, rr)["cached"])
+}
+
+func TestClipJobsValidationAndIsolation(t *testing.T) {
+	st, deps := newEnv(t)
+	id := seedMedia(t, st)
+	h := Router(deps)
+
+	badCreates := []string{
+		"/api/clips/jobs?mediaId=1&start=5&end=1",
+		fmt.Sprintf("/api/clips/jobs?mediaId=%d&start=1&end=4&mode=fast&subs=1", id),
+	}
+	for _, target := range badCreates {
+		if rr := do(t, h, http.MethodPost, target, nil, nil); rr.Code != http.StatusBadRequest {
+			t.Errorf("POST %s status = %d, want 400", target, rr.Code)
+		}
+	}
+
+	if rr := do(t, h, http.MethodGet, "/api/clips/cache/not-hex!", nil, nil); rr.Code != http.StatusBadRequest {
+		t.Errorf("bad cache key status = %d, want 400", rr.Code)
+	}
+	if rr := do(t, h, http.MethodGet, "/api/clips/jobs/abc", nil, nil); rr.Code != http.StatusBadRequest {
+		t.Errorf("bad job id status = %d, want 400", rr.Code)
+	}
+
+	// Non-clip jobs must not be exposed by the public clip job endpoint.
+	probeJobID, err := st.EnqueueJob("probe", fmt.Sprintf(`{"mediaId":%d}`, id), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := do(t, h, http.MethodGet, fmt.Sprintf("/api/clips/jobs/%d", probeJobID), nil, nil); rr.Code != http.StatusNotFound {
+		t.Errorf("probe job on clip endpoint status = %d, want 404", rr.Code)
+	}
+
+	// Archived media returns 404 on job creation.
+	archiveViaScan(t, st, id)
+	rr := do(t, h, http.MethodPost, fmt.Sprintf("/api/clips/jobs?mediaId=%d&start=1&end=4&mode=accurate", id), nil, nil)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("archived media create status = %d, want 404", rr.Code)
 	}
 }
