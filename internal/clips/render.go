@@ -15,7 +15,7 @@ import (
 // no validation and no store bookkeeping, which lets a worker node render a
 // clip for a coordinating server without database access. report is forwarded
 // to the transcode path for 0..1 progress and may be nil.
-func (s *Renderer) cut(ctx context.Context, key, src string, audioOrdinal int, r Request, report func(float64)) (string, string, error) {
+func (s *Renderer) cut(ctx context.Context, key, src string, audioOrdinal, width, height int, r Request, cues []SubtitleCue, report func(float64)) (string, string, error) {
 	pad := float64(r.PadMs) / 1000
 	outDir := filepath.Join(s.cfg.CacheDir, "clips")
 	if mkErr := os.MkdirAll(outDir, 0o750); mkErr != nil {
@@ -48,13 +48,23 @@ func (s *Renderer) cut(ctx context.Context, key, src string, audioOrdinal int, r
 		if dur > maxSec {
 			dur = maxSec
 		}
-		path, err = s.cutGif(ctx, src, start, dur, outBase, report)
+		subFilter, cleanup, serr := s.prepareSubtitleFilter(r.Subtitles, cues, start, dur, width, height)
+		if serr != nil {
+			return "", "", serr
+		}
+		defer cleanup()
+		path, err = s.cutGif(ctx, src, start, dur, outBase, subFilter, report)
 	default:
 		dur := r.End - r.Start + 2*pad
 		if dur > s.cfg.MaxClipSec {
 			dur = s.cfg.MaxClipSec
 		}
-		path, err = s.cutAccurate(ctx, src, start, dur, audioOrdinal, outBase, report)
+		subFilter, cleanup, serr := s.prepareSubtitleFilter(r.Subtitles, cues, start, dur, width, height)
+		if serr != nil {
+			return "", "", serr
+		}
+		defer cleanup()
+		path, err = s.cutAccurate(ctx, src, start, dur, audioOrdinal, outBase, subFilter, report)
 	}
 	if err != nil {
 		return "", "", err
@@ -74,7 +84,14 @@ func (s *Service) registerCacheEntry(key, path string) error {
 
 // RenderLocal renders a clip directly to the renderer's configured cache directory.
 func (s *Renderer) RenderLocal(ctx context.Context, src string, audioOrdinal int, r Request, report func(float64)) (string, string, error) {
-	return s.cut(ctx, s.CacheKey(r), src, audioOrdinal, r, report)
+	return s.RenderLocalWithSubtitles(ctx, src, audioOrdinal, 0, 0, r, nil, report)
+}
+
+// RenderLocalWithSubtitles renders a clip directly to the renderer's cache
+// directory with optional pre-resolved subtitle cues and source dimensions so
+// worker nodes can burn subtitles without accessing the coordinator's store.
+func (s *Renderer) RenderLocalWithSubtitles(ctx context.Context, src string, audioOrdinal, width, height int, r Request, cues []SubtitleCue, report func(float64)) (string, string, error) {
+	return s.cut(ctx, s.CacheKey(r), src, audioOrdinal, width, height, r, cues, report)
 }
 
 // RegisterRendered stores an externally rendered clip (from a worker node)

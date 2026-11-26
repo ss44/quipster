@@ -38,7 +38,96 @@ func parseClipStreamRequest(q url.Values, defaultPadMs int) (clips.Request, erro
 			return clips.Request{}, errors.New("padMs out of range")
 		}
 	}
-	return clips.Request{MediaID: mediaID, Start: start, End: end, PadMs: padMs, Mode: mode}, nil
+	subs, err := parseSubtitleStyle(q)
+	if err != nil {
+		return clips.Request{}, err
+	}
+	return clips.Request{MediaID: mediaID, Start: start, End: end, PadMs: padMs, Mode: mode, Subtitles: subs}, nil
+}
+
+// parseSubtitleStyle extracts optional burned-in subtitle styling query
+// parameters from the clip stream URL. Absent or false "subs" yields nil so
+// ordinary clips stay completely unaffected.
+func parseSubtitleStyle(q url.Values) (*clips.SubtitleStyle, error) {
+	raw := strings.ToLower(strings.TrimSpace(q.Get("subs")))
+	if raw == "" || raw == "0" || raw == "false" {
+		return nil, nil
+	}
+	if raw != "1" && raw != "true" {
+		return nil, errors.New("subs must be 0 or 1")
+	}
+	st := clips.DefaultSubtitleStyle()
+	if v := q.Get("subFont"); v != "" {
+		st.Font = v
+	}
+	if err := parseSubNumerics(q, &st); err != nil {
+		return nil, err
+	}
+	if v := q.Get("subColor"); v != "" {
+		st.Color = v
+	}
+	if v := q.Get("subOutlineColor"); v != "" {
+		st.OutlineColor = v
+	}
+	if v := q.Get("subBgColor"); v != "" {
+		st.BgColor = v
+	}
+	if v := q.Get("subPos"); v != "" {
+		st.Position = v
+	}
+	st.Bold = parseBoolQuery(q.Get("subBold"))
+	st.Italic = parseBoolQuery(q.Get("subItalic"))
+	st.Uppercase = parseBoolQuery(q.Get("subUpper"))
+
+	norm, err := clips.NormalizeSubtitleStyle(st)
+	if err != nil {
+		return nil, err
+	}
+	return &norm, nil
+}
+
+func parseSubNumerics(q url.Values, st *clips.SubtitleStyle) error {
+	if v := q.Get("subSize"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return errors.New("invalid subSize")
+		}
+		st.FontSize = n
+	}
+	if v := q.Get("subOutline"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return errors.New("invalid subOutline")
+		}
+		st.Outline = f
+	}
+	if v := q.Get("subShadow"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return errors.New("invalid subShadow")
+		}
+		st.Shadow = f
+	}
+	if v := q.Get("subBg"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return errors.New("invalid subBg")
+		}
+		st.BgOpacity = f
+	}
+	if v := q.Get("subMargin"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return errors.New("invalid subMargin")
+		}
+		st.MarginV = n
+	}
+	return nil
+}
+
+func parseBoolQuery(v string) bool {
+	s := strings.ToLower(strings.TrimSpace(v))
+	return s == "1" || s == "true"
 }
 
 func (d Deps) handleClipStream(w http.ResponseWriter, r *http.Request) {

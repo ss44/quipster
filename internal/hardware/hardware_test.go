@@ -97,6 +97,76 @@ func TestPipelinePerBackend(t *testing.T) {
 	}
 }
 
+func TestPipelineWithCPUFilter(t *testing.T) {
+	// Empty CPU filter delegates identically to Pipeline.
+	va := Capabilities{Backend: BackendVaapi, Device: "/dev/dri/renderD128"}
+	if got, want := va.PipelineWithCPUFilter("1280:-2", ""), va.Pipeline("1280:-2"); got.Filter != want.Filter || got.Encoder != want.Encoder {
+		t.Fatalf("empty filter mismatch: got %+v, want %+v", got, want)
+	}
+
+	const f = "ass=filename='a.ass':fontsdir='fonts'"
+	//nolint:govet // field grouping favors readability over optimal alignment.
+	cases := []struct {
+		name        string
+		caps        Capabilities
+		wantInput   []string
+		wantFilter  string
+		wantEncoder string
+		wantHW      bool
+	}{
+		{
+			name:        "cpu",
+			caps:        Capabilities{},
+			wantFilter:  "scale=1280:-2," + f,
+			wantEncoder: "libx264",
+		},
+		{
+			name:        "vaapi uploads after cpu filter",
+			caps:        va,
+			wantInput:   []string{"-vaapi_device", "/dev/dri/renderD128", "-hwaccel", "vaapi"},
+			wantFilter:  "scale=1280:-2," + f + ",format=nv12,hwupload",
+			wantEncoder: "h264_vaapi",
+			wantHW:      true,
+		},
+		{
+			name:        "nvenc decodes to sysmem and formats yuv420p",
+			caps:        Capabilities{Backend: BackendNvenc},
+			wantInput:   []string{"-hwaccel", "cuda"},
+			wantFilter:  "scale=1280:-2," + f + ",format=yuv420p",
+			wantEncoder: "h264_nvenc",
+			wantHW:      true,
+		},
+		{
+			name:        "qsv keeps sysmem pipeline",
+			caps:        Capabilities{Backend: BackendQsv},
+			wantInput:   []string{"-hwaccel", "qsv"},
+			wantFilter:  "scale=1280:-2," + f,
+			wantEncoder: "h264_qsv",
+			wantHW:      true,
+		},
+		{
+			name:        "videotoolbox keeps sysmem pipeline",
+			caps:        Capabilities{Backend: BackendVideotoolbox},
+			wantInput:   []string{"-hwaccel", "videotoolbox"},
+			wantFilter:  "scale=1280:-2," + f,
+			wantEncoder: "h264_videotoolbox",
+			wantHW:      true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := tc.caps.PipelineWithCPUFilter("1280:-2", f)
+			assertArgs(t, "Input", p.Input, tc.wantInput)
+			if p.Filter != tc.wantFilter {
+				t.Errorf("Filter = %q, want %q", p.Filter, tc.wantFilter)
+			}
+			if p.Encoder != tc.wantEncoder || p.IsHW != tc.wantHW {
+				t.Errorf("Encoder/IsHW = %q/%v, want %q/%v", p.Encoder, p.IsHW, tc.wantEncoder, tc.wantHW)
+			}
+		})
+	}
+}
+
 func assertArgs(t *testing.T, name string, got, want []string) {
 	t.Helper()
 	if len(got) != len(want) {

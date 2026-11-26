@@ -133,19 +133,35 @@ func (s *Service) CacheKey(r Request) string {
 }
 
 // Request describes one clip render: the media, the [Start, End] window in
-// seconds, symmetric padding in milliseconds and the cut mode
-// (fast | preview | accurate | gif).
+// seconds, symmetric padding in milliseconds, the cut mode
+// (fast | preview | accurate | gif), and optional burned-in subtitle styling.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
 type Request struct {
-	Mode    string // fast | preview | accurate | gif
-	MediaID int64
-	Start   float64
-	End     float64
-	PadMs   int
+	Mode      string // fast | preview | accurate | gif
+	MediaID   int64
+	Start     float64
+	End       float64
+	PadMs     int
+	Subtitles *SubtitleStyle
 }
 
 // ErrMediaArchived is returned when a clip is requested for an archived media
 // file. Callers map it to HTTP 404 rather than treating it as a bad request.
 var ErrMediaArchived = errors.New("media is archived")
+
+// validateSubtitles verifies that subtitle burn-in options are compatible with
+// the requested mode and contain valid style parameters.
+func validateSubtitles(r Request) error {
+	if r.Subtitles == nil || !r.Subtitles.Enabled {
+		return nil
+	}
+	if r.Mode == "fast" {
+		return fmt.Errorf("fast mode cannot embed subtitles; use accurate or gif")
+	}
+	_, err := NormalizeSubtitleStyle(*r.Subtitles)
+	return err
+}
 
 // Validate checks clip parameters against SQLite and caps.
 func (s *Service) Validate(r Request) (*store.MediaFile, float64, error) {
@@ -153,6 +169,9 @@ func (s *Service) Validate(r Request) (*store.MediaFile, float64, error) {
 	case "fast", "accurate", "preview", "gif":
 	default:
 		return nil, 0, fmt.Errorf("mode must be fast, preview, accurate or gif")
+	}
+	if err := validateSubtitles(r); err != nil {
+		return nil, 0, err
 	}
 	if r.End <= r.Start {
 		return nil, 0, fmt.Errorf("start must be before end")
@@ -266,7 +285,18 @@ func (s *Service) render(ctx context.Context, key string, r Request, report func
 	if err != nil {
 		return "", "", err
 	}
-	path, ext, err := s.renderer.cut(ctx, key, m.Path, m.AudioStreamIndex, r, report)
+	var subCues []SubtitleCue
+	if r.Subtitles != nil && r.Subtitles.Enabled {
+		cues, cerr := s.st.CuesBetween(r.MediaID, r.Start, r.End)
+		if cerr != nil {
+			return "", "", fmt.Errorf("load clip subtitles: %w", cerr)
+		}
+		subCues = make([]SubtitleCue, len(cues))
+		for i, c := range cues {
+			subCues[i] = SubtitleCue{Start: c.StartSec, End: c.EndSec, Text: c.Text}
+		}
+	}
+	path, ext, err := s.renderer.cut(ctx, key, m.Path, m.AudioStreamIndex, m.Width, m.Height, r, subCues, report)
 	if err != nil {
 		return "", "", err
 	}
@@ -311,9 +341,9 @@ func (s *Renderer) cutPreview(ctx context.Context, src string, start, dur float6
 // cutAccurate transcodes a high-quality 720p clip, preferring the hardware
 // pipeline and falling back to libx264 when hardware encoding fails. report
 // forwards ffmpeg progress when non-nil.
-func (s *Renderer) cutAccurate(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase string, report func(float64)) (string, error) {
+func (s *Renderer) cutAccurate(ctx context.Context, src string, start, dur float64, audioOrdinal int, outBase, subFilter string, report func(float64)) (string, error) {
 	out := outBase + ".mp4"
-	if err := s.runTranscode(ctx, src, out, start, dur, audioOrdinal, s.accurateProfile(), report); err != nil {
+	if err := s.runTranscodeWithFilter(ctx, src, out, start, dur, audioOrdinal, s.accurateProfile(), subFilter, report); err != nil {
 		removePartial(out)
 		return "", fmt.Errorf("accurate cut failed: %w", err)
 	}
@@ -323,9 +353,9 @@ func (s *Renderer) cutAccurate(ctx context.Context, src string, start, dur float
 // cutGif renders a social-friendly looping animated GIF without audio,
 // preferring hardware-accelerated decoding when available and falling back to
 // CPU decoding on failure.
-func (s *Renderer) cutGif(ctx context.Context, src string, start, dur float64, outBase string, report func(float64)) (string, error) {
+func (s *Renderer) cutGif(ctx context.Context, src string, start, dur float64, outBase, subFilter string, report func(float64)) (string, error) {
 	out := outBase + ".gif"
-	if err := s.runGif(ctx, src, out, start, dur, report); err != nil {
+	if err := s.runGifWithFilter(ctx, src, out, start, dur, subFilter, report); err != nil {
 		removePartial(out)
 		return "", fmt.Errorf("gif cut failed: %w", err)
 	}
@@ -337,16 +367,24 @@ func (s *Renderer) cutGif(ctx context.Context, src string, start, dur float64, o
 // generation, Bayer dithering (avoiding temporal flicker), and rectangle
 // inter-frame differencing for compact file sizes.
 func gifFilter(res string, fps int) string {
-	return fmt.Sprintf(
-		"fps=%d,scale=%s:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle",
-		fps, res,
-	)
+	return gifFilterWithSub(res, fps, "")
+}
+
+// gifFilterWithSub appends an optional subtitle burn-in filter right after
+// scaling and before palettegen so subtitle colors are included in the GIF
+// palette and glyphs render crisply at the output resolution.
+func gifFilterWithSub(res string, fps int, subFilter string) string {
+	head := fmt.Sprintf("fps=%d,scale=%s:flags=lanczos", fps, res)
+	if subFilter != "" {
+		head += "," + subFilter
+	}
+	return head + ",split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle"
 }
 
 // gifArgs builds the ffmpeg invocation for an animated GIF cut. Hardware
 // acceleration applies to decoding only when hwDecode is non-empty; palette
 // generation and GIF encoding always run on the CPU.
-func gifArgs(hwDecode []string, res string, fps int, src string, start, dur float64, out string, progress bool) []string {
+func gifArgs(hwDecode []string, res string, fps int, subFilter, src string, start, dur float64, out string, progress bool) []string {
 	var prefix []string
 	if progress {
 		prefix = []string{"-progress", "pipe:1", "-nostats"}
@@ -357,14 +395,18 @@ func gifArgs(hwDecode []string, res string, fps int, src string, start, dur floa
 		hwDecode,
 		[]string{"-ss", fmt.Sprintf("%.3f", start), "-i", src, "-t", fmt.Sprintf("%.3f", dur), "-map", "0:v:0"},
 		[]string{"-an", "-dn", "-sn", "-map_chapters", "-1"},
-		[]string{"-vf", gifFilter(res, fps), "-loop", "0", out},
+		[]string{"-vf", gifFilterWithSub(res, fps, subFilter), "-loop", "0", out},
 	)
 }
 
-// runGif executes the GIF render, preferring hardware decode into system
-// memory when available and retrying on software decode when hardware decode
-// fails.
+// runGif executes the GIF render without subtitle burn-in.
 func (s *Renderer) runGif(ctx context.Context, src, out string, start, dur float64, report func(float64)) error {
+	return s.runGifWithFilter(ctx, src, out, start, dur, "", report)
+}
+
+// runGifWithFilter executes the GIF render, preferring hardware decode into
+// system memory when available and retrying on software decode on failure.
+func (s *Renderer) runGifWithFilter(ctx context.Context, src, out string, start, dur float64, subFilter string, report func(float64)) error {
 	hwCaps := s.cfg.Hw.Capabilities()
 	progress := report != nil
 	run := func(args []string) error { return runFFmpeg(ctx, args) }
@@ -372,7 +414,7 @@ func (s *Renderer) runGif(ctx context.Context, src, out string, start, dur float
 		run = func(args []string) error { return runFFmpegProgress(ctx, args, dur, report) }
 	}
 	if hwDecode := hwCaps.DecodeArgs(); len(hwDecode) > 0 {
-		if err := run(gifArgs(hwDecode, s.cfg.GifRes, s.cfg.GifFPS, src, start, dur, out, progress)); err != nil {
+		if err := run(gifArgs(hwDecode, s.cfg.GifRes, s.cfg.GifFPS, subFilter, src, start, dur, out, progress)); err != nil {
 			log.Printf("[clips] %s gif decode failed (%v), falling back to cpu", hwCaps.Backend, err)
 			s.cfg.Hw.RecordFallback(err.Error(), time.Now().UnixMilli())
 			removePartial(out)
@@ -382,7 +424,7 @@ func (s *Renderer) runGif(ctx context.Context, src, out string, start, dur float
 		}
 	}
 	s.cfg.Hw.RecordCPU()
-	return run(gifArgs(nil, s.cfg.GifRes, s.cfg.GifFPS, src, start, dur, out, progress))
+	return run(gifArgs(nil, s.cfg.GifRes, s.cfg.GifFPS, subFilter, src, start, dur, out, progress))
 }
 
 // audioMapArgs maps the media's chosen English audio stream. Optional '?' keeps
@@ -478,16 +520,21 @@ func transcodeArgs(plan hardware.Pipeline, prof encProfile, src string, audioOrd
 	)
 }
 
-// runTranscode renders one transcoded clip, trying the hardware pipeline
-// first and falling back to CPU libx264 when the hardware attempt fails
-// (hardware encoders can fail mid-run on driver hiccups or unsupported input).
-// When report is non-nil, ffmpeg progress is parsed and forwarded (0..1).
+// runTranscode renders one transcoded clip without extra CPU filters.
 func (s *Renderer) runTranscode(ctx context.Context, src, out string, start, dur float64,
 	audioOrdinal int, prof encProfile, report func(float64)) error {
+	return s.runTranscodeWithFilter(ctx, src, out, start, dur, audioOrdinal, prof, "", report)
+}
+
+// runTranscodeWithFilter renders one transcoded clip with an optional CPU
+// video filter (such as libass subtitle burn-in), trying the hardware pipeline
+// first and falling back to CPU libx264 when the hardware attempt fails.
+func (s *Renderer) runTranscodeWithFilter(ctx context.Context, src, out string, start, dur float64,
+	audioOrdinal int, prof encProfile, cpuFilter string, report func(float64)) error {
 
 	hwCaps := s.cfg.Hw.Capabilities()
-	hwPlan := hwCaps.Pipeline(prof.res)
-	cpuPlan := hardware.Capabilities{}.Pipeline(prof.res)
+	hwPlan := hwCaps.PipelineWithCPUFilter(prof.res, cpuFilter)
+	cpuPlan := hardware.Capabilities{}.PipelineWithCPUFilter(prof.res, cpuFilter)
 	progress := report != nil
 	run := func(args []string) error { return runFFmpeg(ctx, args) }
 	if progress {
@@ -597,10 +644,18 @@ func runFFmpegProgress(ctx context.Context, args []string, dur float64, report f
 
 // AsyncJobPayload is the job payload used for long accurate cuts.
 func AsyncJobPayload(r Request) string {
-	b, _ := json.Marshal(map[string]any{ //nolint:errcheck // the map holds only JSON scalars, so marshaling cannot fail
+	m := map[string]any{
 		"mediaId": r.MediaID, "start": r.Start, "end": r.End, "padMs": r.PadMs,
 		"mode": r.Mode,
-	})
+	}
+	if r.Subtitles != nil && r.Subtitles.Enabled {
+		if norm, err := NormalizeSubtitleStyle(*r.Subtitles); err == nil {
+			m["subtitles"] = norm
+		} else {
+			m["subtitles"] = *r.Subtitles
+		}
+	}
+	b, _ := json.Marshal(m) //nolint:errcheck // the map holds only JSON-serializable scalars and structs
 	return string(b)
 }
 
@@ -608,16 +663,20 @@ func AsyncJobPayload(r Request) string {
 func (s *Service) JobHandler() func(ctx context.Context, j *store.Job, progress func(float64)) error {
 	return func(ctx context.Context, j *store.Job, progress func(float64)) error {
 		var payload struct {
-			Mode    string  `json:"mode"`
-			MediaID int64   `json:"mediaId"`
-			Start   float64 `json:"start"`
-			End     float64 `json:"end"`
-			PadMs   int     `json:"padMs"`
+			Subtitles *SubtitleStyle `json:"subtitles,omitempty"`
+			Mode      string         `json:"mode"`
+			MediaID   int64          `json:"mediaId"`
+			Start     float64        `json:"start"`
+			End       float64        `json:"end"`
+			PadMs     int            `json:"padMs"`
 		}
 		if err := json.Unmarshal([]byte(j.Payload), &payload); err != nil {
 			return fmt.Errorf("bad payload: %w", err)
 		}
-		r := Request{MediaID: payload.MediaID, Start: payload.Start, End: payload.End, PadMs: payload.PadMs, Mode: payload.Mode}
+		r := Request{
+			MediaID: payload.MediaID, Start: payload.Start, End: payload.End,
+			PadMs: payload.PadMs, Mode: payload.Mode, Subtitles: payload.Subtitles,
+		}
 		if r.Mode == "" {
 			r.Mode = "accurate"
 		}

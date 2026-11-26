@@ -1,0 +1,14 @@
+Bundled Google Fonts Assets
+===========================
+
+The TrueType (.ttf) font files in internal/fonts/assets/ are open-source fonts
+sourced from Google Fonts (https://fonts.google.com) under the SIL Open Font
+License, Version 1.1 (OFL-1.1):
+
+- Inter (Regular 400, Bold 700) — SIL Open Font License 1.1
+- Montserrat (Regular 400, Bold 700) — SIL Open Font License 1.1
+- Oswald (Regular 400, Bold 700) — SIL Open Font License 1.1
+- Roboto (Regular 400, Bold 700) — SIL Open Font License 1.1
+- Merriweather (Regular 400, Bold 700) — SIL Open Font License 1.1
+- JetBrains Mono (Regular 400, Bold 700) — SIL Open Font License 1.1
+- Bangers (Regular 400) — SIL Open Font License 1.1

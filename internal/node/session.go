@@ -470,7 +470,10 @@ func (s *session) runClip(ctx context.Context, w *nodes.Work, report func(float6
 	if err != nil {
 		return err
 	}
-	req := clips.Request{MediaID: w.Media.ID, Start: w.Clip.Start, End: w.Clip.End, PadMs: w.Clip.PadMs, Mode: w.Clip.Mode}
+	req := clips.Request{
+		MediaID: w.Media.ID, Start: w.Clip.Start, End: w.Clip.End, PadMs: w.Clip.PadMs,
+		Mode: w.Clip.Mode, Subtitles: w.Clip.Subtitles,
+	}
 	// The renderer mirrors the server's encoding profile so the uploaded
 	// file matches the cache key the server registers.
 	svc := clips.NewRenderer(clips.Config{
@@ -485,7 +488,7 @@ func (s *session) runClip(ctx context.Context, w *nodes.Work, report func(float6
 		DefaultPadMs: w.Clips.DefaultPadMs,
 		Hw:           s.hw,
 	})
-	path, ext, rerr := svc.RenderLocal(ctx, localPath, w.Clip.AudioOrdinal, req, report)
+	path, ext, rerr := svc.RenderLocalWithSubtitles(ctx, localPath, w.Clip.AudioOrdinal, w.Clip.Width, w.Clip.Height, req, w.Clip.Cues, report)
 	if rerr != nil {
 		return rerr
 	}

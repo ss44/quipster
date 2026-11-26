@@ -220,3 +220,30 @@ func (s *Store) cueAtIdx(mediaFileID int64, idx int) ([]Cue, error) {
 	}
 	return []Cue{c}, nil
 }
+
+// CuesBetween returns cues for a media file that overlap [startSec, endSec],
+// ordered by cue index. A small epsilon avoids bleeding adjacent cues whose
+// timestamps touch the clip boundaries after millisecond rounding.
+func (s *Store) CuesBetween(mediaFileID int64, startSec, endSec float64) ([]Cue, error) {
+	const eps = 0.005
+	lo, hi := startSec, endSec
+	if hi-lo > 4*eps {
+		lo += eps
+		hi -= eps
+	}
+	rows, err := s.db.Query(`SELECT id, media_file_id, track_id, idx, start_sec, end_sec, text, COALESCE(chunk_id,0) FROM cues
+		WHERE media_file_id=? AND start_sec < ? AND end_sec > ? ORDER BY idx`, mediaFileID, hi, lo)
+	if err != nil {
+		return nil, err
+	}
+	defer closeRows(rows)
+	var out []Cue
+	for rows.Next() {
+		var c Cue
+		if scanErr := rows.Scan(&c.ID, &c.MediaFileID, &c.TrackID, &c.Idx, &c.StartSec, &c.EndSec, &c.Text, &c.ChunkID); scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}

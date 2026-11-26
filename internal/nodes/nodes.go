@@ -119,14 +119,20 @@ type MediaRef struct {
 }
 
 // ClipWork carries the clip parameters a node needs to render without
-// touching the store: the request plus the audio stream ordinal chosen by
-// the server's probe.
+// touching the store: the request, the audio stream ordinal, video dimensions,
+// and any resolved subtitle cues when burn-in is requested.
+//
+//nolint:govet // field grouping favors readability over optimal alignment.
 type ClipWork struct {
-	Mode         string  `json:"mode"`
-	Start        float64 `json:"start"`
-	End          float64 `json:"end"`
-	PadMs        int     `json:"padMs"`
-	AudioOrdinal int     `json:"audioOrdinal"`
+	Mode         string               `json:"mode"`
+	Start        float64              `json:"start"`
+	End          float64              `json:"end"`
+	PadMs        int                  `json:"padMs"`
+	AudioOrdinal int                  `json:"audioOrdinal"`
+	Width        int                  `json:"width,omitempty"`
+	Height       int                  `json:"height,omitempty"`
+	Subtitles    *clips.SubtitleStyle `json:"subtitles,omitempty"`
+	Cues         []clips.SubtitleCue  `json:"cues,omitempty"`
 }
 
 // Work is a claimed job as seen by a node.
@@ -361,7 +367,22 @@ func (s *Service) toWork(j *store.Job) (*Work, error) {
 		if err != nil {
 			return s.finishLease(j, "bad clip payload")
 		}
-		w.Clip = &ClipWork{Mode: req.Mode, Start: req.Start, End: req.End, PadMs: req.PadMs, AudioOrdinal: m.AudioStreamIndex}
+		cw := &ClipWork{
+			Mode: req.Mode, Start: req.Start, End: req.End, PadMs: req.PadMs,
+			AudioOrdinal: m.AudioStreamIndex, Width: m.Width, Height: m.Height,
+			Subtitles: req.Subtitles,
+		}
+		if req.Subtitles != nil && req.Subtitles.Enabled {
+			cues, cerr := s.st.CuesBetween(m.ID, req.Start, req.End)
+			if cerr != nil {
+				return nil, cerr
+			}
+			cw.Cues = make([]clips.SubtitleCue, len(cues))
+			for i, c := range cues {
+				cw.Cues[i] = clips.SubtitleCue{Start: c.StartSec, End: c.EndSec, Text: c.Text}
+			}
+		}
+		w.Clip = cw
 		w.Clips = &s.cfg.Clips
 	}
 	return w, nil
@@ -373,11 +394,12 @@ func (s *Service) toWork(j *store.Job) (*Work, error) {
 // absent or non-positive padMs values.
 func clipRequestFromPayload(payload string, padDefault int) (clips.Request, error) {
 	var cp struct {
-		Mode    string  `json:"mode"`
-		MediaID int64   `json:"mediaId"`
-		Start   float64 `json:"start"`
-		End     float64 `json:"end"`
-		PadMs   int     `json:"padMs"`
+		Subtitles *clips.SubtitleStyle `json:"subtitles,omitempty"`
+		Mode      string               `json:"mode"`
+		MediaID   int64                `json:"mediaId"`
+		Start     float64              `json:"start"`
+		End       float64              `json:"end"`
+		PadMs     int                  `json:"padMs"`
 	}
 	if err := json.Unmarshal([]byte(payload), &cp); err != nil {
 		return clips.Request{}, err
@@ -389,7 +411,10 @@ func clipRequestFromPayload(payload string, padDefault int) (clips.Request, erro
 	if cp.PadMs <= 0 {
 		cp.PadMs = padDefault
 	}
-	return clips.Request{MediaID: cp.MediaID, Start: cp.Start, End: cp.End, PadMs: cp.PadMs, Mode: cp.Mode}, nil
+	return clips.Request{
+		MediaID: cp.MediaID, Start: cp.Start, End: cp.End, PadMs: cp.PadMs,
+		Mode: cp.Mode, Subtitles: cp.Subtitles,
+	}, nil
 }
 
 // finishLease marks an unexecutable lease as errored and reports no work so

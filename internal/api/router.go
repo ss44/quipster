@@ -108,6 +108,8 @@ func Router(d Deps) http.Handler {
 	r.Get("/api/chunks/{id}", d.handleChunk)
 	r.Get("/api/quotes", d.handleQuotes)
 	r.Get("/api/clips/stream", d.handleClipStream)
+	r.Get("/api/fonts", d.handleFontsList)
+	r.Get("/api/fonts/{file}", d.handleFontFile)
 
 	// Admin (token-guarded when configured)
 	r.Group(func(r chi.Router) {
