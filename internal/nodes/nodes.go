@@ -391,30 +391,9 @@ func (s *Service) toWork(j *store.Job) (*Work, error) {
 // clipRequestFromPayload decodes a clip job payload with the same defaults the
 // clip service applies, so claim responses and result registration always
 // derive the identical cache key. padDefault is the configured fallback for
-// absent or non-positive padMs values.
+// omitted or negative padMs values while explicit padMs=0 is preserved.
 func clipRequestFromPayload(payload string, padDefault int) (clips.Request, error) {
-	var cp struct {
-		Subtitles *clips.SubtitleStyle `json:"subtitles,omitempty"`
-		Mode      string               `json:"mode"`
-		MediaID   int64                `json:"mediaId"`
-		Start     float64              `json:"start"`
-		End       float64              `json:"end"`
-		PadMs     int                  `json:"padMs"`
-	}
-	if err := json.Unmarshal([]byte(payload), &cp); err != nil {
-		return clips.Request{}, err
-	}
-	if cp.Mode == "" {
-		// Mirror the clip service's async default.
-		cp.Mode = "accurate"
-	}
-	if cp.PadMs <= 0 {
-		cp.PadMs = padDefault
-	}
-	return clips.Request{
-		MediaID: cp.MediaID, Start: cp.Start, End: cp.End, PadMs: cp.PadMs,
-		Mode: cp.Mode, Subtitles: cp.Subtitles,
-	}, nil
+	return clips.ParseAsyncJobPayload(payload, padDefault)
 }
 
 // finishLease marks an unexecutable lease as errored and reports no work so
