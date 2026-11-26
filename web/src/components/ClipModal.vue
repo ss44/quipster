@@ -188,12 +188,33 @@
         </section>
 
         <div class="side-col">
-          <aside class="transcript">
+          <aside class="transcript" :class="{ collapsed: sideTab !== 'transcript' }">
             <header class="transcript-head">
-              <span class="panel-title">Transcript</span>
-              <span class="mono muted">{{ selectedCount }}/{{ cues.length }}</span>
+              <button
+                type="button"
+                class="transcript-toggle"
+                :aria-expanded="sideTab === 'transcript'"
+                aria-controls="clip-transcript-body"
+                @click="toggleTranscript"
+              >
+                <span class="transcript-toggle-left">
+                  <svg
+                    v-if="cues.length > 0"
+                    class="chevron"
+                    :class="{ rotated: sideTab === 'transcript' }"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 16 16"
+                    aria-hidden="true"
+                  >
+                    <path d="M4.5 6l3.5 4 3.5-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                  <span class="panel-title">Transcript</span>
+                </span>
+                <span class="mono muted">{{ selectedCount }}/{{ cues.length }}</span>
+              </button>
             </header>
-            <div class="scroll">
+            <div v-if="sideTab === 'transcript'" id="clip-transcript-body" class="scroll">
               <button
                 v-for="(c, i) in cues"
                 :key="c.idx"
@@ -211,6 +232,8 @@
           <SubtitleStylePanel
             v-if="cues.length > 0"
             v-model="subtitleStyle"
+            :expanded="sideTab === 'subtitles'"
+            @update:expanded="sideTab = $event ? 'subtitles' : 'transcript'"
           />
         </div>
       </div>
@@ -232,12 +255,14 @@ import SubtitleOverlay from './clip/SubtitleOverlay.vue'
 import SubtitleStylePanel from './clip/SubtitleStylePanel.vue'
 
 type OutputMode = 'fast' | 'accurate' | 'gif'
+type SideTab = 'transcript' | 'subtitles'
 
 const open = ref(false)
 const detail = ref<ChunkDetail | null>(null)
 const detailLoading = ref(false)
 const hit = ref<Hit | null>(null)
 const sel = ref<[number, number]>([0, 0])
+const sideTab = ref<SideTab>('transcript')
 const subtitleStyle = ref<SubtitleStyle>(loadSubtitleStyle())
 const outputMode = ref<OutputMode>(subtitleStyle.value.enabled ? 'accurate' : 'fast')
 const downloadPending = ref(false)
@@ -334,6 +359,14 @@ watch(playerRef, (el) => {
   }
 })
 
+function toggleTranscript() {
+  if (sideTab.value === 'transcript') {
+    if (cues.value.length > 0) sideTab.value = 'subtitles'
+    return
+  }
+  sideTab.value = 'transcript'
+}
+
 function setMode(value: unknown) {
   if (value === 'fast' && subtitleStyle.value.enabled) return
   if (value === 'fast' || value === 'accurate' || value === 'gif') {
@@ -362,6 +395,7 @@ async function onOpenClip(e: Event) {
   clipError.value = ''
   previewFailed.value = false
   jobProgress.value = null
+  sideTab.value = 'transcript'
   videoCurrentTime.value = 0
   videoWidth.value = 0
   videoHeight.value = 0
@@ -870,12 +904,43 @@ function pad(value: number): string {
   background: rgba(255, 255, 255, 0.015);
   overflow: hidden;
 }
+.transcript.collapsed {
+  flex: 0 0 auto;
+}
 .transcript-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 11px 14px;
   border-bottom: 1px solid var(--border);
+}
+.transcript.collapsed .transcript-head {
+  border-bottom: none;
+}
+.transcript-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+}
+.transcript-toggle-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.chevron {
+  color: var(--muted);
+  transition: transform 140ms ease;
+  flex-shrink: 0;
+}
+.chevron.rotated {
+  transform: rotate(180deg);
 }
 .panel-title {
   font-size: 11px;

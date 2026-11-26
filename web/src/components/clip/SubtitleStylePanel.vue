@@ -6,7 +6,7 @@
         class="sub-collapse-btn"
         :aria-expanded="expanded"
         aria-controls="subtitle-style-body"
-        @click="expanded = !expanded"
+        @click="emit('update:expanded', !expanded)"
       >
         <svg class="chevron" :class="{ rotated: expanded }" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
           <path d="M4.5 6l3.5 4 3.5-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
@@ -303,10 +303,12 @@ import {
 
 const props = defineProps<{
   modelValue: SubtitleStyle
+  expanded: boolean
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: SubtitleStyle]
+  'update:expanded': [value: boolean]
 }>()
 
 const local = ref<SubtitleStyle>({ ...props.modelValue })
@@ -317,8 +319,6 @@ watch(
   },
   { deep: true },
 )
-
-const expanded = ref(props.modelValue.enabled)
 
 const positions: { value: SubtitlePosition; label: string }[] = [
   { value: 'top', label: 'Top' },
@@ -336,7 +336,7 @@ function patch(updates: Partial<SubtitleStyle>) {
 }
 
 function onToggleEnabled(enabled: boolean) {
-  if (enabled) expanded.value = true
+  if (enabled) emit('update:expanded', true)
   patch({ enabled })
 }
 
@@ -356,6 +356,12 @@ function resetStyle() {
   background: rgba(255, 255, 255, 0.015);
   overflow: hidden;
   flex-shrink: 0;
+}
+.sub-editor.open {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .sub-editor-head {
   display: flex;
@@ -458,7 +464,7 @@ function resetStyle() {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 290px;
+  max-height: 440px;
   overflow-y: auto;
 }
 .sub-presets {
